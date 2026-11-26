@@ -134,6 +134,8 @@ Install [just](https://github.com/casey/just) to use these recipes.
 The platform installer builds a release and adds the app to your desktop.
 On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
+`just uninstall` removes what the installer added, asking before it deletes;
+`just uninstall -- --purge` also deletes `~/.config/herdr-app`.
 
 Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
 

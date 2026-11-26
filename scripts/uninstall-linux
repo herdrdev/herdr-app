@@ -1,0 +1,70 @@
+#!/bin/bash
+# Removes what scripts/install-linux added for the current user.
+set -euo pipefail
+
+purge=0
+for arg in "$@"; do
+  if [[ $arg == --purge ]]; then purge=1; fi
+done
+
+[[ $(uname -s) == Linux ]] || { echo 'This uninstaller is for Linux.' >&2; exit 1; }
+
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+link="$HOME/.local/bin/herdr-app"
+desktop="$data/applications/herdr-app.desktop"
+icon="$data/icons/hicolor/scalable/apps/herdr-app.svg"
+config="${HERDR_APP_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-app}"
+
+if pgrep -x herdr-app >/dev/null 2>&1; then
+  echo 'herdr-app is still running. Quit it, then re-run this uninstaller.' >&2
+  exit 1
+fi
+
+ours() { [[ -L $link ]] && [[ $(readlink "$link") == */target/release/herdr-app ]]; }
+
+removals=()
+if ours; then removals+=("Launcher: $link (was $(readlink "$link"))"); fi
+if [[ -L $link ]] && ! ours; then
+  echo "Note: $link points to $(readlink "$link"), not a checkout build. Left in place." >&2
+fi
+if [[ -f $desktop ]]; then removals+=("Menu entry: $desktop"); fi
+if [[ -f $icon ]]; then removals+=("Icon: $icon"); fi
+if [[ $purge -eq 1 && -e $config ]]; then removals+=("App data, including layouts and mods: $config"); fi
+if [[ ${#removals[@]} -eq 0 ]]; then
+  echo 'Nothing to remove: the Herdr install is already gone.'
+  exit 0
+fi
+
+echo 'This will remove:'
+printf '  %s\n' "${removals[@]}"
+if [[ $purge -eq 1 ]]; then
+  echo '  --purge deletes the app data; it cannot be restored.'
+fi
+printf 'Remove all of it? [y/N] '
+read -r answer
+if [[ $answer != y && $answer != Y ]]; then
+  echo 'Aborted, nothing was removed.'
+  exit 1
+fi
+
+if ours; then
+  rm "$link"
+  echo "Removed $link"
+fi
+if [[ -f $desktop ]]; then
+  rm "$desktop"
+  echo "Removed $desktop"
+fi
+if [[ -f $icon ]]; then
+  rm "$icon"
+  echo "Removed $icon"
+fi
+# Same refresh calls as the installer so the desktop sees the removal.
+update-desktop-database "$data/applications" 2>/dev/null || true
+[[ -f $data/icons/hicolor/icon-theme.cache ]] && gtk-update-icon-cache -f -t "$data/icons/hicolor" >/dev/null 2>&1 || true
+command -v dbus-send >/dev/null 2>&1 && dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
+if [[ $purge -eq 1 && -e $config ]]; then
+  rm -rf "$config"
+  echo "Removed $config"
+fi
+echo 'Uninstalled herdr-app.'

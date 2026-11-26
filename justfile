@@ -57,10 +57,22 @@ docs-check: build
 install:
     bash scripts/install-linux
 
+[linux]
+uninstall:
+    bash scripts/uninstall-linux
+
 [macos]
 install:
     bash scripts/install-macos
 
+[macos]
+uninstall:
+    bash scripts/uninstall-macos
+
 [windows]
 install:
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1
+
+[windows]
+uninstall:
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall-windows.ps1

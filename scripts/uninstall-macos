@@ -1,0 +1,61 @@
+#!/bin/bash
+# Removes what scripts/install-macos added for the current user.
+set -euo pipefail
+
+purge=0
+for arg in "$@"; do
+  if [[ $arg == --purge ]]; then purge=1; fi
+done
+
+[[ $(uname -s) == Darwin ]] || { echo 'This uninstaller requires macOS.' >&2; exit 1; }
+
+app="$HOME/Applications/Herdr.app"
+link="$HOME/.local/bin/herdr-app"
+data="${HERDR_APP_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-app}"
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+if pgrep -x Herdr >/dev/null 2>&1; then
+  echo 'Herdr is still running. Quit it, then re-run this uninstaller.' >&2
+  exit 1
+fi
+
+ours() { [[ -L $link ]] && [[ $(readlink "$link") == "$app/Contents/MacOS/Herdr" ]]; }
+
+removals=()
+if [[ -e $app ]]; then removals+=("App: $app"); fi
+if ours; then removals+=("Launcher: $link"); fi
+if [[ -L $link ]] && ! ours; then
+  echo "Note: $link points to $(readlink "$link"), not the installed app. Left in place." >&2
+fi
+if [[ $purge -eq 1 && -e $data ]]; then removals+=("App data, including layouts and mods: $data"); fi
+if [[ ${#removals[@]} -eq 0 ]]; then
+  echo 'Nothing to remove: the Herdr install is already gone.'
+  exit 0
+fi
+
+echo 'This will remove:'
+printf '  %s\n' "${removals[@]}"
+if [[ $purge -eq 1 ]]; then
+  echo '  --purge deletes the app data; it cannot be restored.'
+fi
+printf 'Remove all of it? [y/N] '
+read -r answer
+if [[ $answer != y && $answer != Y ]]; then
+  echo 'Aborted, nothing was removed.'
+  exit 1
+fi
+
+if [[ -e $app ]]; then
+  "$lsregister" -u "$app"
+  rm -rf "$app"
+  echo "Removed $app"
+fi
+if ours; then
+  rm "$link"
+  echo "Removed $link"
+fi
+if [[ $purge -eq 1 && -e $data ]]; then
+  rm -rf "$data"
+  echo "Removed $data"
+fi
+echo 'Uninstalled Herdr.'
