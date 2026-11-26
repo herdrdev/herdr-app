@@ -130,6 +130,8 @@ the highlighted line shows where it will land.
   agent and shows the shell again after exit. Double-click a tab to set its name.
   Drag a tab to reorder it. The held tab follows the pointer across the
   window, and the outline shows where it will land in the bar.
+  On macOS, dropping outside the window opens the tab in its own window.
+  Drag its title bar onto the original tab bar, or close it, to put it back.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
@@ -617,6 +619,7 @@ The main ones:
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
+  `tab.detach {id, x?, y?}` (macOS: separate window; x/y are a drop outside the window, in window pixels),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).

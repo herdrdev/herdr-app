@@ -5,6 +5,7 @@
 //! anything: keys, mods, menus and agents all run them.
 
 use crate::hc::Core;
+mod detached;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -411,6 +412,8 @@ pub struct AppWindow {
     divider_hover_epoch: u64,
     divider_window_hovered: bool,
     model: Model,
+    detached_tabs: HashMap<String, WindowHandle<detached::DetachedTab>>,
+    tab_drop_target: bool,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
@@ -546,6 +549,8 @@ impl AppWindow {
             divider_hover_epoch: 0,
             divider_window_hovered: true,
             model: Model::default(),
+            detached_tabs: HashMap::new(),
+            tab_drop_target: false,
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
@@ -617,6 +622,7 @@ impl AppWindow {
             _visibility: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
+        cx.on_release(|this, cx| this.close_detached_tabs(cx)).detach();
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
@@ -1316,10 +1322,9 @@ impl AppWindow {
                 }
             }
         }
-        if self.shows_tab()
-            && let Some(c) = self.model.active_tab()
-        {
-            let header = self.pane_frame().and_then(|f| f.header.as_ref()).and_then(|h| match &h.content {
+        let main_tab = self.main_tab().filter(|_| self.shows_tab());
+        for c in main_tab.into_iter().chain(self.detached_tabs.keys().filter_map(|id| self.model.tab(id))) {
+            let header = self.pane_frame().filter(|_| main_tab.is_some_and(|tab| tab.id == c.id)).and_then(|f| f.header.as_ref()).and_then(|h| match &h.content {
                 HeaderContent::Mod { name, props } => Some((name.clone(), props.clone())),
                 HeaderContent::Builtin(_) => None,
             });
@@ -1475,7 +1480,11 @@ impl AppWindow {
 
     /// What's on screen now, for done-vs-seen.
     fn visible_addresses(&self) -> Vec<String> {
-        let (terms, _) = self.visible();
+        let (mut terms, _) = self.visible();
+        if !self.detached_tabs.is_empty() {
+            terms.retain(|(id, _)| !self.model.tab_of(id.trim_end_matches(SWAP))
+                .is_some_and(|tab| self.detached_tabs.contains_key(&tab.id)));
+        }
         // A swapped-in terminal is drawn instead of its pane's own.
         let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
         let mut out: Vec<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(_, a)| a.clone()).collect();
@@ -1556,6 +1565,7 @@ impl AppWindow {
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_detached_tabs(cx);
         self.enroll_link_handlers();
         self.refresh_link_handlers();
         self.model.order_spaces();
@@ -1650,7 +1660,7 @@ impl AppWindow {
         self.publish_shown_copies();
 
         // Keyboard to the focused pane when it changes (never steal it from an open dialog).
-        let model_pane = self.model.focused_pane();
+        let model_pane = self.main_tab().and_then(Tab::focused_pane);
         let block = terminal_block(&self.chrome, self.focused_pane.as_deref());
         let focused = if block.is_some() && model_pane == self.synced_model_pane {
             self.focused_pane.clone()
@@ -1940,7 +1950,16 @@ impl AppWindow {
                 // The branch of the terminal the space shows first.
                 let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
                 let branch = first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone());
-                model::space_json(m, p, i, branch.as_deref(), &home)
+                let mut value = model::space_json(m, p, i, branch.as_deref(), &home);
+                if !self.detached_tabs.is_empty() {
+                    for tab in value["tabs"].as_array_mut().into_iter().flatten() {
+                        if tab["id"].as_str().is_some_and(|id| self.detached_tabs.contains_key(id)) {
+                            tab["detached"] = json!(true);
+                            tab["active"] = json!(false);
+                        }
+                    }
+                }
+                value
             })
             .collect();
         // A window's terminal with the keyboard first, then a layout terminal block.
@@ -3276,6 +3295,7 @@ impl AppWindow {
                 };
                 if !moved { return self.fail(format!("no tab {id:?}")); }
             }
+            "tab.detach" => return self.detach_tab(a, window, cx),
             "pane.rename" => {
                 let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to rename") };
                 let Some(name) = Self::arg(a, "name") else { return self.fail("pane.rename needs name (empty: unnamed)") };
@@ -3297,8 +3317,12 @@ impl AppWindow {
                 // By position among the tabs the lists show (settled ones are put away).
                 let id = Self::owned(a, "id").or_else(|| {
                     let i = a.get("index").and_then(Value::as_u64)? as usize;
-                    self.model.active_space()?.tabs.iter().filter(|c| c.settled.is_none()).nth(i.checked_sub(1)?).map(|c| c.id.clone())
+                    self.model.active_space()?.tabs.iter().filter(|c| c.settled.is_none() && !self.detached_tabs.contains_key(&c.id)).nth(i.checked_sub(1)?).map(|c| c.id.clone())
                 });
+                if let Some(win) = id.as_ref().and_then(|id| self.detached_tabs.get(id)).copied() {
+                    let _ = win.update(cx, |_, win, _| win.activate_window());
+                    return;
+                }
                 if !id.is_some_and(|id| self.model.select_tab(&id)) {
                     return self.fail("no such tab");
                 }
@@ -3309,7 +3333,7 @@ impl AppWindow {
                 {
                     let n = p.tabs.len();
                     let step = |k: usize| if name == "tab.next" { (i + k) % n } else { (i + n * k - k) % n };
-                    if let Some(id) = (1..n).map(|k| &p.tabs[step(k)]).find(|c| c.settled.is_none()).map(|c| c.id.clone()) {
+                    if let Some(id) = (1..n).map(|k| &p.tabs[step(k)]).find(|c| c.settled.is_none() && !self.detached_tabs.contains_key(&c.id)).map(|c| c.id.clone()) {
                         self.model.select_tab(&id);
                     }
                 }
@@ -4232,7 +4256,8 @@ impl AppWindow {
                 "font_size": round(settings::font_size()),
                 "ui_font_size": round(settings::ui_font_size()),
                 "space": self.model.active,
-                "tab": self.model.active_tab().map(|c| c.id.clone()),
+                "tab": self.main_tab().map(|c| c.id.clone()),
+                "detached_tabs": self.detached_tabs.keys().collect::<BTreeSet<_>>(),
                 "focused_pane": self.focused_pane,
                 "layout": self.layout_name,
                 "agent": self.shown_agent(),
@@ -4573,7 +4598,7 @@ impl AppWindow {
             Some(Content::Context { pane, .. }) => pane.as_ref(),
             _ => None,
         })?;
-        let ctx = self.model.active_tab()?;
+        let ctx = self.main_tab()?;
         (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
     }
 
@@ -4693,6 +4718,9 @@ impl AppWindow {
                     div()
                         .size_full()
                         .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
+                            if this.focus_detached_pane(&id, cx) {
+                                return;
+                            }
                             // Overlay terminals keep their own focus; chrome blocks share the pane focus API.
                             if this.focused_pane.as_deref() != Some(id.as_str())
                                 && (this.model.tab_of(&id).is_some() || terminal_block(&this.chrome, Some(&id)).is_some())
@@ -4712,7 +4740,10 @@ impl AppWindow {
             },
             Content::Mod { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
-                Some(addr) => match self.agent_view(&n.id, &addr) {
+                Some(addr) => match self.agent_view(&n.id, &addr).filter(|_| {
+                    !self.model.pane_of(&addr).and_then(|pane| self.model.tab_of(&pane))
+                        .is_some_and(|tab| self.detached_tabs.contains_key(&tab.id))
+                }) {
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),
                     None => div().into_any_element(),
                 },
@@ -4725,9 +4756,11 @@ impl AppWindow {
                     .child("no agents yet. start claude, codex or pi in a terminal")
                     .into_any_element(),
             },
-            Content::Context { .. } => match self.model.active_tab() {
+            Content::Context { .. } => match self.main_tab() {
                 Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
+                None if self.model.active_tab().is_some() => div().size_full().flex().items_center().justify_center()
+                    .text_color(c("dim")).child("This tab is open in another window.").into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
                     div()
@@ -4755,7 +4788,7 @@ impl AppWindow {
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
                     d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                        if this.focused_pane.as_deref() != Some(id.as_str()) {
+                        if !this.focus_detached_pane(&id, cx) && this.focused_pane.as_deref() != Some(id.as_str()) {
                             this.model.focus_pane(&id);
                             this.focused_pane = Some(id.clone());
                             this.publish(cx);
@@ -5688,6 +5721,7 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        let tab_drop_target = self.tab_drop_outline();
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -5769,6 +5803,7 @@ impl Render for AppWindow {
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
+            .children(tab_drop_target)
             .child(crate::bench::frame_end())
     }
 }

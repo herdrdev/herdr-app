@@ -4,12 +4,12 @@ fn the_shipped_tab_follows_the_pointer_before_reordering() {
 }
 
 #[gpui::test]
-fn tab_strip_drag(cx: &mut gpui::TestAppContext) {
+fn tab_strip_drag(app_cx: &mut gpui::TestAppContext) {
     use gpui::{Modifiers, MouseButton, point, px, size};
     use serde_json::json;
     if !running_alone("tab_strip_drag") { return; }
 
-    let (view, cx) = open_window(cx, "tabs", include_str!("../../defaults/mods/tabs/main.js"), json!({
+    let (view, cx) = open_window(app_cx, "tabs", include_str!("../../defaults/mods/tabs/main.js"), json!({
         "id": "root", "type": "column", "titlebar": "none", "children": [
             { "id": "tabs", "type": "block", "size": { "px": 42 }, "content": { "mod": "tabs" } },
             { "id": "body", "type": "block", "content": { "tab": "active" } }
@@ -76,10 +76,42 @@ fn tab_strip_drag(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
     assert_eq!(order(cx), ["t1", "t2", "t3"]);
 
-    drag(cx);
-    cx.simulate_mouse_up(end, MouseButton::Left, none);
-    cx.run_until_parked();
-    assert_eq!(order(cx), ["t2", "t3", "t1"]);
+    #[cfg(target_os = "macos")]
+    {
+        let main = cx.update(|window, _| window.window_handle());
+        let terminal = view.read_with(cx, |this, _| this.terms["first"].view.clone());
+        let outside = point(px(810.), end.y);
+        drag(cx);
+        cx.simulate_mouse_move(outside, MouseButton::Left, none);
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        cx.run_until_parked();
+        let detached = view.read_with(cx, |this, _| {
+            assert!(this.terms["first"].view == terminal);
+            assert_eq!(this.main_tab().unwrap().id, "t2");
+            this.detached_tabs["t1"]
+        });
+        let mut detached_cx = gpui::VisualTestContext::from_window(detached.into(), app_cx);
+        assert!(detached_cx.simulate_close());
+        detached_cx.update(|window, _| window.remove_window());
+        let mut main_cx = gpui::VisualTestContext::from_window(main, app_cx);
+        draw(&mut main_cx);
+        view.read_with(&main_cx, |this, _| {
+            assert!(this.detached_tabs.is_empty());
+            assert_eq!(this.main_tab().unwrap().id, "t1");
+            assert!(this.terms["first"].view == terminal);
+        });
+        drag(&mut main_cx);
+        main_cx.simulate_mouse_up(end, MouseButton::Left, none);
+        main_cx.run_until_parked();
+        assert_eq!(order(&mut main_cx), ["t2", "t3", "t1"]);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        drag(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, none);
+        cx.run_until_parked();
+        assert_eq!(order(cx), ["t2", "t3", "t1"]);
+    }
 }
 
 #[test]

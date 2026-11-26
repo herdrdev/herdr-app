@@ -76,7 +76,8 @@ export default class Tabs extends View {
       }
     }
     if (released) {
-      if (to !== from) run("tab.move", { id: drag.id, index: to + 1 });
+      if (to !== from) run("tab.move", { id: drag.id, index: shown[to].index ?? to + 1 });
+      else if (!inside && window()?.platform === "macos") run("tab.detach", { id: drag.id, x, y });
     } else {
       drag.preview = { inside, to, x: (p.x - drag.grab.x) / zoom, y: (p.y - drag.grab.y) / zoom };
       cx.notify();
@@ -137,7 +138,7 @@ export default class Tabs extends View {
   render() {
     const t = theme();
     const space = spaces().find(p => p.active);
-    const shown = space?.tabs ?? [];
+    const shown = space?.tabs.filter(tab => !tab.detached) ?? [];
     const zoom = settings().zoom;
     const ids = new Set(shown.map(tab => tab.id));
     if (this.drag && (this.drag.space !== space?.id || !ids.has(this.drag.id))) this.drag = null;
