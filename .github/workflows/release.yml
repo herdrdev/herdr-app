@@ -75,9 +75,11 @@ jobs:
       - name: Build herdr-core and repack tarball
         run: |
           set -euo pipefail
-          core_ver=$(tr -d '[:space:]' < distribution/core-version)
           core_src=$(mktemp -d)
-          git clone --depth 1 --branch "v$core_ver" https://github.com/herdrdev/herdr-core.git "$core_src"
+          # The RHEL 8 systemd fix is on this fork's master, not in the
+          # released tag. This job only uses it for the RHEL 8 tarball;
+          # upstream herdr-core stays untouched.
+          git clone --depth 1 --branch master https://github.com/shawn111/herdr-core.git "$core_src"
           git -C "$core_src" submodule update --init --depth 1
           cargo build --manifest-path "$core_src/Cargo.toml" --locked --release -p herdr-core
           work=$(mktemp -d)
