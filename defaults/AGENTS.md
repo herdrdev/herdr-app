@@ -276,6 +276,10 @@ Properties any node can have:
   Windows), the bar draws them with `window.minimize`, `window.maximize`, `window.close`.
   Windows' shipped tab bar and system strip use vector window icons, with a
   restore icon when maximized, rather than font glyphs.
+- Root only, macOS: `"dropdown": true` makes the window a drop-down from the
+  top of the screen (see `quick_terminal` in settings.json). A window can't
+  change its kind while it's open, so switching into or out of such a layout
+  applies when Herdr restarts. The shipped `dropdown` layout has it.
 - Root only: `"window_blur": true` blurs what's behind the window where the
   system can (macOS, Windows, some Wayland compositors). Colors with alpha
   then show the desktop through frosted glass: make `background` and
@@ -727,7 +731,7 @@ The main ones:
   Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`,
   `app.toggle` (hide Herdr when it's in front, else bring it there; another
-  tool's key can run `herdr-app do app.toggle`; with `quick_terminal` the
+  tool's key can run `herdr-app do app.toggle`; in a `"dropdown"` layout the
   drop-down goes down or up, `window.close` puts it away,
   `window.maximize` makes it cover the whole screen, or not, and
   `window.see_through` switches it between see-through and solid until
@@ -839,13 +843,18 @@ What's about the user, never a look:
   Option input on every layout. `"left"` / `"right"` makes only that Option
   key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
-- `quick_terminal`: macOS only, a drop-down terminal like iTerm2's hotkey
-  window: `{ "key": "cmd-.", "height": 0.5, "fullscreen": false, "slide": true, "auto_hide": false, "opacity": 1, "blur": 50 }`. The window
-  drops down from the top of the screen under the pointer, on the current
+- `quick_terminal`: macOS only, a key that finds Herdr from any app, like iTerm2's hotkey
+  window: `{ "key": "ctrl-alt-space", "height": 0.5, "fullscreen": false, "slide": true, "auto_hide": false, "opacity": 1, "blur": 50 }`.
+  `key` (keys.json's form) runs `app.toggle` from any app, in every layout, and
+  is taken from all of them: Herdr comes to the front, or hides when it's there.
+  It needs Command, Control or Option, unless it's Esc or an F key, so it can't take a typed character.
+  Ignored off macOS.
+  In a layout with `"dropdown": true` (the shipped `dropdown` one) the window
+  instead drops down from the top of the screen under the pointer, on the current
   Space (also over full screen apps); when it goes up, the app you were in
-  has the keys again. `key` (keys.json's form) works from any app and
-  is taken from all of them; without it, `app.toggle` still works. `height` is
-  the share of the screen, 0.1 to 1. `fullscreen` covers the whole screen,
+  has the keys again. The rest shape the drop-down: `height` is
+  the share of the screen, 0.1 to 1; dragging the window's edge writes it back.
+  `fullscreen` covers the whole screen,
   over the menu bar and the Dock (below the notch on a MacBook with one); `window.maximize` switches it on and off
   (bind it in keys.json). `slide: false` makes it appear and go at once.
   `auto_hide` puts it away when another window takes the keys. `opacity`
@@ -858,11 +867,9 @@ What's about the user, never a look:
   in px; `0` shows it sharp. macOS before 26 has one blur strength, so
   there any value above 0 blurs the same.
   Text, mods and panels stay solid. `window.see_through` (bind it in
-  keys.json) switches to solid and back without editing the file. Adding or
-  removing `quick_terminal` applies at the next start; `key`, `height`,
-  `fullscreen`, `slide`, `auto_hide`, `opacity`, `active_opacity` and `blur`
-  apply immediately. The window
-  has no title bar or buttons and isn't saved to `window.json`.
+  keys.json) switches to solid and back without editing the file. All of them
+  apply immediately; Settings → Quick terminal sets them, and Settings → Keyboard sets `key` too.
+  The drop-down window has no title bar or buttons and isn't saved to `window.json`.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is

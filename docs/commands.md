@@ -596,7 +596,7 @@ No arguments.
 
 ## `app.toggle`
 
-Show or hide Herdr; the quick terminal (macOS, settings.json `quick_terminal`) drops down or goes up.
+Show or hide Herdr; in a drop-down layout (macOS, `"dropdown": true`) it drops down or goes up.
 
 No arguments.
 

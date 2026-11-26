@@ -16,6 +16,10 @@ const SLIDE: f64 = 0.15;
 /// NSWindowStyleMaskNonactivatingPanel alone: no border, and showing it leaves
 /// the frontmost app frontmost, so hiding it gives that app the keys back.
 const NONACTIVATING_BORDERLESS: u64 = 1 << 7;
+/// NSWindowStyleMaskResizable: its edges drag to resize, even without a border.
+const RESIZABLE: u64 = 1 << 3;
+/// The smallest share of the screen it can be dragged to (settings.rs checks 0.1..1).
+const MIN_SHARE: f64 = 0.1;
 
 type OSStatus = i32;
 type EventRef = *mut c_void;
@@ -123,9 +127,10 @@ impl QuickPanel {
     }
 
     /// No border, can't be dragged, and stays up when Herdr isn't the active app.
+    /// Its edges resize it; `fit` keeps that to the height.
     pub fn style(self) {
         unsafe {
-            let () = msg_send![self.window, setStyleMask: NONACTIVATING_BORDERLESS];
+            let () = msg_send![self.window, setStyleMask: NONACTIVATING_BORDERLESS | RESIZABLE];
             let () = msg_send![self.window, setHidesOnDeactivate: NO];
             let () = msg_send![self.window, setMovable: NO];
             let _: BOOL = msg_send![self.window, makeFirstResponder: self.view];
@@ -163,12 +168,8 @@ impl QuickPanel {
             let () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: self.window selector: sel!(orderOut:) object: nil];
             let () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: app selector: sel!(hide:) object: nil];
             let () = msg_send![app, unhideWithoutActivation];
-            let area = screen_under_pointer(full);
-            let h = if full { area.size.height } else { (area.size.height * height).round() };
-            let to = NSRect::new(
-                NSPoint::new(area.origin.x, area.origin.y + area.size.height - h),
-                NSSize::new(area.size.width, h),
-            );
+            let to = self.fit(screen_under_pointer(full), height, full);
+            let h = to.size.height;
             let visible: BOOL = msg_send![self.window, isVisible];
             if !animate {
                 let () = msg_send![self.window, setFrame: to display: YES];
@@ -182,6 +183,56 @@ impl QuickPanel {
             if animate {
                 slide(self.window, to);
             }
+        }
+    }
+
+    /// The frame at the top of `area`, `height` of it tall (all of it when `full`).
+    /// Dragging an edge can change only the height, down to `MIN_SHARE`; full screen can't be resized.
+    unsafe fn fit(self, area: NSRect, height: f64, full: bool) -> NSRect {
+        let h = if full { area.size.height } else { (area.size.height * height).round() };
+        let lowest = if full { h } else { (area.size.height * MIN_SHARE).round() };
+        unsafe {
+            let () = msg_send![self.window, setMinSize: NSSize::new(area.size.width, lowest)];
+            let () = msg_send![self.window, setMaxSize: NSSize::new(area.size.width, area.size.height)];
+        }
+        NSRect::new(NSPoint::new(area.origin.x, area.origin.y + area.size.height - h), NSSize::new(area.size.width, h))
+    }
+
+    /// Down already: to `height` on the screen it's on, at once (settings.json changed, or a drag ended).
+    /// Away, it waits for the next `show`.
+    pub fn refit(self, height: f64, full: bool) {
+        unsafe {
+            let Some(screen) = self.screen() else { return };
+            let to = self.fit(area(screen, full), height, full);
+            let () = msg_send![self.window, setFrame: to display: YES];
+        }
+    }
+
+    /// Its height as a share of the screen it's down on.
+    /// None while it's away or covering the whole screen.
+    pub fn height_share(self) -> Option<f64> {
+        unsafe {
+            let screen = self.screen()?;
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            let frame: NSRect = msg_send![self.window, frame];
+            (frame.size.height <= visible.size.height + 0.5).then(|| frame.size.height / visible.size.height)
+        }
+    }
+
+    /// Whether an edge is being dragged right now.
+    pub fn resizing(self) -> bool {
+        unsafe {
+            let resizing: BOOL = msg_send![self.window, inLiveResize];
+            resizing == YES
+        }
+    }
+
+    /// The screen it's down on; None while it's away (above the top display it has none).
+    unsafe fn screen(self) -> Option<id> {
+        unsafe {
+            let visible: BOOL = msg_send![self.window, isVisible];
+            let screen: id = msg_send![self.window, screen];
+            (visible == YES && !screen.is_null()).then_some(screen)
         }
     }
 

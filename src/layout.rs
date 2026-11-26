@@ -428,6 +428,9 @@ pub struct Node {
     /// colors with alpha show the desktop through frosted glass.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_blur: bool,
+    /// Root only, macOS: the window is a drop-down from the top of the screen (quick.rs), read when Herdr starts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dropdown: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +471,7 @@ impl Node {
             toast: None,
             window_drag: false,
             window_blur: false,
+            dropdown: false,
         }
     }
 

@@ -178,7 +178,7 @@ fn main() {
     }
     update::start();
     telemetry::start(settings::telemetry_setting(&person));
-    quick::start(person.as_ref().is_ok_and(|p| p.quick_terminal.is_some()));
+    quick::start(window::starts_dropdown());
     bench::start();
     if let Err(e) = mods::write_workspace() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());

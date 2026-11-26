@@ -160,6 +160,7 @@ const LAYOUTS: &[(&str, &str)] = &[
     ("main", include_str!("../defaults/layouts/main.json")),
     ("terminals", include_str!("../defaults/layouts/terminals.json")),
     ("win98", include_str!("../defaults/layouts/win98.json")),
+    ("dropdown", include_str!("../defaults/layouts/dropdown.json")),
 ];
 
 /// Pictures shipped layouts name as their `preview`, written beside them.
@@ -171,6 +172,14 @@ pub fn shipped_layouts() -> Vec<&'static str> {
 
 fn shipped_layout(name: &str) -> &'static str {
     LAYOUTS.iter().find(|(n, _)| *n == name).unwrap_or(&LAYOUTS[0]).1
+}
+
+/// Whether the layout Herdr starts with is a drop-down (`"dropdown": true` on its root).
+/// Read before the window opens: a window's kind can't change while it's open.
+pub fn starts_dropdown() -> bool {
+    // The same pick as the window's: a layout whose mods are gone starts on main.
+    let Some(name) = mods::shared("layout").and_then(|v| v.as_str().map(str::to_owned)).filter(|n| layout_path(n).exists() && missing_mods(n).is_empty()) else { return false };
+    std::fs::read_to_string(layout_path(&name)).ok().and_then(|text| serde_json::from_str::<Node>(&text).ok()).is_some_and(|n| n.dropdown)
 }
 
 /// A layout as shipped (main for names Herdr doesn't ship).
@@ -636,6 +645,8 @@ impl AppWindow {
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
+            } else if crate::quick::on() && crate::quick::resizing() {
+                this.place_write = Some(this.save_quick_height(window, cx));
             }
         }));
         // A hidden window draws no frames, so publish here rather than in render:
@@ -969,6 +980,25 @@ impl AppWindow {
         self.apply_look(window, cx);
     }
 
+    /// The quick terminal moved or resized: once its edge is let go, a new height goes to settings.json (the task replaces the last one, which cancels it).
+    fn save_quick_height(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                if !crate::quick::resizing() {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(height) = crate::quick::resized_height() {
+                    this.write_person(|p| p.quick_terminal.get_or_insert_default().height = height, window, cx);
+                }
+                // A drag on the top edge leaves the drop-down off the top of the screen.
+                crate::quick::refit(cx);
+            });
+        })
+    }
+
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A layout's fonts arrive with its mod: added since the start, they load now.
@@ -985,6 +1015,10 @@ impl AppWindow {
         }
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
+        }
+        let fit = |s: &settings::Settings| s.quick_terminal.as_ref().map(|q| (q.height, q.fullscreen));
+        if crate::quick::on() && fit(&settings::get()) != fit(&s) {
+            crate::quick::refit(cx);
         }
         if settings::set(s) {
             for term in self.terms.values() {
@@ -1134,6 +1168,11 @@ impl AppWindow {
             self.drop_layout_copies(window, cx);
         }
         self.load_layout(&next);
+        if cfg!(target_os = "macos") && other && self.chrome.dropdown != crate::quick::on() {
+            let title = if self.chrome.dropdown { "The drop-down starts with Herdr" } else { "Back to a normal window when Herdr restarts" };
+            let note = json!({ "kind": "toast", "notification": { "title": title, "body": "A window can't change its kind while it's open: quit and reopen Herdr.", "level": "info", "timeout": 8000 } });
+            self.open_overlay(mods::new_overlay_id(), note, window, cx);
+        }
         #[cfg(target_os = "macos")]
         crate::macos::refresh_menus(cx);
         self.apply_look(window, cx);
@@ -8433,6 +8472,11 @@ export default class Probe extends View { render() { return div().child("probe")
         let terminals = super::default_layout("terminals");
         assert!(terminals.find("tabs").is_some());
         assert!(matches!(terminals.find("main").and_then(|n| n.content()), Some(super::Content::Context { .. })));
+        let mut dropdown: serde_json::Value = serde_json::from_str(super::shipped_layout("dropdown")).unwrap();
+        assert_eq!(dropdown["dropdown"], true);
+        dropdown.as_object_mut().unwrap().remove("dropdown");
+        assert_eq!(dropdown, serde_json::from_str::<serde_json::Value>(super::shipped_layout("main")).unwrap(), "the drop-down is Herdr's own layout, dropped down");
+        assert!(super::shipped_layouts().iter().all(|n| (*n == "dropdown") == super::default_layout(n).dropdown), "only the drop-down layout drops down");
     }
 
     #[test]

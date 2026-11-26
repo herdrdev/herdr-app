@@ -467,7 +467,8 @@ impl OptionAsAlt {
 pub struct QuickTerminal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    pub height: f32,
+    /// f64, not f32: a dragged height written back reads 0.37, not 0.3700000047683716.
+    pub height: f64,
     pub fullscreen: bool,
     pub slide: bool,
     pub auto_hide: bool,
@@ -736,12 +737,10 @@ impl Settings {
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
         }
-        if let Some(q) = &self.quick_terminal {
-            if !cfg!(target_os = "macos") {
-                out.push("quick_terminal works on macOS only".into());
-            }
+        // Off macOS it's ignored, like option_as_alt: a settings.json shared with a Mac stays quiet here.
+        if let Some(q) = self.quick_terminal.as_ref().filter(|_| cfg!(target_os = "macos")) {
             if let Some(key) = q.key.as_deref().filter(|k| crate::quick::keycode(k).is_none()) {
-                out.push(format!("quick_terminal.key: {key:?} is not a key like \"cmd-.\" or \"ctrl-alt-space\""));
+                out.push(format!("quick_terminal.key: {key:?} can't be taken from every app: use Command, Control or Option with a key (\"ctrl-alt-space\"), Esc or an F key"));
             }
             if !(0.1..=1.0).contains(&q.height) {
                 out.push(format!("quick_terminal.height {} is outside 0.1..1", q.height));
@@ -1217,6 +1216,13 @@ mod tests {
         assert_eq!((s.glass, s.blur), (true, 12.0));
         let s = quick(r#"{"quick_terminal":{"opacity":0.6,"blur":0}}"#).in_quick_terminal();
         assert_eq!((s.glass, s.blur), (true, 0.0), "see-through without the blur");
+    }
+
+    #[test]
+    fn a_quick_terminal_height_writes_back_as_written() {
+        let person = Person { quick_terminal: Some(QuickTerminal { height: 0.37, ..QuickTerminal::default() }), ..Person::default() };
+        let text = person_text(&person, "{}").unwrap();
+        assert!(text.contains("\"height\": 0.37\n") || text.contains("\"height\": 0.37,"), "{text}");
     }
 
     #[test]

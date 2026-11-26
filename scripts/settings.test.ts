@@ -74,3 +74,82 @@ test("a settings.json that can't be read, or an edit that throws, says why", asy
   expect(disk.writes).toBe(0);
   expect(thrown.toasts).toEqual([{ title: "Cannot read settings.json", body: "no such section", level: "error" }]);
 });
+
+const key = (keystroke: string, mods: Partial<Record<"shift" | "control" | "alt" | "platform" | "function", boolean>> = {}) => {
+  const k = keystroke.split(/-(?=.)/).pop()!;
+  return { key: k, keystroke, modifiers: { shift: false, control: false, alt: false, platform: false, function: false, ...mods } };
+};
+
+/** Presses `e` while the quick terminal's key is being recorded; what settings.json holds after. */
+async function press(raw: string, e: ReturnType<typeof key>) {
+  Object.assign(disk, { raw, writes: 0, fail: undefined, readFail: undefined, toasts: [] });
+  const view = new Settings();
+  Object.assign(view, { recording: true, keyError: null });
+  let pending: Promise<void> | undefined;
+  view.record(e, { spawn: (f: (cx: any) => Promise<void>) => { pending = f({ notify: () => {} }); } });
+  await pending;
+  return { view, saved: JSON.parse(disk.raw!) };
+}
+
+test("quick terminal keys read in words, modifiers in macOS's order", () => {
+  const view = new Settings();
+  expect(view.keyLabel("shift-escape")).toBe("Shift + Esc");
+  expect(view.keyLabel("cmd-shift-.")).toBe("Shift + Command + .");
+  expect(view.keyLabel("cmd-ctrl-alt-space")).toBe("Control + Option + Command + Space");
+  expect(view.keyLabel("cmd--")).toBe("Command + -");
+  expect(view.keyLabel("f13")).toBe("F13");
+});
+
+test("quick terminal steppers move in whole steps and stop at their ends", () => {
+  const view = new Settings();
+  expect(view.stepped(0.37, 100, 10, 100, 5)).toBe(0.42);
+  expect(view.stepped(0.1, 100, 10, 100, 5)).toBe(0.15);
+  expect(view.stepped(0.12, 100, 10, 100, -5)).toBe(0.1);
+  expect(view.stepped(1, 100, 10, 100, 5)).toBe(1);
+  expect(view.stepped(1, 100, 10, 100, -10)).toBe(0.9);
+  expect(view.stepped(50, 1, 0, 100, -10)).toBe(40);
+  expect(view.stepped(4, 1, 0, 100, -10)).toBe(0);
+  expect(view.stepped(0.05, 100, 10, 100, -10)).toBe(0.05);
+  expect(view.stepped(0.05, 100, 10, 100, 10)).toBe(0.15);
+});
+
+test("a recorded quick terminal key is written in keys.json's spelling, keeping the rest", async () => {
+  const { view, saved } = await press('{"quick_terminal": {"height": 0.4}, "font_size": 15}', key("shift-escape", { shift: true }));
+  expect(saved).toEqual({ quick_terminal: { height: 0.4, key: "shift-escape" }, font_size: 15 });
+  expect(view.recording).toBe(false);
+  expect(view.keyError).toBe(null);
+});
+
+test("recording takes no plain key, waits through a lone modifier, and Escape stops it", async () => {
+  const before = '{"quick_terminal": {"key": "cmd-."}}';
+  const plain = await press(before, key("a"));
+  expect(plain.saved).toEqual({ quick_terminal: { key: "cmd-." } });
+  expect(plain.view.recording).toBe(true);
+  expect(plain.view.keyError).toBe("Hold Command, Control or Option with it, or use Esc or an F key from F1 to F20.");
+  const shiftA = await press(before, key("shift-a", { shift: true }));
+  expect(shiftA.view.keyError).toBe("Hold Command, Control or Option with it, or use Esc or an F key from F1 to F20.");
+  const f21 = await press(before, key("f21"));
+  expect(f21.view.keyError).toBe("macOS takes F keys up to F20.");
+  const reset = await press(before, key("ctrl-alt-shift-escape", { control: true, alt: true, shift: true }));
+  expect(reset.view.keyError).toBe("That's Herdr's reset key.");
+  expect(reset.view.recording).toBe(true);
+  expect(reset.saved).toEqual({ quick_terminal: { key: "cmd-." } });
+  const modifier = await press(before, key("shift", { shift: true }));
+  expect(modifier.view.recording).toBe(true);
+  expect(modifier.view.keyError).toBe(null);
+  const stop = await press(before, key("escape"));
+  expect(stop.view.recording).toBe(false);
+  expect(disk.writes).toBe(0);
+  const fkey = await press(before, key("f13"));
+  expect(fkey.saved).toEqual({ quick_terminal: { key: "f13" } });
+});
+
+test("shift with a symbol key is recorded as macOS reports it, and a typed symbol alone is refused", async () => {
+  const cmdShiftDot = await press("{}", key("cmd->", { platform: true }));
+  expect(cmdShiftDot.saved).toEqual({ quick_terminal: { key: "cmd->" } });
+  const shiftSlash = await press("{}", key("?"));
+  expect(shiftSlash.saved).toEqual({});
+  expect(shiftSlash.view.recording).toBe(true);
+  const shiftEsc = await press("{}", key("shift-escape", { shift: true }));
+  expect(shiftEsc.saved).toEqual({ quick_terminal: { key: "shift-escape" } });
+});
