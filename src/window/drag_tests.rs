@@ -62,6 +62,16 @@ fn tab_strip_drag(cx: &mut gpui::TestAppContext) {
     let outside = end + point(px(0.), px(80.));
     cx.simulate_mouse_move(outside, MouseButton::Left, none);
     draw(cx);
+    cx.update(|window, _| {
+        let quads = window.painted_quads();
+        let pointer = outside.scale(window.scale_factor());
+        let hover = super::c("hover").into();
+        assert!(quads.iter().any(|q| q.background == hover
+            && q.bounds.contains(&pointer) && q.content_mask.bounds.contains(&pointer)),
+            "held tab is visible over the terminal");
+        assert!(!quads.iter().any(|q| q.border_color == super::c("accent") && q.border_widths.top.0 > 0.),
+            "no drop slot over the terminal");
+    });
     cx.simulate_mouse_up(outside, MouseButton::Left, none);
     cx.run_until_parked();
     assert_eq!(order(cx), ["t1", "t2", "t3"]);

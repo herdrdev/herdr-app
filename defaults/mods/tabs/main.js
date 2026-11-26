@@ -1,5 +1,5 @@
 import { View, div, svg, image } from "gpui-kit";
-import { h_flex, ScrollHandle } from "gpui-base";
+import { h_flex, Popup, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
 
 const TAB_GAP = 3;
@@ -78,9 +78,8 @@ export default class Tabs extends View {
     if (released) {
       if (to !== from) run("tab.move", { id: drag.id, index: to + 1 });
     } else {
-      const wasInside = drag.preview?.inside;
       drag.preview = { inside, to, x: (p.x - drag.grab.x) / zoom, y: (p.y - drag.grab.y) / zoom };
-      if (inside || wasInside) cx.notify();
+      cx.notify();
     }
   }
 
@@ -143,7 +142,7 @@ export default class Tabs extends View {
     const ids = new Set(shown.map(tab => tab.id));
     if (this.drag && (this.drag.space !== space?.id || !ids.has(this.drag.id))) this.drag = null;
     const drag = this.drag, preview = drag?.preview;
-    const held = preview?.inside ? shown.find(tab => tab.id === drag.id) : null;
+    const held = preview ? shown.find(tab => tab.id === drag.id) : null;
     const order = held ? shown.filter(tab => tab !== held) : shown;
     if (held) order.splice(preview.to, 0, held);
     for (const id of this.widths.keys()) if (!ids.has(id)) this.widths.delete(id);
@@ -213,9 +212,13 @@ export default class Tabs extends View {
         .child(h_flex().id("tab-scroll").size_full().items_center().gap(TAB_GAP).overflow_x_scrollbar().track_scroll(this.scroll)
           .on_size_change((_size, cx) => { if (!this.drag && active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
           .children(order.map((tab, i) => tab === held
-            ? div().id("tab-drop").h(29).w(drag.bounds.width / zoom).flex_none().rounded(7).border_1().border_color(t.accent)
+            ? div().id("tab-drop").h(29).w(drag.bounds.width / zoom).flex_none().rounded(7)
+              .when(preview.inside, el => el.border_1().border_color(t.accent))
             : item(tab, i))))
-        .when(held, el => el.child(item(held, preview.to, true).absolute().left(preview.x).top(preview.y).w(drag.bounds.width / zoom))))
+        // Popup paints above the layout's clip when the tab crosses into a terminal.
+        .when(drag, strip => strip.child(Popup.new("tab-drag-layer", div().size(0)).absolute().size(0)
+          .left(preview?.x ?? 0).top(preview?.y ?? 0)
+          .when(held, el => el.content(item(held, preview.to, true).w(drag.bounds.width / zoom))))))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
