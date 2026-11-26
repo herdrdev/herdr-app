@@ -180,6 +180,8 @@ those files or the generated guide. The app rewrites them on start.
   For a drag that leaves its element, use `on_window_mouse_move` and
   `on_window_mouse_up` on a plain layout element. The installed guide covers
   cancellation when the pointer returns without the held button.
+  To react to held modifiers while a terminal has focus, use
+  `on_window_modifiers_changed` on a plain layout element.
   Optional `View.close(cx)` gets one bounded final call; start cleanup there,
   not in an earlier task. The installed guide explains its 250 ms quit budget
   and which cleanup commands go out before shutdown.

@@ -369,6 +369,8 @@ struct Behavior {
     on_key_up: Option<CallbackId>,
     /// Reports modifier-only changes on the keyboard focus path.
     on_modifiers_changed: Option<CallbackId>,
+    /// Observes modifier changes in the window, whatever has keyboard focus.
+    on_window_modifiers_changed: Option<CallbackId>,
     /// Presses on this element, one entry per button listened for.
     ///
     /// A list rather than one field, because GPUI takes the button as an
@@ -1996,10 +1998,11 @@ where
     element
 }
 
-fn with_window_mouse(element: gpui::Div, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> gpui::Div {
+fn with_window_input(element: gpui::Div, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> gpui::Div {
     let moves = behavior.on_window_mouse_move;
     let ups = &behavior.on_window_mouse_up;
-    if moves.is_none() && ups.is_empty() {
+    let modifiers = behavior.on_window_modifiers_changed;
+    if moves.is_none() && ups.is_empty() && modifiers.is_none() {
         return element;
     }
     let ups = ups.clone();
@@ -2025,6 +2028,14 @@ fn with_window_mouse(element: gpui::Div, behavior: &Behavior, runtime: &Rc<Shell
             window.observe_mouse_event(move |event: &gpui::MouseUpEvent, window, cx| {
                 if event.button == button {
                     dispatch_mouse_button(&runtime, callback, event, Some(bounds), window, cx);
+                }
+            });
+        }
+        if let Some(callback) = modifiers {
+            let runtime = runtime.clone();
+            window.observe_modifiers_changed(move |event, window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_modifiers_changed(callback, event, window, cx);
                 }
             });
         }
@@ -2233,7 +2244,7 @@ fn flex_element(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let element = with_window_mouse(with_hover(element, &states), &behavior, runtime);
+    let element = with_window_input(with_hover(element, &states), &behavior, runtime);
     if behavior.key.is_none()
         && !states.needs_identity()
         && !behavior.needs_identity()
@@ -2831,6 +2842,7 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
                 "on_modifiers_changed" => behavior.on_modifiers_changed = Some(*id),
+                "on_window_modifiers_changed" => behavior.on_window_modifiers_changed = Some(*id),
                 // The button is carried in the op name rather than beside it:
                 // `SpecOp::Callback` is a `&'static str` and a handle, and
                 // three fixed names cost nothing next to widening every op to

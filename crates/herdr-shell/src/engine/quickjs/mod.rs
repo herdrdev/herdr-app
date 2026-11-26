@@ -7492,6 +7492,7 @@ impl ShellRuntime {
                 "on_key_down",
                 "on_key_up",
                 "on_modifiers_changed",
+                "on_window_modifiers_changed",
                 "on_mouse_down",
                 "on_mouse_up",
                 "on_window_mouse_up",
@@ -8512,6 +8513,7 @@ impl ShellRuntime {
             | "on_key_down"
             | "on_key_up"
             | "on_modifiers_changed"
+            | "on_window_modifiers_changed"
             | "on_mouse_down_out"
             | "on_drop"
             | "on_scroll_wheel"
@@ -10521,6 +10523,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_key_down" => "on_key_down",
         "on_key_up" => "on_key_up",
         "on_modifiers_changed" => "on_modifiers_changed",
+        "on_window_modifiers_changed" => "on_window_modifiers_changed",
         "on_mouse_down_out" => "on_mouse_down_out",
         "on_drop" => "on_drop",
         "on_scroll_wheel" => "on_scroll_wheel",

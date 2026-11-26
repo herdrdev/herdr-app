@@ -731,7 +731,7 @@ type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
-type AnyMouseObserver = Box<dyn FnMut(&dyn Any, &mut Window, &mut App) + 'static>;
+type AnyInputObserver = Box<dyn FnMut(&dyn Any, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
@@ -991,7 +991,7 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
-    mouse_observers: Vec<Option<AnyMouseObserver>>,
+    input_observers: Vec<Option<AnyInputObserver>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1027,7 +1027,7 @@ pub(crate) struct PaintIndex {
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
-    mouse_observers_index: usize,
+    input_observers_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -1049,7 +1049,7 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
-            mouse_observers: Vec::new(),
+            input_observers: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1077,7 +1077,7 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
-        self.mouse_observers.clear();
+        self.input_observers.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -1254,6 +1254,8 @@ pub struct Window {
     pub(crate) focus_generation: u64,
     pending_input: Option<PendingInput>,
     pending_modifier: ModifierState,
+    /// The modifier state last reported to modifier observers.
+    observed_modifiers: (Modifiers, Capslock),
     pub(crate) pending_input_observers: SubscriberSet<(), AnyObserver>,
     prompt: Option<RenderablePromptHandle>,
     pub(crate) client_inset: Option<Pixels>,
@@ -1958,6 +1960,12 @@ impl Window {
                         window.active.set(active);
                         window.modifiers = window.platform_window.modifiers();
                         window.capslock = window.platform_window.capslock();
+                        // An inactive window hears no modifier releases, so report none held.
+                        let modifiers = if active { window.modifiers } else { Modifiers::default() };
+                        window.notify_modifiers_observers(
+                            ModifiersChangedEvent { modifiers, capslock: window.capslock },
+                            cx,
+                        );
                         window
                             .activation_observers
                             .clone()
@@ -2151,6 +2159,7 @@ impl Window {
             focus_generation: 0,
             pending_input: None,
             pending_modifier: ModifierState::default(),
+            observed_modifiers: (modifiers, capslock),
             pending_input_observers: SubscriberSet::new(),
             prompt: None,
             client_inset: None,
@@ -4007,7 +4016,7 @@ impl Window {
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
-            mouse_observers_index: self.next_frame.mouse_observers.len(),
+            input_observers_index: self.next_frame.input_observers.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -4043,9 +4052,9 @@ impl Window {
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
-        self.next_frame.mouse_observers.extend(
-            self.rendered_frame.mouse_observers
-                [range.start.mouse_observers_index..range.end.mouse_observers_index]
+        self.next_frame.input_observers.extend(
+            self.rendered_frame.input_observers
+                [range.start.input_observers_index..range.end.input_observers_index]
                 .iter_mut()
                 .map(|observer| observer.take()),
         );
@@ -5478,13 +5487,50 @@ impl Window {
         mut observer: impl FnMut(&Event, &mut Window, &mut App) + 'static,
     ) {
         self.invalidator.debug_assert_paint();
-        self.next_frame.mouse_observers.push(Some(Box::new(
+        self.next_frame.input_observers.push(Some(Box::new(
             move |event: &dyn Any, window, cx| {
                 if let Some(event) = event.downcast_ref() {
                     observer(event, window, cx);
                 }
             },
         )));
+    }
+
+    /// Observe every change of the window's modifier keys, whichever element has keyboard focus.
+    /// While the window is inactive, no modifiers are reported held. Observers cannot change event
+    /// propagation. Register during paint. The observer is cleared when the element is no longer
+    /// painted.
+    pub fn observe_modifiers_changed(
+        &mut self,
+        mut observer: impl FnMut(&ModifiersChangedEvent, &mut Window, &mut App) + 'static,
+    ) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.input_observers.push(Some(Box::new(
+            move |event: &dyn Any, window, cx| {
+                if let Some(event) = event.downcast_ref() {
+                    observer(event, window, cx);
+                }
+            },
+        )));
+    }
+
+    fn notify_modifiers_observers(&mut self, event: ModifiersChangedEvent, cx: &mut App) {
+        let state = (event.modifiers, event.capslock);
+        if self.observed_modifiers == state {
+            return;
+        }
+        self.observed_modifiers = state;
+        self.notify_input_observers(&event, cx);
+    }
+
+    fn notify_input_observers(&mut self, event: &dyn Any, cx: &mut App) {
+        let mut input_observers = mem::take(&mut self.rendered_frame.input_observers);
+        let propagate_event = cx.propagate_event;
+        for observer in &mut input_observers {
+            observer.as_mut().unwrap()(event, self, cx);
+            cx.propagate_event = propagate_event;
+        }
+        self.rendered_frame.input_observers = input_observers;
     }
 
     /// Register a key event listener on this node for the next frame. The type of event
@@ -5998,13 +6044,7 @@ impl Window {
             }
         }
 
-        let mut mouse_observers = mem::take(&mut self.rendered_frame.mouse_observers);
-        let propagate_event = cx.propagate_event;
-        for observer in &mut mouse_observers {
-            observer.as_mut().unwrap()(event, self, cx);
-            cx.propagate_event = propagate_event;
-        }
-        self.rendered_frame.mouse_observers = mouse_observers;
+        self.notify_input_observers(event, cx);
 
         // Bubble phase, where most normal handlers do their work.
         if cx.propagate_event {
@@ -6062,6 +6102,10 @@ impl Window {
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {
         if self.invalidator.is_dirty() {
             self.draw(cx).clear(cx);
+        }
+
+        if let Some(event) = event.downcast_ref::<ModifiersChangedEvent>() {
+            self.notify_modifiers_observers(event.clone(), cx);
         }
 
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);
