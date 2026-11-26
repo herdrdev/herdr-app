@@ -39,6 +39,8 @@ herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["clau
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
+Tabs opened from the + agent menu are unnamed. `ls` lists their position
+even when the tab bar shows the program or its session title.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
@@ -126,8 +128,9 @@ background worker. Use app commands when the user wants to see a new tab or
 split, hc for orchestration that need not change the screen.
 
 Closing a pane, tab or space ends the terminals in it. Core ends their dependent
-children and keeps children started with `--outlive-parent` running. `terminal.kill`
-also follows the sub-agent tree, stopping at any child with a pane or a
+children and keeps children started with `--outlive-parent` running. On cores
+older than 0.1.13, Herdr also ends hidden children when closing. `terminal.kill`
+always follows the sub-agent tree. Both walks stop at children with a pane or a
 `herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods

@@ -44,7 +44,7 @@ build:
 
 test:
     bun test scripts/changes.test.ts scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
-    cargo test --locked
+    cargo test --locked -p herdr-app -p herdr-shell
 
 docs-generate: build
     bun scripts/docs.ts generate
