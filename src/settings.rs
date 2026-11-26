@@ -458,7 +458,10 @@ impl OptionAsAlt {
 
 /// The quick terminal: `key` shows and hides it from any app, `height` is
 /// its share of the screen, `fullscreen` covers all of it (menu bar and Dock
-/// too), `slide` animates it, `auto_hide` puts it away when it loses the keys.
+/// too), `slide` animates it, `auto_hide` puts it away when it loses the keys,
+/// `opacity` below 1 lets the blurred desktop show through its terminals,
+/// `active_opacity` (default `opacity`) through the one with the cursor,
+/// `blur` is how far the desktop behind is blurred, in px (0: not at all).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QuickTerminal {
@@ -468,11 +471,15 @@ pub struct QuickTerminal {
     pub fullscreen: bool,
     pub slide: bool,
     pub auto_hide: bool,
+    pub opacity: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_opacity: Option<f32>,
+    pub blur: f32,
 }
 
 impl Default for QuickTerminal {
     fn default() -> Self {
-        QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false }
+        QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false, opacity: 1.0, active_opacity: None, blur: 50.0 }
     }
 }
 
@@ -546,6 +553,13 @@ pub struct Settings {
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
+    /// `terminal_opacity` for the terminal with the cursor.
+    pub active_terminal_opacity: f32,
+    /// A see-through quick terminal: the layout's `background` and `canvas`
+    /// are clear and the desktop behind the window is blurred.
+    pub glass: bool,
+    /// With `glass`: how far the desktop behind is blurred, px (0: not at all).
+    pub blur: f32,
     pub clipboard_write: bool,
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
@@ -595,6 +609,9 @@ impl Default for Settings {
             pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
+            active_terminal_opacity: 1.0,
+            glass: false,
+            blur: 0.0,
             clipboard_write: true,
             copy_on_select: true,
             minimum_contrast: 1.0,
@@ -640,6 +657,9 @@ impl Settings {
             pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            active_terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            glass: false,
+            blur: 0.0,
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
@@ -647,6 +667,21 @@ impl Settings {
             option_as_alt: person.option_as_alt,
             quick_terminal: person.quick_terminal.clone(),
         }
+    }
+
+    /// The window is the quick terminal: its `opacity` and `active_opacity`,
+    /// when either is below 1, replace the layout's `terminal_opacity` and
+    /// turn the glass on.
+    pub fn in_quick_terminal(mut self) -> Settings {
+        let Some(q) = &self.quick_terminal else { return self };
+        let active = q.active_opacity.unwrap_or(q.opacity);
+        if q.opacity < 1.0 || active < 1.0 {
+            self.terminal_opacity = q.opacity.clamp(0.0, 1.0);
+            self.active_terminal_opacity = active.clamp(0.0, 1.0);
+            self.glass = true;
+            self.blur = q.blur.max(0.0);
+        }
+        self
     }
 }
 
@@ -710,6 +745,15 @@ impl Settings {
             }
             if !(0.1..=1.0).contains(&q.height) {
                 out.push(format!("quick_terminal.height {} is outside 0.1..1", q.height));
+            }
+            if !(0.0..=1.0).contains(&q.opacity) {
+                out.push(format!("quick_terminal.opacity {} is outside 0..1", q.opacity));
+            }
+            if let Some(a) = q.active_opacity.filter(|a| !(0.0..=1.0).contains(a)) {
+                out.push(format!("quick_terminal.active_opacity {a} is outside 0..1"));
+            }
+            if !(0.0..=100.0).contains(&q.blur) {
+                out.push(format!("quick_terminal.blur {} is outside 0..100", q.blur));
             }
         }
         out
@@ -1126,10 +1170,10 @@ mod tests {
         assert_eq!(default.quick_terminal, None);
         assert!(!serde_json::to_value(&default).unwrap().as_object().unwrap().contains_key("quick_terminal"));
         let bare: Person = serde_json::from_str(r#"{"quick_terminal":{}}"#).unwrap();
-        assert_eq!(bare.quick_terminal, Some(QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false }));
-        let person: Person = serde_json::from_str(r#"{"quick_terminal":{"key":"cmd-.","height":0.4,"fullscreen":true,"slide":false,"auto_hide":true}}"#).unwrap();
+        assert_eq!(bare.quick_terminal, Some(QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false, opacity: 1.0, active_opacity: None, blur: 50.0 }));
+        let person: Person = serde_json::from_str(r#"{"quick_terminal":{"key":"cmd-.","height":0.4,"fullscreen":true,"slide":false,"auto_hide":true,"opacity":0.8}}"#).unwrap();
         let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
-        assert_eq!(settings.quick_terminal, Some(QuickTerminal { key: Some("cmd-.".into()), height: 0.4, fullscreen: true, slide: false, auto_hide: true }));
+        assert_eq!(settings.quick_terminal, Some(QuickTerminal { key: Some("cmd-.".into()), height: 0.4, fullscreen: true, slide: false, auto_hide: true, opacity: 0.8, active_opacity: None, blur: 50.0 }));
         assert_eq!(serde_json::to_value(&person).unwrap()["quick_terminal"]["key"], "cmd-.");
         let mac_only = usize::from(!cfg!(target_os = "macos"));
         assert_eq!(settings.problems().len(), mac_only);
@@ -1138,6 +1182,41 @@ mod tests {
             let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
             assert_eq!(settings.problems().len(), problems + mac_only, "{key} {height}");
         }
+        for (opacity, problems) in [(0.0, 0), (0.5, 0), (1.0, 0), (-0.1, 1), (1.5, 1)] {
+            let q = QuickTerminal { opacity, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), problems + mac_only, "opacity {opacity}");
+            let q = QuickTerminal { active_opacity: Some(opacity), ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), problems + mac_only, "active_opacity {opacity}");
+        }
+        for (blur, problems) in [(0.0, 0), (1.0, 0), (100.0, 0), (-1.0, 1), (101.0, 1)] {
+            let q = QuickTerminal { blur, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), problems + mac_only, "blur {blur}");
+        }
+    }
+
+    #[test]
+    fn a_see_through_quick_terminal_overrides_the_layouts_terminal_opacity() {
+        let look = crate::layout::Look { terminal_opacity: Some(0.9), ..Default::default() };
+        let quick = |json: &str| Settings::compose(&serde_json::from_str(json).unwrap(), &look, true);
+        let opacities = |s: Settings| (s.terminal_opacity, s.active_terminal_opacity, s.glass);
+        let s = quick(r#"{"quick_terminal":{"opacity":0.7}}"#);
+        assert_eq!(opacities(s.clone()), (0.9, 0.9, false), "a normal window keeps the layout's look");
+        assert_eq!(opacities(s.in_quick_terminal()), (0.7, 0.7, true), "the active pane follows opacity");
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"active_opacity":0.9}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (0.6, 0.9, true));
+        let s = quick(r#"{"quick_terminal":{"active_opacity":0.8}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (1.0, 0.8, true), "only the active pane see-through");
+        let s = quick(r#"{"quick_terminal":{}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (0.9, 0.9, false), "opacity 1 changes nothing");
+        assert_eq!(quick(r#"{"quick_terminal":{"opacity":0.6}}"#).in_quick_terminal().blur, 50.0, "blurred by default");
+        assert_eq!(quick(r#"{"quick_terminal":{"opacity":0.6,"blur":12}}"#).blur, 0.0, "a normal window keeps the layout's blur");
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"blur":12}}"#).in_quick_terminal();
+        assert_eq!((s.glass, s.blur), (true, 12.0));
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"blur":0}}"#).in_quick_terminal();
+        assert_eq!((s.glass, s.blur), (true, 0.0), "see-through without the blur");
     }
 
     #[test]

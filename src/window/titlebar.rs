@@ -63,13 +63,16 @@ impl AppWindow {
     }
 
     /// The root's `window_blur`: frosted glass behind the window, else opaque.
-    pub(super) fn apply_blur(&mut self, window: &mut Window) {
-        let want = self.chrome.window_blur;
+    pub(super) fn apply_blur(&mut self, window: &mut Window, cx: &App) {
+        let want = window_background(self.chrome.window_blur, &settings::get());
         if self.blur_applied == want {
             return;
         }
         self.blur_applied = want;
-        window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
+        window.set_background_appearance(want.0);
+        if want.1.is_some() {
+            crate::quick::blur(cx);
+        }
     }
 
     /// What mods know about the window: `window()`.
@@ -300,5 +303,19 @@ mod win {
             .child(button("win-max", if maximized { include_bytes!("../../defaults/mods/tabs/win-restore.svg") } else { include_bytes!("../../defaults/mods/tabs/win-max.svg") }, WindowControlArea::Max, c("raised"), c("foreground")))
             .child(button("win-close", include_bytes!("../../defaults/mods/tabs/win-close.svg"), WindowControlArea::Close, red, gpui::white()))
             .into_any_element()
+    }
+}
+
+/// Blurred when the layout's `window_blur` asks for it (the system's radius)
+/// or a see-through quick terminal's `blur` does (its own), plainly
+/// see-through for one with `blur: 0`, else opaque.
+pub(super) fn window_background(layout_blur: bool, s: &settings::Settings) -> (gpui::WindowBackgroundAppearance, Option<f32>) {
+    use gpui::WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+    let radius = (s.glass && s.blur > 0.0).then_some(s.blur);
+    match (layout_blur, radius) {
+        (true, _) => (Blurred, None),
+        (false, Some(r)) => (Blurred, Some(r)),
+        (false, None) if s.glass => (Transparent, None),
+        (false, None) => (Opaque, None),
     }
 }

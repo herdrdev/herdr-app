@@ -642,4 +642,10 @@ Maximize the window, or back.
 
 No arguments.
 
+## `window.see_through`
+
+The quick terminal: switch between see-through (settings.json `quick_terminal.opacity`) and solid; see-through again at the next start.
+
+No arguments.
+
 [Back to Herdr](../README.md)

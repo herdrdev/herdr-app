@@ -5,7 +5,7 @@
 
 use cocoa::{
     base::{BOOL, NO, YES, id, nil},
-    foundation::{NSPoint, NSRect, NSSize},
+    foundation::{NSInteger, NSOperatingSystemVersion, NSPoint, NSRect, NSSize},
 };
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle as rwh;
@@ -129,6 +129,18 @@ impl QuickPanel {
             let () = msg_send![self.window, setHidesOnDeactivate: NO];
             let () = msg_send![self.window, setMovable: NO];
             let _: BOOL = msg_send![self.window, makeFirstResponder: self.view];
+        }
+    }
+
+    /// How far, in px, the window server blurs the desktop behind a blurred
+    /// window (macOS 26 and later; earlier, the system's blur view stays).
+    pub fn blur(self, radius: i64) {
+        if !crate::window::is_macos_version_at_least(NSOperatingSystemVersion::new(26, 0, 0)) {
+            return;
+        }
+        unsafe {
+            let number: NSInteger = msg_send![self.window, windowNumber];
+            CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number, radius);
         }
     }
 
@@ -268,4 +280,10 @@ unsafe fn area(screen: id, full: bool) -> NSRect {
         }
         f
     }
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSMainConnectionID() -> id;
+    fn CGSSetWindowBackgroundBlurRadius(connection_id: id, window_id: NSInteger, radius: i64) -> i32;
 }

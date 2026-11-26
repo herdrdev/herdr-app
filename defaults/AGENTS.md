@@ -728,8 +728,10 @@ The main ones:
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`,
   `app.toggle` (hide Herdr when it's in front, else bring it there; another
   tool's key can run `herdr-app do app.toggle`; with `quick_terminal` the
-  drop-down goes down or up, `window.close` puts it away and
-  `window.maximize` makes it cover the whole screen, or not).
+  drop-down goes down or up, `window.close` puts it away,
+  `window.maximize` makes it cover the whole screen, or not, and
+  `window.see_through` switches it between see-through and solid until
+  the next start).
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
@@ -838,7 +840,7 @@ What's about the user, never a look:
   key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
 - `quick_terminal`: macOS only, a drop-down terminal like iTerm2's hotkey
-  window: `{ "key": "cmd-.", "height": 0.5, "fullscreen": false, "slide": true, "auto_hide": false }`. The window
+  window: `{ "key": "cmd-.", "height": 0.5, "fullscreen": false, "slide": true, "auto_hide": false, "opacity": 1, "blur": 50 }`. The window
   drops down from the top of the screen under the pointer, on the current
   Space (also over full screen apps); when it goes up, the app you were in
   has the keys again. `key` (keys.json's form) works from any app and
@@ -846,9 +848,20 @@ What's about the user, never a look:
   the share of the screen, 0.1 to 1. `fullscreen` covers the whole screen,
   over the menu bar and the Dock (below the notch on a MacBook with one); `window.maximize` switches it on and off
   (bind it in keys.json). `slide: false` makes it appear and go at once.
-  `auto_hide` puts it away when another window takes the keys. Adding or
+  `auto_hide` puts it away when another window takes the keys. `opacity`
+  (0 to 1) below 1 makes it see-through: it replaces the layout's
+  `terminal_opacity`, the layout's `background` and `canvas` are clear,
+  and the desktop behind is blurred. `active_opacity` (0 to 1, default
+  `opacity`) is the terminal with the cursor's, for example
+  `"opacity": 0.6, "active_opacity": 0.9` to keep it easy to read.
+  `blur` (0 to 100, default 50) is how far the desktop behind is blurred,
+  in px; `0` shows it sharp. macOS before 26 has one blur strength, so
+  there any value above 0 blurs the same.
+  Text, mods and panels stay solid. `window.see_through` (bind it in
+  keys.json) switches to solid and back without editing the file. Adding or
   removing `quick_terminal` applies at the next start; `key`, `height`,
-  `fullscreen`, `slide` and `auto_hide` apply immediately. The window
+  `fullscreen`, `slide`, `auto_hide`, `opacity`, `active_opacity` and `blur`
+  apply immediately. The window
   has no title bar or buttons and isn't saved to `window.json`.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability

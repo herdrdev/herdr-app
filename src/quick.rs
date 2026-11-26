@@ -77,6 +77,22 @@ pub fn hide(cx: &App) {
     let _ = cx;
 }
 
+/// The window server's blur behind the see-through drop-down, at `blur` px.
+/// After GPUI's own (which sets the system's radius) and on every drop-down.
+pub fn blur(cx: &App) {
+    #[cfg(target_os = "macos")]
+    later(cx, apply_blur);
+    let _ = cx;
+}
+
+#[cfg(target_os = "macos")]
+fn apply_blur(panel: gpui_macos::QuickPanel) {
+    let s = crate::settings::get();
+    if s.glass && s.blur > 0.0 {
+        panel.blur(s.blur.round() as i64);
+    }
+}
+
 /// The window lost or got the keys: `auto_hide` puts it away.
 pub fn focus_changed(active: bool, cx: &App) {
     if !active && crate::settings::get().quick_terminal.as_ref().is_some_and(|q| q.auto_hide) {
@@ -98,6 +114,7 @@ fn later(cx: &App, f: fn(gpui_macos::QuickPanel)) {
 fn down(panel: gpui_macos::QuickPanel) {
     let q = wanted();
     panel.show(q.height.clamp(0.1, 1.0) as f64, q.fullscreen, q.slide);
+    apply_blur(panel);
 }
 
 #[cfg(target_os = "macos")]

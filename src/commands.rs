@@ -112,6 +112,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[], "Close the window (on Linux, quits)."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),
+    cmd("window.see_through", &[], "The quick terminal: switch between see-through (settings.json `quick_terminal.opacity`) and solid; see-through again at the next start."),
 ];
 
 pub fn find(name: &str) -> Option<&'static Command> {
