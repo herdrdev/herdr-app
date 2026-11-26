@@ -46,6 +46,12 @@ export default class Tabs extends View {
       return;
     }
     const s = this.swipe, now = Date.now();
+    // A scroll that came onto the bar from elsewhere (a terminal's momentum)
+    // isn't for the tabs: it's ignored until it pauses or a new one starts.
+    if (s.carried) {
+      if (e.touch_phase !== "started" && now - s.at <= 250) { s.at = now; return; }
+      s.carried = false;
+    }
     // Phases often arrive only as moves (a macOS touchpad included): a pause
     // or a turn starts a new gesture.
     if (e.touch_phase === "started" || now - s.at > 250 || e.delta.y * s.acc < 0) Object.assign(s, { acc: 0, steps: 0 });
@@ -142,6 +148,7 @@ export default class Tabs extends View {
         }).child(svg(icon).size(14)).child(label);
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
+      .id("tab-bar").on_hover(over => { if (over) Object.assign(this.swipe, { carried: true, at: Date.now() }); })
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => this.wheel(e))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
