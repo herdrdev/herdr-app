@@ -1174,25 +1174,26 @@ mod tests {
         let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
         assert_eq!(settings.quick_terminal, Some(QuickTerminal { key: Some("cmd-.".into()), height: 0.4, fullscreen: true, slide: false, auto_hide: true, opacity: 0.8, active_opacity: None, blur: 50.0 }));
         assert_eq!(serde_json::to_value(&person).unwrap()["quick_terminal"]["key"], "cmd-.");
-        let mac_only = usize::from(!cfg!(target_os = "macos"));
-        assert_eq!(settings.problems().len(), mac_only);
+        // Off macOS quick_terminal is ignored, so a settings.json shared with a Mac reports nothing there.
+        let on_mac = |problems: usize| if cfg!(target_os = "macos") { problems } else { 0 };
+        assert_eq!(settings.problems().len(), 0);
         for (key, height, problems) in [("cmd+.", 0.5, 1), ("ctrl-alt-space", 0.05, 1), ("f13", 1.0, 0), ("fn-q", 2.0, 2)] {
             let q = QuickTerminal { key: Some(key.into()), height, ..QuickTerminal::default() };
             let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
-            assert_eq!(settings.problems().len(), problems + mac_only, "{key} {height}");
+            assert_eq!(settings.problems().len(), on_mac(problems), "{key} {height}");
         }
         for (opacity, problems) in [(0.0, 0), (0.5, 0), (1.0, 0), (-0.1, 1), (1.5, 1)] {
             let q = QuickTerminal { opacity, ..QuickTerminal::default() };
             let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
-            assert_eq!(settings.problems().len(), problems + mac_only, "opacity {opacity}");
+            assert_eq!(settings.problems().len(), on_mac(problems), "opacity {opacity}");
             let q = QuickTerminal { active_opacity: Some(opacity), ..QuickTerminal::default() };
             let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
-            assert_eq!(settings.problems().len(), problems + mac_only, "active_opacity {opacity}");
+            assert_eq!(settings.problems().len(), on_mac(problems), "active_opacity {opacity}");
         }
         for (blur, problems) in [(0.0, 0), (1.0, 0), (100.0, 0), (-1.0, 1), (101.0, 1)] {
             let q = QuickTerminal { blur, ..QuickTerminal::default() };
             let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
-            assert_eq!(settings.problems().len(), problems + mac_only, "blur {blur}");
+            assert_eq!(settings.problems().len(), on_mac(problems), "blur {blur}");
         }
     }
 
