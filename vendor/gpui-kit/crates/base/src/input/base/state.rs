@@ -992,6 +992,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.mode.diagnostics_mut()
     }
 
+    fn adjust_diagnostics(&mut self, edited: &Range<usize>, inserted_len: usize) {
+        let text = self.text.clone();
+        if let Some(diagnostics) = self.mode.diagnostics_mut() {
+            diagnostics.adjust_for_edit(edited, inserted_len, &text);
+        }
+    }
+
     /// Set placeholder
     pub fn set_placeholder(
         &mut self,
@@ -3951,6 +3958,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             self.text.replace(range.clone(), new_text);
 
             M::adjust_annotations(self, range, new_text.len());
+            self.adjust_diagnostics(range, new_text.len());
             recorded |= self.push_history(
                 &old_text,
                 range,
@@ -4007,9 +4015,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
 
         // One observable update per batch instead of one per edit.
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
         M::refresh_language_features(self, window, cx);
         self.update_search(cx);
 
@@ -4333,8 +4338,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             // Masking rewrites the whole document, so ranges recorded against
             // the old text no longer point at anything.
             M::reset_annotations(self);
+            if let Some(diagnostics) = self.mode.diagnostics_mut() {
+                diagnostics.reset(&self.text)
+            }
         } else {
             M::adjust_annotations(self, &range, new_text.len());
+            self.adjust_diagnostics(&range, new_text.len());
         }
         if mask_changed {
             // A segment-based history entry no longer matches the masked
@@ -4357,9 +4366,6 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                 selection_before,
                 None,
             );
-        }
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
@@ -4476,9 +4482,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         }
 
         M::adjust_annotations(self, &range, new_text.len());
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
+        self.adjust_diagnostics(&range, new_text.len());
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);

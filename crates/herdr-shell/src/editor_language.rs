@@ -48,6 +48,26 @@ pub(crate) struct LanguageHandlers {
     pub completion_triggers: Vec<String>,
 }
 
+pub(crate) type HandlerSlot = fn(&mut LanguageHandlers) -> &mut Option<Rc<ScriptHandler>>;
+
+impl LanguageHandlers {
+    /// The names a code editor's `lsp` option takes, each with the field it
+    /// fills. The script prelude validates against these names too.
+    pub(crate) const SLOTS: [(&'static str, HandlerSlot); 7] = [
+        ("hover", |handlers| &mut handlers.hover),
+        ("completion", |handlers| &mut handlers.completion),
+        ("completion_accepted", |handlers| {
+            &mut handlers.completion_accepted
+        }),
+        ("definition", |handlers| &mut handlers.definition),
+        ("code_actions", |handlers| &mut handlers.code_actions),
+        ("perform_code_action", |handlers| {
+            &mut handlers.perform_code_action
+        }),
+        ("show_document", |handlers| &mut handlers.show_document),
+    ];
+}
+
 fn weak(handler: &Option<Rc<ScriptHandler>>) -> Option<Weak<ScriptHandler>> {
     handler.as_ref().map(Rc::downgrade)
 }

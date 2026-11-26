@@ -398,28 +398,95 @@ fn insert(
     }
 }
 
+/// How well an item's filter text matches the typed word, best first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Match {
+    Exact,
+    Prefix,
+    PrefixIgnoringCase,
+    /// Each typed run starts a word of the name, as `gBN` or `get_by` match
+    /// `getByName`.
+    WordStarts,
+    Scattered,
+}
+
+// The server's sortText ranks items it considers equally good, so it orders
+// items within a match quality rather than across them, as IntelliJ's lookup
+// does; otherwise `fo` could list `afxoo` above `focus`.
 fn visible_completions(items: &[CompletionItem], word: &str) -> Vec<CompletionItem> {
-    let word: Vec<char> = word.to_lowercase().chars().collect();
-    let mut visible: Vec<CompletionItem> = items
+    let mut visible: Vec<(Match, &CompletionItem)> = items
         .iter()
-        .filter(|item| {
+        .filter_map(|item| {
             let text = item.filter_text.as_deref().unwrap_or(&item.label);
-            let mut wanted = word.iter().peekable();
-            for ch in text.to_lowercase().chars() {
-                if wanted.peek() == Some(&&ch) {
-                    wanted.next();
-                }
-            }
-            wanted.peek().is_none()
+            Some((match_quality(text, word)?, item))
         })
-        .cloned()
         .collect();
-    visible.sort_by(|a, b| {
-        let key =
-            |item: &CompletionItem| item.sort_text.clone().unwrap_or_else(|| item.label.clone());
-        key(a).cmp(&key(b))
-    });
-    visible
+    let key = |item: &CompletionItem| item.sort_text.clone().unwrap_or_else(|| item.label.clone());
+    visible.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| key(a.1).cmp(&key(b.1))));
+    visible.into_iter().map(|(_, item)| item.clone()).collect()
+}
+
+fn match_quality(text: &str, word: &str) -> Option<Match> {
+    if text == word {
+        return Some(Match::Exact);
+    }
+    if text.starts_with(word) {
+        return Some(Match::Prefix);
+    }
+    let text: Vec<char> = text.chars().collect();
+    let word: Vec<char> = word.chars().collect();
+    let same = |a: char, b: char| a.to_lowercase().eq(b.to_lowercase());
+    if word.len() <= text.len() && text.iter().zip(&word).all(|(&a, &b)| same(a, b)) {
+        return Some(Match::PrefixIgnoringCase);
+    }
+    let starts: Vec<usize> = (0..text.len()).filter(|&i| starts_word(&text, i)).collect();
+    if matches_word_starts(&text, &starts, &word, &same) {
+        return Some(Match::WordStarts);
+    }
+    let mut wanted = word.iter().peekable();
+    for &ch in &text {
+        if wanted.peek().is_some_and(|&&w| same(ch, w)) {
+            wanted.next();
+        }
+    }
+    wanted.peek().is_none().then_some(Match::Scattered)
+}
+
+fn starts_word(text: &[char], i: usize) -> bool {
+    let ch = text[i];
+    if !ch.is_alphanumeric() {
+        return false;
+    }
+    let Some(&before) = i.checked_sub(1).and_then(|j| text.get(j)) else {
+        return true;
+    };
+    !before.is_alphanumeric()
+        || (ch.is_uppercase() && !before.is_uppercase())
+        || ch.is_ascii_digit() != before.is_ascii_digit()
+}
+
+/// The typed word, split into runs, each the start of a later word in `text`.
+fn matches_word_starts(
+    text: &[char],
+    starts: &[usize],
+    word: &[char],
+    same: &impl Fn(char, char) -> bool,
+) -> bool {
+    let Some((&first, rest)) = starts.split_first() else {
+        return word.is_empty();
+    };
+    if word.is_empty() {
+        return true;
+    }
+    let run = text[first..]
+        .iter()
+        .zip(word)
+        .take_while(|&(&a, &b)| same(a, b))
+        .count();
+    (1..=run)
+        .rev()
+        .any(|taken| matches_word_starts(text, rest, &word[taken..], same))
+        || matches_word_starts(text, rest, word, same)
 }
 
 fn hover_markdown(hover: &Hover) -> String {
@@ -543,5 +610,44 @@ impl Render for EditorPopups {
             None => self.drawn_at = None,
         }
         root.children(menu).children(info)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ranked(labels: &[&str], word: &str) -> Vec<String> {
+        let items: Vec<CompletionItem> = labels
+            .iter()
+            .map(|label| CompletionItem {
+                label: label.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        visible_completions(&items, word)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_better_match_ranks_above_a_better_sort_text() {
+        assert_eq!(
+            ranked(&["afxoo", "Focus", "focus", "fo", "xfo"], "fo"),
+            ["fo", "focus", "Focus", "afxoo", "xfo"]
+        );
+    }
+
+    #[test]
+    fn word_starts_rank_above_scattered_letters() {
+        assert_eq!(
+            ranked(&["gabbyNote", "getByName", "get_by_name", "zzz"], "gBN"),
+            ["getByName", "get_by_name", "gabbyNote"]
+        );
+        assert_eq!(
+            ranked(&["get_by_name", "target_by"], "getby"),
+            ["get_by_name", "target_by"]
+        );
     }
 }

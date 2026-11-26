@@ -3327,7 +3327,7 @@ const BASE: &str = r#"  /** A row. */
     /** Moves the caret and scrolls it into view, without taking the keyboard. */
     set_cursor(position: EditorPosition): void;
     set_selection(range: EditorRange): void;
-    /** LSP `Diagnostic`s, drawn as underlines with a card on hover. An edit clears them until the next call. Colors: `diagnostic.error` (and `warning`, `info`, `hint`) in `syntax`. */
+    /** LSP `Diagnostic`s, drawn as underlines with a card on hover. They move with edits until the next call replaces them, and one whose text is deleted goes. Colors: `diagnostic.error` (and `warning`, `info`, `hint`) in `syntax`. */
     set_diagnostics(list: unknown[]): void;
     /** Decoded tokens; `type` is looked up in the `syntax` colors. */
     set_semantic_tokens(list: { range: EditorRange; type: string }[]): void;

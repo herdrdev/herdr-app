@@ -6480,15 +6480,7 @@ globalThis.__gpui = (() => {
   // HERDR: Rust sends a code editor's requests here as JSON. A task rather than a
   // plain call so an answering handler can await, with a `cx` that survives it.
   const editorLanguage = (lsp) => {
-    const known = [
-      "hover",
-      "completion",
-      "completion_accepted",
-      "definition",
-      "code_actions",
-      "perform_code_action",
-      "show_document",
-    ];
+    const known = __editor_lsp_handlers;
     for (const name of Object.keys(lsp)) {
       if (name !== "completion_triggers" && !known.includes(name)) {
         throw new TypeError(

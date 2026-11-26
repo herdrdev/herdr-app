@@ -22,7 +22,7 @@ use rquickjs::{
 };
 
 use crate::{
-    editor_language::{LanguageHandlers, ScriptHandler},
+    editor_language::{HandlerSlot, LanguageHandlers, ScriptHandler},
     entities::{EntityHandle, InputEventName, OtpEventName, SliderEventName},
     scope::{self, ScopePhase},
     spec::{Component, SpecId},
@@ -43,7 +43,7 @@ pub(super) struct Handler(pub(super) Persistent<Function<'static>>);
 // HERDR: the handlers a code editor's `lsp` option names, saved while there is a
 // context to save them with.
 struct ScriptLanguage {
-    functions: Vec<(&'static str, Persistent<Function<'static>>)>,
+    functions: Vec<(&'static str, HandlerSlot, Persistent<Function<'static>>)>,
     completion_triggers: Vec<String>,
     owner: Rc<InputCallbackOwner>,
 }
@@ -52,17 +52,9 @@ impl<'js> FromJs<'js> for ScriptLanguage {
     fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> JsResult<Self> {
         let object = Object::from_js(ctx, value)?;
         let mut functions = Vec::new();
-        for name in [
-            "hover",
-            "completion",
-            "completion_accepted",
-            "definition",
-            "code_actions",
-            "perform_code_action",
-            "show_document",
-        ] {
+        for (name, slot) in LanguageHandlers::SLOTS {
             if let Some(function) = object.get::<_, Option<Function<'js>>>(name)? {
-                functions.push((name, Persistent::save(ctx, function)));
+                functions.push((name, slot, Persistent::save(ctx, function)));
             }
         }
         Ok(Self {
@@ -83,7 +75,7 @@ impl ScriptLanguage {
             completion_triggers: self.completion_triggers,
             ..Default::default()
         };
-        for (name, function) in self.functions {
+        for (name, slot, function) in self.functions {
             let runtime = runtime.clone();
             let owner = self.owner.clone();
             let handler = ScriptHandler::new(name, move |json, reply, window, cx| {
@@ -91,15 +83,7 @@ impl ScriptLanguage {
                     runtime.dispatch_editor_call(&function, &owner, json, Some(reply), window, cx);
                 }
             });
-            *match name {
-                "hover" => &mut handlers.hover,
-                "completion" => &mut handlers.completion,
-                "completion_accepted" => &mut handlers.completion_accepted,
-                "definition" => &mut handlers.definition,
-                "code_actions" => &mut handlers.code_actions,
-                "perform_code_action" => &mut handlers.perform_code_action,
-                _ => &mut handlers.show_document,
-            } = Some(handler);
+            *slot(&mut handlers) = Some(handler);
         }
         handlers
     }
@@ -120,6 +104,10 @@ impl<'js> FromJs<'js> for Handler {
 pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) -> JsResult<()> {
     let _ = module;
     let globals = ctx.globals();
+    globals.set(
+        "__editor_lsp_handlers",
+        LanguageHandlers::SLOTS.map(|(name, _)| name).to_vec(),
+    )?;
     for multiline in [false, true] {
         let token_runtime = runtime.clone();
         globals.set(

@@ -208,6 +208,93 @@ fn diagnostics_survive_being_stale_unsorted_or_backwards(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn diagnostics_follow_edits_until_the_next_set(cx: &mut TestAppContext) {
+    let mut h = open(
+        cx,
+        r#"
+  init() {
+    this.log = [];
+    this.code = EditorState.new({ value: "one two three" });
+    const at = (a, b) => ({ start: { line: 0, character: a }, end: { line: 0, character: b } });
+    this.code.set_diagnostics([
+      { range: at(4, 7), severity: 1, message: "two" },
+      { range: at(8, 13), severity: 2, message: "three" },
+      { range: at(11, 11), severity: 3, message: "point" },
+    ]);
+  }
+"#,
+    );
+    let editor = h.editor.clone();
+    let ranges = |h: &mut Harness| {
+        h.context.update(|_, cx| {
+            let set = editor
+                .read(cx)
+                .diagnostics()
+                .expect("a code editor has them");
+            set.iter()
+                .map(|entry| (entry.message.to_string(), entry.range.clone()))
+                .collect::<Vec<_>>()
+        })
+    };
+    h.focus();
+    h.context
+        .update(|_, cx| editor.update(cx, |state, cx| state.set_selected_range(0..0, cx)));
+    h.context.simulate_input("zz");
+    h.settle();
+    assert_eq!(h.text(), "zzone two three");
+    assert_eq!(
+        ranges(&mut h),
+        [
+            ("two".into(), 6..9),
+            ("three".into(), 10..15),
+            ("point".into(), 13..13)
+        ],
+        "typing before them moves them along"
+    );
+
+    let editor_for_edit = h.editor.clone();
+    h.context.update(|window, cx| {
+        editor_for_edit.update(cx, |state, cx| {
+            let at = |character| lsp_types::Position::new(0, character);
+            state
+                .apply_lsp_edits(
+                    &[lsp_types::TextEdit::new(
+                        lsp_types::Range::new(at(9), at(15)),
+                        String::new(),
+                    )],
+                    window,
+                    cx,
+                )
+                .expect("one edit");
+        })
+    });
+    h.settle();
+    assert_eq!(h.text(), "zzone two");
+    assert_eq!(
+        ranges(&mut h),
+        [("two".into(), 6..9)],
+        "deleting a diagnostic's text drops it, zero-width ones too"
+    );
+    let original = h.context.update(|_, cx| {
+        editor
+            .read(cx)
+            .diagnostics()
+            .expect("set")
+            .iter()
+            .next()
+            .expect("two")
+            .diagnostic
+            .range
+            .clone()
+    });
+    assert_eq!(
+        original.start,
+        gpui_base::input::Position::new(0, 4),
+        "the server's own range stays as reported, for code action requests"
+    );
+}
+
+#[gpui::test]
 fn a_handler_answers_while_base_is_mid_update_and_may_read_the_editor(cx: &mut TestAppContext) {
     let mut h = open(
         cx,
@@ -565,10 +652,17 @@ fn the_kept_menu_narrows_to_the_longer_word(cx: &mut TestAppContext) {
     assert!(menu_open(&mut h));
     h.context.simulate_input("o");
     h.settle();
-    assert!(menu_open(&mut h), "the next answer hasn't come, and the menu is still up");
+    assert!(
+        menu_open(&mut h),
+        "the next answer hasn't come, and the menu is still up"
+    );
     h.context.simulate_keystrokes("enter");
     h.settle();
-    assert_eq!(h.text(), "focus", "`fax` no longer matches `fo`, so `focus` is first");
+    assert_eq!(
+        h.text(),
+        "focus",
+        "`fax` no longer matches `fo`, so `focus` is first"
+    );
 }
 
 #[gpui::test]
@@ -668,7 +762,11 @@ fn the_item_picked_with_the_arrows_stays_picked_through_a_new_answer(cx: &mut Te
     assert_eq!(h.log(), "ask,ask");
     h.context.simulate_keystrokes("enter");
     h.settle();
-    assert_eq!(h.text(), "fob", "`fob` is second once `fax` is filtered out, and still picked");
+    assert_eq!(
+        h.text(),
+        "fob",
+        "`fob` is second once `fax` is filtered out, and still picked"
+    );
 }
 
 /// Accepts `item` with `key`, the caret after the `f` of `fxyz`.
@@ -712,12 +810,18 @@ fn tab_replaces_the_rest_of_the_word(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn enter_keeps_the_rest_of_the_word_for_an_item_without_its_own_range(cx: &mut TestAppContext) {
-    assert_eq!(accept_over_word(cx, r#"{ label: "focus" }"#, "enter"), "focusxyz");
+    assert_eq!(
+        accept_over_word(cx, r#"{ label: "focus" }"#, "enter"),
+        "focusxyz"
+    );
 }
 
 #[gpui::test]
 fn tab_replaces_the_word_for_an_item_without_its_own_range(cx: &mut TestAppContext) {
-    assert_eq!(accept_over_word(cx, r#"{ label: "focus", insertText: "focus()" }"#, "tab"), "focus()");
+    assert_eq!(
+        accept_over_word(cx, r#"{ label: "focus", insertText: "focus()" }"#, "tab"),
+        "focus()"
+    );
 }
 
 #[gpui::test]
