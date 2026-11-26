@@ -123,6 +123,7 @@ impl InputBaseState<EditorMode> {
         &mut self,
         _range: &Range<usize>,
         new_text: &str,
+        completion_was_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -173,9 +174,10 @@ impl InputBaseState<EditorMode> {
         if new_offset < start_offset {
             return;
         }
-        let completion = &mut self.extras.context_menu_content.completion;
-        completion.open = latched.is_some() && completion.was_open;
-        completion.was_open = false;
+        // HERDR: typing on through the word keeps the menu up while the next
+        // answer is on its way, instead of blinking out at every key.
+        self.extras.context_menu_content.completion.open =
+            latched.is_some() && completion_was_open;
 
         let query = self
             .text_for_range(
@@ -318,9 +320,7 @@ impl InputBaseState<EditorMode> {
     }
 
     pub(crate) fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        let completion = &mut self.extras.context_menu_content.completion;
-        completion.was_open |= completion.open;
-        completion.open = false;
+        self.extras.context_menu_content.completion.open = false;
         self.extras.context_menu_content.code_action.open = false;
         self.extras.context_menu_task = Task::ready(Ok(()));
         cx.notify();

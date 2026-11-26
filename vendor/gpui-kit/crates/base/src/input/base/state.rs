@@ -4167,6 +4167,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         // Committing a composition ends the transaction it opened, whether or
         // not the platform follows up with `unmark_text`.
         let ends_composition = self.ime_marked_range.is_some();
+        let completion_was_open = M::is_completion_menu_open(self, cx);
 
         self.pause_blink_cursor(cx);
 
@@ -4269,7 +4270,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             }
 
             if !self.silent_replace_text {
-                M::on_text_typed(self, &range, new_text, window, cx);
+                M::on_text_typed(self, &range, new_text, completion_was_open, window, cx);
             }
             return;
         }
@@ -4382,7 +4383,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             self.mode.update_auto_grow(&self.display_map);
         }
         if !self.silent_replace_text {
-            M::on_text_typed(self, &range, &new_text, window, cx);
+            M::on_text_typed(self, &range, &new_text, completion_was_open, window, cx);
         }
         if self.emit_events {
             cx.emit(InputEvent::Change);

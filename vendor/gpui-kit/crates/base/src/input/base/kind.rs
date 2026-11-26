@@ -261,10 +261,14 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
     }
 
     /// Offers freshly typed text to the completion engine.
+    ///
+    /// `completion_was_open` is read before the edit, because the edit itself
+    /// closes the menu through [`Self::hide_context_menu`].
     fn on_text_typed(
         _state: &mut InputBaseState<Self>,
         _range: &std::ops::Range<usize>,
         _text: &str,
+        _completion_was_open: bool,
         _window: &mut Window,
         _cx: &mut gpui::Context<InputBaseState<Self>>,
     ) {
@@ -286,6 +290,11 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
 
     /// Whether a completion or code-action menu is currently open.
     fn is_context_menu_open(_state: &InputBaseState<Self>, _cx: &gpui::App) -> bool {
+        false
+    }
+
+    /// Whether the completion menu, not the code-action one, is currently open.
+    fn is_completion_menu_open(_state: &InputBaseState<Self>, _cx: &gpui::App) -> bool {
         false
     }
 

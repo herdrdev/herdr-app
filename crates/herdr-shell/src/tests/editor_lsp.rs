@@ -488,6 +488,46 @@ fn escape_closes_the_menu_and_leaves_the_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn typing_after_escape_leaves_the_menu_closed(cx: &mut TestAppContext) {
+    let mut h = open(
+        cx,
+        r#"
+  init() {
+    this.log = [];
+    this.code = EditorState.new({
+      value: "",
+      lsp: {
+        completion: async () => {
+          if (this.waiting) await new Promise((resolve) => { this.pending = resolve; });
+          this.waiting = true;
+          return [{ label: "xylophone" }];
+        },
+      },
+    });
+  }
+"#,
+    );
+    let open = |h: &mut Harness| {
+        let editor = h.editor.clone();
+        h.context
+            .update(|_, cx| editor.read(cx).completion_menu_state().open)
+    };
+    h.focus();
+    h.context.simulate_input("x");
+    h.settle();
+    assert!(open(&mut h));
+    h.context.simulate_keystrokes("escape");
+    h.settle();
+    h.context.simulate_input("y");
+    h.settle();
+    assert!(
+        !open(&mut h),
+        "the next key in the same word doesn't bring back a menu escape closed"
+    );
+    assert_eq!(h.text(), "xy");
+}
+
+#[gpui::test]
 fn code_actions_get_their_diagnostics_and_run_through_the_mod(cx: &mut TestAppContext) {
     let mut h = open(
         cx,

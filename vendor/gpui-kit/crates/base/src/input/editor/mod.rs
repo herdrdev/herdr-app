@@ -99,10 +99,11 @@ impl InputModeKind for EditorMode {
         state: &mut InputBaseState<Self>,
         range: &std::ops::Range<usize>,
         text: &str,
+        completion_was_open: bool,
         window: &mut Window,
         cx: &mut gpui::Context<InputBaseState<Self>>,
     ) {
-        state.handle_completion_trigger(range, text, window, cx);
+        state.handle_completion_trigger(range, text, completion_was_open, window, cx);
     }
 
     fn clear_inline_completion(
@@ -121,6 +122,10 @@ impl InputModeKind for EditorMode {
 
     fn is_context_menu_open(state: &InputBaseState<Self>, cx: &App) -> bool {
         state.is_context_menu_open(cx)
+    }
+
+    fn is_completion_menu_open(state: &InputBaseState<Self>, _cx: &App) -> bool {
+        state.extras.context_menu_content.completion.open
     }
 
     fn handle_context_menu_action(
