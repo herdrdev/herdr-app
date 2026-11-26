@@ -25,6 +25,7 @@ use wayland_protocols::xdg::shell::client::xdg_positioner;
 use wayland_protocols::xdg::shell::client::xdg_surface;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self};
 use wayland_protocols::{
+    ext::background_effect::v1::client::ext_background_effect_surface_v1,
     wp::fractional_scale::v1::client::wp_fractional_scale_v1,
     xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1,
 };
@@ -98,6 +99,30 @@ struct InProgressConfigure {
     tiling: Tiling,
 }
 
+enum WaylandBlur {
+    Kde(org_kde_kwin_blur::OrgKdeKwinBlur),
+    Ext {
+        surface: ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+        region: Option<Bounds<i32>>,
+    },
+}
+
+impl WaylandBlur {
+    fn destroy(self) {
+        match self {
+            Self::Kde(blur) => blur.release(),
+            Self::Ext { surface, .. } => surface.destroy(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlurBackend {
+    Ext,
+    Kde,
+    None,
+}
+
 pub struct WaylandWindowState {
     surface_state: WaylandSurfaceState,
     parent: Option<WaylandWindowStatePtr>,
@@ -107,7 +132,7 @@ pub struct WaylandWindowState {
     pub surface: wl_surface::WlSurface,
     app_id: Option<String>,
     appearance: WindowAppearance,
-    blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
+    blur: Option<WaylandBlur>,
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
@@ -777,8 +802,8 @@ impl Drop for WaylandWindow {
         state.renderer.take();
 
         // Destroy blur first, this has no dependencies.
-        if let Some(blur) = &state.blur {
-            blur.release();
+        if let Some(blur) = state.blur.take() {
+            blur.destroy();
         }
 
         // Decorations must be destroyed before the xdg state.
@@ -1100,6 +1125,7 @@ impl WaylandWindowStatePtr {
                     let got_unmaximized = state.maximized && !configure.maximized;
                     state.fullscreen = configure.fullscreen;
                     state.maximized = configure.maximized;
+                    let tiling_changed = state.tiling != configure.tiling;
                     state.tiling = configure.tiling;
                     let visibility_changed = state.visibility != configure.visibility;
                     state.visibility = configure.visibility;
@@ -1125,6 +1151,9 @@ impl WaylandWindowStatePtr {
                                     size,
                                 };
                             }
+                        }
+                        if tiling_changed {
+                            update_ext_blur_region(&mut state);
                         }
                     }
                     drop(state);
@@ -1489,6 +1518,7 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_size_and_scale(&self, size: Option<Size<Pixels>>, scale: Option<f32>) {
+        let size_changed = size.is_some();
         let (size, scale) = {
             let mut state = self.state.borrow_mut();
             if size.is_none_or(|size| size == state.bounds.size)
@@ -1516,12 +1546,26 @@ impl WaylandWindowStatePtr {
         }
 
         {
-            let state = self.state.borrow();
+            let mut state = self.state.borrow_mut();
+            if size_changed {
+                update_ext_blur_region(&mut state);
+            }
             if let Some(viewport) = &state.viewport {
                 viewport
                     .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
             }
         }
+    }
+
+    pub fn refresh_blur(&self) {
+        let state = self.state.borrow_mut();
+        if state.background_appearance != WindowBackgroundAppearance::Blurred
+            && state.blur.is_none()
+        {
+            return;
+        }
+        update_window(state);
+        self.request_redraw();
     }
 
     pub fn resize(&self, size: Size<Pixels>) {
@@ -2280,23 +2324,125 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
         state.surface.set_opaque_region(None);
     }
 
-    if let Some(ref blur_manager) = state.globals.blur_manager {
-        if state.background_appearance == WindowBackgroundAppearance::Blurred {
-            if state.blur.is_none() {
-                let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
-                state.blur = Some(blur);
+    update_blur(&mut state);
+
+    region.destroy();
+}
+
+// HERDR: prefer ext-background-effect-v1 when blur capability is present, falling
+// back to org_kde_kwin_blur for older compositors.
+fn select_blur_backend(
+    appearance: WindowBackgroundAppearance,
+    ext_blur_available: bool,
+    kde_blur_available: bool,
+) -> BlurBackend {
+    if appearance != WindowBackgroundAppearance::Blurred {
+        return BlurBackend::None;
+    }
+    if ext_blur_available {
+        BlurBackend::Ext
+    } else if kde_blur_available {
+        BlurBackend::Kde
+    } else {
+        BlurBackend::None
+    }
+}
+
+fn blur_region_bounds(
+    bounds: Bounds<Pixels>,
+    inset: Pixels,
+    tiling: Tiling,
+) -> Option<Bounds<i32>> {
+    let area =
+        inset_by_tiling(bounds.map_origin(|_| px(0.0)), inset, tiling).map(|v| f32::from(v) as i32);
+    (area.size.width > 0 && area.size.height > 0).then_some(area)
+}
+
+fn update_ext_blur_region(state: &mut WaylandWindowState) {
+    let area = blur_region_bounds(state.bounds, state.inset(), state.tiling);
+    let Some(WaylandBlur::Ext {
+        ref surface,
+        ref mut region,
+    }) = state.blur
+    else {
+        return;
+    };
+    if *region == area {
+        return;
+    }
+    if let Some(area) = area {
+        let wl_region = state
+            .globals
+            .compositor
+            .create_region(&state.globals.qh, ());
+        wl_region.add(
+            area.origin.x,
+            area.origin.y,
+            area.size.width,
+            area.size.height,
+        );
+        surface.set_blur_region(Some(&wl_region));
+        wl_region.destroy();
+    } else {
+        surface.set_blur_region(None);
+    }
+    *region = area;
+}
+
+fn update_blur(state: &mut WaylandWindowState) {
+    let backend = select_blur_backend(
+        state.background_appearance,
+        state.globals.background_effect_manager.is_some()
+            && state.globals.background_effect_blur_supported.get(),
+        state.globals.blur_manager.is_some(),
+    );
+
+    let matches_backend = matches!(
+        (&state.blur, backend),
+        (Some(WaylandBlur::Kde(_)), BlurBackend::Kde)
+            | (Some(WaylandBlur::Ext { .. }), BlurBackend::Ext)
+            | (None, BlurBackend::None)
+    );
+    if !matches_backend && let Some(old) = state.blur.take() {
+        match old {
+            WaylandBlur::Kde(blur) => {
+                if let Some(ref blur_manager) = state.globals.blur_manager {
+                    blur_manager.unset(&state.surface);
+                }
+                blur.release();
             }
-            state.blur.as_ref().unwrap().commit();
-        } else {
-            // It probably doesn't hurt to clear the blur for opaque windows
-            blur_manager.unset(&state.surface);
-            if let Some(b) = state.blur.take() {
-                b.release()
-            }
+            WaylandBlur::Ext { surface, .. } => surface.destroy(),
         }
     }
 
-    region.destroy();
+    match backend {
+        BlurBackend::Ext => {
+            if state.blur.is_none()
+                && let Some(ref manager) = state.globals.background_effect_manager
+            {
+                state.blur = Some(WaylandBlur::Ext {
+                    surface: manager.get_background_effect(&state.surface, &state.globals.qh, ()),
+                    region: None,
+                });
+            }
+            update_ext_blur_region(state);
+        }
+        BlurBackend::Kde => {
+            if state.blur.is_none()
+                && let Some(ref blur_manager) = state.globals.blur_manager
+            {
+                state.blur = Some(WaylandBlur::Kde(blur_manager.create(
+                    &state.surface,
+                    &state.globals.qh,
+                    (),
+                )));
+            }
+            if let Some(WaylandBlur::Kde(ref blur)) = state.blur {
+                blur.commit();
+            }
+        }
+        BlurBackend::None => {}
+    }
 }
 
 pub(crate) trait WindowDecorationsExt {
@@ -2374,4 +2520,83 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+#[cfg(test)]
+mod blur_tests {
+    use super::{BlurBackend, blur_region_bounds, select_blur_backend};
+    use gpui::{Bounds, Pixels, Size, Tiling, WindowBackgroundAppearance, point, px, size};
+
+    #[test]
+    fn select_blur_backend_prefers_ext_over_kde() {
+        assert_eq!(
+            select_blur_backend(WindowBackgroundAppearance::Blurred, true, true),
+            BlurBackend::Ext,
+        );
+        assert_eq!(
+            select_blur_backend(WindowBackgroundAppearance::Blurred, false, true),
+            BlurBackend::Kde,
+        );
+        assert_eq!(
+            select_blur_backend(WindowBackgroundAppearance::Blurred, false, false),
+            BlurBackend::None,
+        );
+        for appearance in [
+            WindowBackgroundAppearance::Opaque,
+            WindowBackgroundAppearance::Transparent,
+        ] {
+            assert_eq!(
+                select_blur_backend(appearance, true, true),
+                BlurBackend::None
+            );
+        }
+    }
+
+    #[test]
+    fn blur_region_bounds_respects_surface_inset_and_tiling() {
+        let bounds: Bounds<Pixels> = Bounds {
+            origin: point(px(50.0), px(80.0)),
+            size: Size {
+                width: px(1000.0),
+                height: px(700.0),
+            },
+        };
+        assert_eq!(
+            blur_region_bounds(bounds, px(12.0), Tiling::default()),
+            Some(Bounds {
+                origin: point(12, 12),
+                size: size(976, 676),
+            }),
+        );
+        assert_eq!(
+            blur_region_bounds(
+                bounds,
+                px(12.0),
+                Tiling {
+                    top: true,
+                    bottom: true,
+                    left: true,
+                    right: false,
+                },
+            ),
+            Some(Bounds {
+                origin: point(0, 0),
+                size: size(988, 700),
+            }),
+        );
+        assert_eq!(
+            blur_region_bounds(
+                Bounds {
+                    origin: point(px(0.0), px(0.0)),
+                    size: Size {
+                        width: px(10.0),
+                        height: px(10.0),
+                    },
+                },
+                px(12.0),
+                Tiling::default(),
+            ),
+            None,
+        );
+    }
 }
