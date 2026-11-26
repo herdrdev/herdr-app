@@ -1,0 +1,120 @@
+From 6ece61c2a0a9600320de7272d79b4d56b99a6a7e Mon Sep 17 00:00:00 2001
+From: herdr-app <herdr-app@localhost>
+Date: Thu, 26 Nov 2026 07:56:27 +0000
+Subject: [PATCH] fix: the core starts on rhel, alma and rocky linux 8
+
+Port of herdr-core master a84b5af0a6f967511c92a12f1eb4f96a77d260c5 onto v0.1.11 for the herdr-app RHEL 8 build. Refresh this patch when that fix changes upstream.
+---
+ crates/herdr-core/src/platform/systemd.rs | 58 ++++++++++++++++++-----
+ 1 file changed, 46 insertions(+), 12 deletions(-)
+
+diff --git a/crates/herdr-core/src/platform/systemd.rs b/crates/herdr-core/src/platform/systemd.rs
+index 159b88b..0315141 100644
+--- a/crates/herdr-core/src/platform/systemd.rs
++++ b/crates/herdr-core/src/platform/systemd.rs
+@@ -86,12 +86,21 @@ pub fn spawn(cmd: &Command, log: &Path) -> Option<io::Result<()>> {
+     env.insert("XDG_RUNTIME_DIR".into(), run.display().to_string());
+     let args: Vec<&OsStr> = cmd.get_args().collect();
+     let name = format!("hc-{}-{}", args.first().and_then(|a| a.to_str()).unwrap_or("run"), &super::random_hex()[..8]);
+-    let here = std::env::current_dir().is_ok_and(|d| d.is_dir());
++    let here = std::env::current_dir().ok().filter(|d| d.is_dir()).unwrap_or_else(|| PathBuf::from("/"));
++    static VERSION: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
++    let version = *VERSION.get_or_init(|| {
++        Command::new("systemd-run")
++            .arg("--version")
++            .output()
++            .ok()
++            .and_then(|out| String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1)?.parse::<u32>().ok())
++            .unwrap_or(u32::MAX)
++    });
+     // Values ride in systemd-run's own environment: its arguments are world-readable.
+     let out = Command::new("systemd-run")
+         .env_clear()
+         .envs(&env)
+-        .args(unit_args(&name, cmd.get_program(), &args, env.keys(), &unset, log, here))
++        .args(unit_args(&name, cmd.get_program(), &args, env.keys(), &unset, log, &here, version))
+         .stdin(Stdio::null())
+         .output();
+     let started = match out {
+@@ -127,11 +136,13 @@ fn service_env(mut env: BTreeMap<String, String>) -> BTreeMap<String, String> {
+ }
+ 
+ /// systemd-run's arguments for one hc service, its environment by name only.
+-/// OOMPolicy: a program killed for memory must not stop the whole service.
+-/// No ManagedOOMPreference: systemd rewrites its cgroup xattr on every property
+-/// change, and uresourced < 0.5.5 answers each rewrite with another change,
+-/// flooding the user manager until it starts nothing. KillMode: when the core
+-/// or holder exits, nothing else goes with it.
++/// OOMPolicy (systemd 243+): a program killed for memory must not stop the whole
++/// service. WorkingDirectory is a property: EL 8's systemd 239 has neither
++/// `--same-dir` nor `--working-directory`. No ManagedOOMPreference: systemd
++/// rewrites its cgroup xattr on every property change, and uresourced < 0.5.5
++/// answers each rewrite with another change, flooding the user manager until it
++/// starts nothing. KillMode: when the core or holder exits, nothing else goes
++/// with it.
+ fn unit_args<'a>(
+     name: &str,
+     program: &OsStr,
+@@ -139,13 +150,17 @@ fn unit_args<'a>(
+     names: impl Iterator<Item = &'a String>,
+     unset: &[&str],
+     log: &Path,
+-    here: bool,
++    here: &Path,
++    version: u32,
+ ) -> Vec<OsString> {
+     let mut out: Vec<OsString> = ["--user", "--quiet", "--collect", "--service-type=exec"].map(OsString::from).into();
+-    out.push(if here { "--same-dir" } else { "--working-directory=/" }.into());
++    if version >= 243 {
++        out.push("-p".into());
++        out.push("OOMPolicy=continue".into());
++    }
+     for p in [
+         format!("--unit={name}"),
+-        "OOMPolicy=continue".into(),
++        format!("WorkingDirectory={}", here.display()),
+         "KillMode=process".into(),
+         "StandardOutput=null".into(),
+         format!("StandardError=append:{}", log.display()),
+@@ -254,17 +269,36 @@ mod tests {
+             env.keys(),
+             &["HC_SCOPE"],
+             Path::new("/s/x.log"),
+-            false,
++            Path::new("/"),
++            259,
+         );
+         let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+         assert!(!args.iter().any(|a| a.contains("secret-canary")), "{args:?}");
+-        for want in ["--setenv=API_KEY", "UnsetEnvironment=HC_SCOPE", "OOMPolicy=continue", "--working-directory=/"] {
++        for want in ["--setenv=API_KEY", "UnsetEnvironment=HC_SCOPE", "OOMPolicy=continue", "WorkingDirectory=/"] {
+             assert!(args.iter().any(|a| a == want), "{want} missing from {args:?}");
+         }
+         assert_eq!(&args[args.len() - 3..], ["/bin/hc", "hold", "/run/$${USER}.sock"]);
+         assert!(!args.iter().any(|a| a.starts_with("ManagedOOM")), "uresourced loops on oomd's xattr: {args:?}");
+     }
+ 
++    #[test]
++    fn el8_services_keep_the_callers_directory_without_newer_options() {
++        let args = super::unit_args(
++            "hc-serve-1",
++            OsStr::new("/bin/hc"),
++            &[OsStr::new("serve")],
++            std::iter::empty::<&String>(),
++            &[],
++            Path::new("/s/x.log"),
++            Path::new("/home/user/my project/a%hb"),
++            239,
++        );
++        let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
++        assert!(args.contains(&"WorkingDirectory=/home/user/my project/a%hb".into()));
++        assert!(!args.iter().any(|a| a.contains("OOMPolicy")));
++        assert!(!args.iter().any(|a| a == "--same-dir" || a.starts_with("--working-directory")));
++    }
++
+     #[test]
+     fn programs_get_the_desktop_the_manager_has_now() {
+         let mut env = map(&[("SSH_AUTH_SOCK", "/tmp/ssh-x/agent.1"), ("DISPLAY", ":1"), ("PATH", "/usr/bin")]);
+-- 
+2.43.0
+
