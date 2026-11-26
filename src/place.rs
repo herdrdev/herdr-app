@@ -75,7 +75,11 @@ pub fn initial(cx: &App) -> (WindowBounds, Option<DisplayId>) {
 
 /// Notes where the window is now; the place to write if it changed.
 fn note(window: &Window, cx: &App) -> Option<Place> {
-    let (state, b): (State, Bounds<Pixels>) = match window.inner_window_bounds() {
+    // Linux opens the window at the saved size including the margin it keeps
+    // for its own shadow (client decorations): save that size, not the inner
+    // one, or the window shrinks by the margin on every start.
+    let bounds = if cfg!(target_os = "linux") { window.window_bounds() } else { window.inner_window_bounds() };
+    let (state, b): (State, Bounds<Pixels>) = match bounds {
         WindowBounds::Windowed(b) => (State::Windowed, b),
         WindowBounds::Maximized(b) => (State::Maximized, b),
         WindowBounds::Fullscreen(b) => (State::Fullscreen, b),

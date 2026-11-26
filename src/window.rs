@@ -4941,7 +4941,7 @@ impl AppWindow {
         }
     }
 
-    fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_overlays(&self, viewport: Size<Pixels>, margin: Edges<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut windows = Vec::new();
         let mut overlays = Vec::new();
         let mut toasts = Vec::new();
@@ -5008,7 +5008,8 @@ impl AppWindow {
                 OverlayKind::Popup => {
                     let at = match o.top {
                         // Centered, hanging from `offset` px below the top (a drop-down from a bar).
-                        Some(off) => point((viewport.width - w) / 2.0, settings::z(off)),
+                        // Popups place in window coordinates: add the frame's shadow margin.
+                        Some(off) => point(margin.left + (viewport.width - w) / 2.0, margin.top + settings::z(off)),
                         None => o.at,
                     };
                     overlays.push(
@@ -5020,7 +5021,7 @@ impl AppWindow {
                                 let id = o.id.clone();
                                 move |this, _, w, cx| this.close_overlay(&id, w, cx)
                             }))
-                            .child(position_popup(at, body))
+                            .child(position_popup(at, margin, body))
                             .into_any_element(),
                     );
                 }
@@ -5273,10 +5274,12 @@ fn nearest(cur: Bounds<Pixels>, dir: &str, candidates: impl IntoIterator<Item = 
         .map(|(_, _, _, id)| id)
 }
 
-fn position_popup(at: Point<Pixels>, body: Stateful<Div>) -> Anchored {
+/// `margin` is the window frame's shadow margin: popups stay 8 px inside the frame.
+fn position_popup(at: Point<Pixels>, margin: Edges<Pixels>, body: Stateful<Div>) -> Anchored {
+    let gap = px(8.0);
     anchored()
-        .position(point(at.x.max(px(8.0)), at.y.max(px(8.0))))
-        .snap_to_window_with_margin(px(8.0))
+        .position(point(at.x.max(margin.left + gap), at.y.max(margin.top + gap)))
+        .snap_to_window_with_margin(Edges { top: margin.top + gap, right: margin.right + gap, bottom: margin.bottom + gap, left: margin.left + gap })
         .child(body)
 }
 
@@ -5680,9 +5683,13 @@ impl Render for AppWindow {
             || window.is_window_hovered();
         let focused = self.focused_path(window, cx);
         let mut rendered_dividers = HashSet::new();
+        // Room the window keeps around itself for its own shadow (Linux, client decorations).
+        let margin = self.frame_margin(window);
         let tree = self.render_node(&self.chrome, &focused, None, &mut rendered_dividers, cx);
-        let tree = self.window_frame(tree, window, cx);
-        let overlays = self.render_overlays(window.viewport_size(), &mut rendered_dividers, cx);
+        let viewport = window.viewport_size();
+        let viewport = size(viewport.width - margin.left - margin.right, viewport.height - margin.top - margin.bottom);
+        let overlays = self.render_overlays(viewport, margin, &mut rendered_dividers, cx);
+        let frame = self.window_frame(tree, overlays, margin, window, cx);
         // GPUI drops a removed handle without sending its hover-leave callback.
         self.divider_hover.retain(|key| rendered_dividers.contains(key));
         let tracker = self.float_tracker(cx);
@@ -5695,7 +5702,8 @@ impl Render for AppWindow {
             .key_context(key_context("Herdr", "layout", &self.layout_name))
             .size_full()
             .relative()
-            .bg(c("background"))
+            // With a shadow margin the frame paints the background, not the whole window.
+            .when(margin == Edges::default(), |d| d.bg(c("background")))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
@@ -5764,8 +5772,7 @@ impl Render for AppWindow {
             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.finish_divider_drag(window, cx);
             }))
-            .child(tree)
-            .children(overlays)
+            .children(frame)
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
@@ -6388,6 +6395,7 @@ mod tests {
                 };
                 div().size_full().child(super::position_popup(
                     at,
+                    gpui::Edges::default(),
                     div()
                         .id("popup")
                         .debug_selector(|| "popup".into())
@@ -8344,37 +8352,43 @@ export default class Probe extends View { render() { return div().child("probe")
 
     /// A popup opened near the right edge must snap back inside the window
     /// with the 8 px margin: its body may not paint past the window border
-    /// (the reported right-edge menu clip).
+    /// (the reported right-edge menu clip). With a shadow margin (Linux client
+    /// decorations) the 8 px count from the frame, which clips its content.
     #[gpui::test]
     fn popup_at_right_edge_snaps_inside(cx: &mut TestAppContext) {
-        struct PopupView { at: gpui::Point<gpui::Pixels> }
+        struct PopupView { at: gpui::Point<gpui::Pixels>, margin: gpui::Edges<gpui::Pixels> }
         impl Render for PopupView {
             fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
                 div().size_full().child(super::position_popup(
                     self.at,
+                    self.margin,
                     div().id("popup-body").debug_selector(|| "POPUP".into()).w(px(220.)).h(px(140.)).bg(gpui::rgb(0x00ff00)),
                 ))
             }
         }
-        let window = cx.open_window(size(px(800.), px(600.)), |_, _| PopupView {
-            at: point(px(770.), px(100.)),   // 220 wide: 770 + 220 = 990, well past the 800 px edge
-        });
-        cx.run_until_parked();
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        let bounds = visual.debug_bounds("POPUP").expect("the popup body never laid out");
-        // The right edge sits exactly 8 px inside the window: SwitchAnchor alone
-        // would turn the anchor around and stop 220 px short (right at 770), so
-        // this range pins the margin, not just "somewhere inside". A pixel of
-        // rounding is allowed.
-        assert!(
-            bounds.right() >= gpui::px(780.) && bounds.right() <= gpui::px(793.),
-            "popup is not snapped to the right margin: right = {:?}",
-            bounds.right(),
-        );
-        assert!(
-            bounds.left() >= gpui::px(8.),
-            "popup lost its left margin: left = {:?}",
-            bounds.left(),
-        );
+        for m in [0.0, 10.0] {
+            let margin = gpui::Edges::all(px(m));
+            let window = cx.open_window(size(px(800.), px(600.)), move |_, _| PopupView {
+                at: point(px(770.), px(100.)),   // 220 wide: 770 + 220 = 990, well past the 800 px edge
+                margin,
+            });
+            cx.run_until_parked();
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let bounds = visual.debug_bounds("POPUP").expect("the popup body never laid out");
+            // The right edge sits exactly 8 px inside the window (or frame): SwitchAnchor alone
+            // would turn the anchor around and stop 220 px short (right at 770), so
+            // this range pins the margin, not just "somewhere inside". A pixel of
+            // rounding is allowed.
+            assert!(
+                bounds.right() >= gpui::px(780. - m) && bounds.right() <= gpui::px(793. - m),
+                "popup is not snapped to the right margin {m}: right = {:?}",
+                bounds.right(),
+            );
+            assert!(
+                bounds.left() >= gpui::px(8. + m),
+                "popup lost its left margin {m}: left = {:?}",
+                bounds.left(),
+            );
+        }
     }
 }
