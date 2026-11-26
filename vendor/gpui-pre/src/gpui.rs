@@ -50,6 +50,7 @@ pub mod queue;
 #[cfg(any(test, feature = "bench-support"))]
 pub mod randomized_element_tree;
 mod scene;
+mod scene_damage;
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 mod seeds;
 mod shared_uri;
@@ -198,6 +199,7 @@ pub use profiler::*;
 pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
 pub use scene::*;
+pub use scene_damage::*;
 pub use shared_uri::*;
 use std::{any::Any, future::Future};
 pub use style::*;

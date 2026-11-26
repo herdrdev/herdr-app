@@ -41,7 +41,7 @@ swash = { workspace = true }
 unicode-bidi = { workspace = true }
 unicode-segmentation = { workspace = true }
 gpui_util = { workspace = true }
-wgpu = { workspace = true }
+wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "f061efb29a8b28236e0e634c5c0c23a88ff47cae" }
 font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]

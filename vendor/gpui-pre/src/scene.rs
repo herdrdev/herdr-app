@@ -257,6 +257,30 @@ impl Primitive {
             Primitive::Surface(surface) => &surface.content_mask,
         }
     }
+
+    /// The region this primitive can actually affect on screen.
+    pub(crate) fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
+        self.bounds().intersect(&self.content_mask().bounds)
+    }
+}
+
+impl PartialEq for Primitive {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Shadow(left), Self::Shadow(right)) => left == right,
+            (Self::Quad(left), Self::Quad(right)) => left == right,
+            (Self::Path(left), Self::Path(right)) => left == right,
+            (Self::Underline(left), Self::Underline(right)) => left == right,
+            (Self::MonochromeSprite(left), Self::MonochromeSprite(right)) => left == right,
+            (Self::SubpixelSprite(left), Self::SubpixelSprite(right)) => left == right,
+            (Self::PolychromeSprite(left), Self::PolychromeSprite(right)) => left == right,
+            // Surfaces carry platform-specific frame buffers that cannot be
+            // compared cheaply. Treat them as always changing so presentation
+            // stays conservative when a video surface is present.
+            (Self::Surface(_), Self::Surface(_)) => false,
+            _ => false,
+        }
+    }
 }
 
 #[cfg_attr(
@@ -529,7 +553,7 @@ impl PrimitiveBatch {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Quad {
@@ -549,7 +573,7 @@ impl From<Quad> for Primitive {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Underline {
@@ -568,7 +592,7 @@ impl From<Underline> for Primitive {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct Shadow {
@@ -705,7 +729,7 @@ impl Default for TransformationMatrix {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct MonochromeSprite {
@@ -724,7 +748,7 @@ impl From<MonochromeSprite> for Primitive {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct SubpixelSprite {
@@ -743,7 +767,7 @@ impl From<SubpixelSprite> for Primitive {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PolychromeSprite {
@@ -784,7 +808,7 @@ impl From<PaintSurface> for Primitive {
 pub struct PathId(pub usize);
 
 /// A line made up of a series of vertices and control points.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[expect(missing_docs)]
 pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub id: PathId,
@@ -928,7 +952,7 @@ impl From<Path<ScaledPixels>> for Primitive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
 pub struct PathVertex<P: Clone + Debug + Default + PartialEq> {

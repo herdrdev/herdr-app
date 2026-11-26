@@ -16,7 +16,8 @@ use crate::{
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, SceneDamage, Shadow,
+    SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
     TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
@@ -1209,6 +1210,8 @@ pub struct Window {
     // HERDR: distinguish an empty scene from a window that has not drawn yet.
     rendered_frame_size: Option<(Size<Pixels>, f32)>,
     pub(crate) next_frame: Frame,
+    /// Damage from draws since the last present.
+    render_damage: Option<SceneDamage>,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -2107,6 +2110,7 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             rendered_frame_size: None,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            render_damage: None,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -3432,6 +3436,13 @@ impl Window {
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
+        if self.platform_window.wants_render_damage() {
+            let damage = SceneDamage::between(&self.rendered_frame.scene, &self.next_frame.scene);
+            self.render_damage = Some(
+                self.render_damage
+                    .map_or(damage, |pending| pending.union(damage)),
+            );
+        }
         // Cached paint ranges can reuse image sprites without calling paint_image.
         let current_image_tiles: FxHashSet<_> = self.next_frame.scene.polychrome_sprites.iter()
             .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0)).collect();
@@ -3577,7 +3588,12 @@ impl Window {
         let _foreground_turn = profiler::journal::foreground_turn();
         #[cfg(feature = "profiler")]
         let present_start = Instant::now();
-        self.platform_window.draw(&self.rendered_frame.scene);
+        let damage = self
+            .platform_window
+            .wants_render_damage()
+            .then(|| self.render_damage.take().unwrap_or(SceneDamage::Unchanged));
+        self.platform_window
+            .draw_with_damage(&self.rendered_frame.scene, damage);
         #[cfg(feature = "profiler")]
         self.window_profiler.record_present(
             present_start,

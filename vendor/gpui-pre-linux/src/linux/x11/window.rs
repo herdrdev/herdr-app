@@ -1754,6 +1754,20 @@ impl PlatformWindow for X11Window {
     }
 
     fn draw(&self, scene: &Scene) {
+        self.draw_with_damage(scene, None);
+    }
+
+    fn wants_render_damage(&self) -> bool {
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .is_some_and(|renderer| renderer.damage_enabled())
+            && self.0.state.borrow().scale_factor == 1.0
+    }
+
+    fn draw_with_damage(&self, scene: &Scene, damage: Option<gpui::SceneDamage>) {
         let mut inner = self.0.state.borrow_mut();
         let inner = &mut *inner;
         let Some(renderer) = &mut inner.renderer else {
@@ -1780,7 +1794,13 @@ impl PlatformWindow for X11Window {
             return;
         }
 
-        renderer.draw(scene);
+        let damage = if inner.force_render_after_recovery {
+            inner.force_render_after_recovery = false;
+            Some(gpui::SceneDamage::Full)
+        } else {
+            damage
+        };
+        renderer.draw_with_damage(scene, damage);
 
         if renderer.needs_redraw() {
             inner.force_render_after_recovery = true;

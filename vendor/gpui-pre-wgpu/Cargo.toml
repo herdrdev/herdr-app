@@ -156,14 +156,16 @@ default-features = false
 version = "1.10"
 
 [dependencies.wgpu]
-version = "29.0.4"
+git = "https://github.com/gfx-rs/wgpu"
+rev = "f061efb29a8b28236e0e634c5c0c23a88ff47cae"
 
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
 version = "0.3"
 features = ["HtmlCanvasElement"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.wgpu]
-version = "29.0.4"
+git = "https://github.com/gfx-rs/wgpu"
+rev = "f061efb29a8b28236e0e634c5c0c23a88ff47cae"
 features = ["webgl"]
 
 [lints.clippy]
