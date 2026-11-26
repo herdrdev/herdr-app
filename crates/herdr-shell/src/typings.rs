@@ -3297,7 +3297,7 @@ const BASE: &str = r#"  /** A row. */
   export interface EditorLsp {
     /** `textDocument/hover`, without `textDocument`. The editor draws the hover. */
     hover?(params: { position: EditorPosition }, cx: Context): Promise<unknown> | unknown;
-    /** `textDocument/completion`, without `textDocument`: items or a list. The editor draws the menu. */
+    /** `textDocument/completion`, without `textDocument`: items or a list. The editor draws the menu, and asks again as the word grows only while the list is `isIncomplete`. */
     completion?(params: { position: EditorPosition; context: unknown }, cx: Context): Promise<unknown> | unknown;
     /** Besides word characters, what typing opens the menu: a server's `triggerCharacters`. */
     completion_triggers?: string[];

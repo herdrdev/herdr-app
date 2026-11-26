@@ -121,40 +121,61 @@ impl Lsp {
     }
 }
 
+/// LSP forbids a batch of text edits whose ranges overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverlappingEdits;
+
+impl std::fmt::Display for OverlappingEdits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the edits overlap")
+    }
+}
+
+impl std::error::Error for OverlappingEdits {}
+
 impl InputBaseState<EditorMode> {
     /// Apply [`lsp_types::TextEdit`]s as one undo step.
     ///
     /// Every range is read against the document before any of the edits, as
-    /// LSP defines them, and the caret stays on the text it was on. Returns
-    /// false and changes nothing if the ranges overlap, which LSP forbids.
+    /// LSP defines them, and the caret stays on the text it was on. Changes
+    /// nothing if the ranges overlap, which LSP forbids.
     pub fn apply_lsp_edits(
         &mut self,
         text_edits: &[lsp_types::TextEdit],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Result<(), OverlappingEdits> {
         if text_edits.is_empty() || !self.is_editable() {
-            return true;
+            return Ok(());
         }
-        // HERDR: reversed because the batch puts each later edit at an equal
-        // start in front of the earlier one, and LSP wants array order.
-        let edits: Vec<(std::ops::Range<usize>, String)> = text_edits
+        let mut edits: Vec<(std::ops::Range<usize>, String)> = text_edits
             .iter()
-            .rev()
             .map(|edit| {
                 let start = self.text.position_to_offset(&edit.range.start);
                 let end = self.text.position_to_offset(&edit.range.end);
                 (start.min(end)..start.max(end), edit.new_text.clone())
             })
             .collect();
-        let mut ranges: Vec<_> = edits.iter().map(|(range, _)| range.clone()).collect();
-        ranges.sort_by_key(|range| range.start);
-        if ranges.windows(2).any(|pair| pair[0].end > pair[1].start) {
-            return false;
+        // Stable, so edits at one position keep the order LSP gives them in.
+        edits.sort_by_key(|(range, _)| range.start);
+        if edits.windows(2).any(|pair| pair[0].0.end > pair[1].0.start) {
+            return Err(OverlappingEdits);
+        }
+        // HERDR: edits at one position become one, their texts in LSP's order,
+        // so no edit relies on how the batch orders equal starts.
+        let mut merged: Vec<(std::ops::Range<usize>, String)> = Vec::with_capacity(edits.len());
+        for (range, text) in edits {
+            match merged.last_mut() {
+                Some((last, last_text)) if last.start == range.start => {
+                    last.end = last.end.max(range.end);
+                    last_text.push_str(&text);
+                }
+                _ => merged.push((range, text)),
+            }
         }
 
         let cursor = self.cursor();
-        let caret = edits.iter().fold(cursor as isize, |caret, (range, text)| {
+        let caret = merged.iter().fold(cursor as isize, |caret, (range, text)| {
             if range.end <= cursor {
                 caret + text.len() as isize - range.len() as isize
             } else if range.start < cursor {
@@ -163,8 +184,8 @@ impl InputBaseState<EditorMode> {
                 caret
             }
         }) as usize;
-        self.replace_text_in_ranges(&edits, window, cx);
+        self.replace_text_in_ranges(&merged, window, cx);
         self.set_selected_range(caret..caret, cx);
-        true
+        Ok(())
     }
 }

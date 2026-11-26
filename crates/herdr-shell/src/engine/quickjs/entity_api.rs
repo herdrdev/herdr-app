@@ -1678,12 +1678,13 @@ fn editor_write(
             .map_err(|error| Exception::throw_type(ctx, &format!("{what}: {error}")))
     }
     use crate::editor_language::{select_range, set_diagnostics, set_semantic_tokens};
-    let mut overlapping = false;
-    let done = match what {
+    // `None` when there was no live host call to make the write in.
+    let done: Option<JsResult<()>> = match what {
         "set_selection" => {
             let range = parse(ctx, what, json)?;
             scope::with_current_app(|cx| {
                 state.update(cx, |state, cx| select_range(state, range, cx));
+                Ok(())
             })
         }
         "set_diagnostics" => {
@@ -1693,6 +1694,7 @@ fn editor_write(
                     set_diagnostics(state, list);
                     cx.notify();
                 });
+                Ok(())
             })
         }
         "set_semantic_tokens" => {
@@ -1702,31 +1704,32 @@ fn editor_write(
                     set_semantic_tokens(state, list);
                     cx.notify();
                 });
+                Ok(())
             })
         }
         "apply_edits" => {
             let edits: Vec<gpui_base::input::lsp_types::TextEdit> = parse(ctx, what, json)?;
             scope::with_current(|window, cx| {
-                state.update(cx, |state, cx| {
-                    overlapping = !state.apply_lsp_edits(&edits, window, cx);
-                });
+                state
+                    .update(cx, |state, cx| state.apply_lsp_edits(&edits, window, cx))
+                    .map_err(|error| Exception::throw_type(ctx, &format!("{what}: {error}")))
             })
         }
         "show_completions" => scope::with_current(|window, cx| {
             state.update(cx, |state, cx| state.show_completions(window, cx));
+            Ok(())
         }),
         "show_code_actions" => scope::with_current(|window, cx| {
             state.update(cx, |state, cx| state.handle_code_action_trigger(window, cx));
+            Ok(())
         }),
         "go_to_definition" => scope::with_current(|window, cx| {
             state.update(cx, |state, cx| state.go_to_definition_at_cursor(window, cx));
+            Ok(())
         }),
         _ => None,
     };
-    if overlapping {
-        return Err(Exception::throw_type(ctx, "apply_edits: the edits overlap"));
-    }
-    done.ok_or_else(|| needs_call(ctx, what))
+    done.unwrap_or_else(|| Err(needs_call(ctx, what)))
 }
 
 fn live_textarea(

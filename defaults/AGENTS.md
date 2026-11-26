@@ -1194,8 +1194,12 @@ a language server's responses pass through unchanged:
 completion_accepted, definition, code_actions, perform_code_action, show_document } })`.
 Each handler is `(params, cx)` and returns the answer or a promise of it; `params`
 are the request's without `textDocument`. The editor draws the hover and the menus
-(up, down, enter, tab; ctrl+. or cmd+. for code actions) and follows definitions
-(ctrl- or cmd-click). The state also has `set_diagnostics(list)`,
+(up, down; enter keeps the rest of the word after the caret, tab replaces it, as
+LSP's `insert` and `replace` ranges do; ctrl+. or cmd+. for code actions) and
+follows definitions (ctrl- or cmd-click). A complete completion list
+(`isIncomplete: false`) is filtered as the word grows without asking again, so
+advertise `insertReplaceSupport` and return `isIncomplete` as the server does.
+The state also has `set_diagnostics(list)`,
 `set_semantic_tokens([{ range, type }])`, `apply_edits(edits)`, `cursor()`,
 `selection()`, `set_cursor(position)`, `set_selection(range)`,
 `on("cursor", ({ position, selection }, cx) => …)`, and for your own keys

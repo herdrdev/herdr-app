@@ -1,7 +1,7 @@
 //! HERDR: a mod drives a code editor's language features through `EditorState`.
 use std::{cell::RefCell, rc::Rc};
 
-use gpui::{AppContext as _, Entity, Task, TestAppContext, VisualTestContext};
+use gpui::{Entity, Task, TestAppContext, VisualTestContext};
 use gpui_base::input::{EditorState, RopeExt as _, lsp_types};
 
 use crate::{ScriptView, ShellRuntime};
@@ -599,6 +599,125 @@ fn a_paste_closes_the_menu(cx: &mut TestAppContext) {
         !menu_open(&mut h),
         "only typing keeps the menu, even when the paste continues its word"
     );
+}
+
+/// Answers at once, logging each request; `incomplete` is the list's `isIncomplete`.
+fn counting_provider(incomplete: bool) -> String {
+    format!(
+        r#"
+  init() {{
+    this.log = [];
+    this.code = EditorState.new({{
+      value: "",
+      lsp: {{
+        completion: (_, cx) => {{
+          this.log.push("ask");
+          cx.notify();
+          return {{
+            isIncomplete: {incomplete},
+            items: [
+              {{ label: "fax", sortText: "1" }},
+              {{ label: "focus", sortText: "2" }},
+              {{ label: "fob", sortText: "3" }},
+            ],
+          }};
+        }},
+      }},
+    }});
+  }}
+"#
+    )
+}
+
+#[gpui::test]
+fn a_complete_list_narrows_without_asking_again(cx: &mut TestAppContext) {
+    let mut h = open(cx, &counting_provider(false));
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    h.context.simulate_input("o");
+    h.settle();
+    assert!(menu_open(&mut h));
+    assert_eq!(h.log(), "ask", "the first answer said it was complete");
+    h.context.simulate_keystrokes("enter");
+    h.settle();
+    assert_eq!(h.text(), "focus");
+}
+
+#[gpui::test]
+fn an_incomplete_list_asks_again_as_the_word_grows(cx: &mut TestAppContext) {
+    let mut h = open(cx, &counting_provider(true));
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    h.context.simulate_input("o");
+    h.settle();
+    assert_eq!(h.log(), "ask,ask");
+}
+
+#[gpui::test]
+fn the_item_picked_with_the_arrows_stays_picked_through_a_new_answer(cx: &mut TestAppContext) {
+    let mut h = open(cx, &counting_provider(true));
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    h.context.simulate_keystrokes("down down");
+    h.settle();
+    h.context.simulate_input("o");
+    h.settle();
+    assert_eq!(h.log(), "ask,ask");
+    h.context.simulate_keystrokes("enter");
+    h.settle();
+    assert_eq!(h.text(), "fob", "`fob` is second once `fax` is filtered out, and still picked");
+}
+
+/// Accepts `item` with `key`, the caret after the `f` of `fxyz`.
+fn accept_over_word(cx: &mut TestAppContext, item: &str, key: &str) -> String {
+    let mut h = open(
+        cx,
+        &format!(
+            r#"
+  init() {{
+    this.log = [];
+    const at = (line, a, b) => ({{ start: {{ line, character: a }}, end: {{ line, character: b }} }});
+    this.code = EditorState.new({{ value: "fxyz", lsp: {{ completion: () => [{item}] }} }});
+  }}
+"#
+        ),
+    );
+    let editor = h.editor.clone();
+    h.focus();
+    h.context
+        .update(|_, cx| editor.update(cx, |state, cx| state.set_selected_range(1..1, cx)));
+    h.context
+        .update(|window, cx| editor.update(cx, |state, cx| state.show_completions(window, cx)));
+    h.settle();
+    assert!(menu_open(&mut h));
+    h.context.simulate_keystrokes(key);
+    h.settle();
+    h.text()
+}
+
+const INSERT_OR_REPLACE: &str = r#"{ label: "focus", textEdit: { newText: "focus", insert: at(0, 0, 1), replace: at(0, 0, 4) } }"#;
+
+#[gpui::test]
+fn enter_keeps_the_rest_of_the_word(cx: &mut TestAppContext) {
+    assert_eq!(accept_over_word(cx, INSERT_OR_REPLACE, "enter"), "focusxyz");
+}
+
+#[gpui::test]
+fn tab_replaces_the_rest_of_the_word(cx: &mut TestAppContext) {
+    assert_eq!(accept_over_word(cx, INSERT_OR_REPLACE, "tab"), "focus");
+}
+
+#[gpui::test]
+fn enter_keeps_the_rest_of_the_word_for_an_item_without_its_own_range(cx: &mut TestAppContext) {
+    assert_eq!(accept_over_word(cx, r#"{ label: "focus" }"#, "enter"), "focusxyz");
+}
+
+#[gpui::test]
+fn tab_replaces_the_word_for_an_item_without_its_own_range(cx: &mut TestAppContext) {
+    assert_eq!(accept_over_word(cx, r#"{ label: "focus", insertText: "focus()" }"#, "tab"), "focus()");
 }
 
 #[gpui::test]

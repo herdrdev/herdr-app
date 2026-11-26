@@ -2,7 +2,7 @@ use crate::input::EditorMode;
 use anyhow::Result;
 use gpui::{App, Context, EntityInputHandler, Pixels, Task, Window, px};
 use lsp_types::{
-    CompletionContext, CompletionItem, CompletionResponse, InlineCompletionContext,
+    CompletionContext, CompletionResponse, InlineCompletionContext,
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
     request::Completion,
 };
@@ -10,6 +10,11 @@ use ropey::Rope;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use crate::input::{InputBaseState, ShowCompletions};
+
+/// What a completion's word is made of.
+pub(crate) fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
 
 /// Default debounce duration for inline completions.
 const DEFAULT_INLINE_COMPLETION_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -151,7 +156,8 @@ impl InputBaseState<EditorMode> {
             return;
         }
 
-        let start_offset = self.completion_word_start(start).unwrap_or(start);
+        let latched = self.completion_word_start(start);
+        let start_offset = latched.unwrap_or(start);
         if new_offset < start_offset {
             return;
         }
@@ -165,6 +171,11 @@ impl InputBaseState<EditorMode> {
             )
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
+        let completion = &mut self.extras.context_menu_content.completion;
+        if latched.is_some() && completion.open && !completion.is_incomplete {
+            completion.query = query;
+            return;
+        }
         self.request_completions(
             provider,
             start_offset,
@@ -211,14 +222,7 @@ impl InputBaseState<EditorMode> {
         };
 
         let offset = self.cursor();
-        let word_len: usize = self
-            .text
-            .chars_at(offset)
-            .reversed()
-            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-            .map(char::len_utf8)
-            .sum();
-        let start_offset = offset - word_len;
+        let start_offset = self.completion_word_range().start;
         let query = self.text.slice(start_offset..offset).to_string();
 
         self.hide_context_menu(cx);
@@ -273,8 +277,27 @@ impl InputBaseState<EditorMode> {
             && range.is_empty()
             && range.start == self.cursor()
             && !text.is_empty()
-            && text.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && text.chars().all(is_word_char)
             && self.completion_word_start(range.start).is_some()
+    }
+
+    /// The word around the caret: what completion filters by and replaces.
+    pub fn completion_word_range(&self) -> Range<usize> {
+        let cursor = self.cursor();
+        let before: usize = self
+            .text
+            .chars_at(cursor)
+            .reversed()
+            .take_while(|&ch| is_word_char(ch))
+            .map(char::len_utf8)
+            .sum();
+        let after: usize = self
+            .text
+            .chars_at(cursor)
+            .take_while(|&ch| is_word_char(ch))
+            .map(char::len_utf8)
+            .sum();
+        cursor - before..cursor + after
     }
 
     /// Record the word a menu is for and ask `provider` about the caret.
@@ -304,13 +327,11 @@ impl InputBaseState<EditorMode> {
         let provider_responses =
             provider.completions(&self.text, new_offset, completion_context, window, cx);
         self.extras.context_menu_task = cx.spawn_in(window, async move |editor, cx| {
-            let mut completions: Vec<CompletionItem> = vec![];
-            if let Some(provider_responses) = provider_responses.await.ok() {
-                match provider_responses {
-                    CompletionResponse::Array(items) => completions.extend(items),
-                    CompletionResponse::List(list) => completions.extend(list.items),
-                }
-            }
+            let (completions, is_incomplete) = match provider_responses.await.ok() {
+                Some(CompletionResponse::Array(items)) => (items, false),
+                Some(CompletionResponse::List(list)) => (list.items, list.is_incomplete),
+                None => (Vec::new(), false),
+            };
 
             editor
                 .update_in(cx, |editor, window, cx| {
@@ -324,9 +345,11 @@ impl InputBaseState<EditorMode> {
                         return;
                     }
 
-                    editor.extras.context_menu_content.completion.open = !completions.is_empty();
-                    editor.extras.context_menu_content.completion.items = completions;
-                    editor.extras.context_menu_content.completion.bump();
+                    let completion = &mut editor.extras.context_menu_content.completion;
+                    completion.open = !completions.is_empty();
+                    completion.items = completions;
+                    completion.is_incomplete = is_incomplete;
+                    completion.bump();
                     cx.notify();
                 })
                 .ok();

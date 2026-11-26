@@ -10,13 +10,13 @@ use gpui::{
     WeakEntity, Window, anchored, deferred, div, px, uniform_list,
 };
 use gpui_base::input::lsp_types::{
-    CompletionItem, CompletionTextEdit, Documentation, Hover, HoverContents, MarkedString,
+    CompletionItem, Documentation, Hover, HoverContents, MarkedString,
 };
 use gpui_base::{
     SemanticThemeTokens, Theme,
     input::{
-        CodeActionItem, DiagnosticSeverity, EditorState, Enter, Escape, IndentInline,
-        InputOverlayKind, MoveDown, MoveUp,
+        CodeActionItem, CompletionInsert, DiagnosticSeverity, EditorState, Enter, Escape,
+        IndentInline, InputOverlayKind, MoveDown, MoveUp,
     },
     text::TextView,
 };
@@ -42,6 +42,9 @@ pub(crate) struct EditorPopups {
     menu_key: (u64, u64, String),
     caret: (usize, std::ops::Range<usize>),
     selected: usize,
+    /// The completion picked with the arrows, which stays selected through new
+    /// answers and filtering while it's still listed. None follows the best match.
+    chosen: Option<ItemKey>,
     list: UniformListScrollHandle,
     completion_accepted: Option<Weak<ScriptHandler>>,
     drawn_at: Option<gpui::Point<Pixels>>,
@@ -73,6 +76,7 @@ impl EditorPopups {
             menu_key: (0, 0, String::new()),
             caret,
             selected: 0,
+            chosen: None,
             list: UniformListScrollHandle::new(),
             completion_accepted: None,
             drawn_at: None,
@@ -90,18 +94,31 @@ impl EditorPopups {
         let code_action = state.code_action_menu_state();
         let word = state
             .text()
-            .slice(word_start(state)..state.cursor())
+            .slice(state.completion_word_range().start..state.cursor())
             .to_string();
+        if !completion.open {
+            self.chosen = None;
+        }
         let key = (completion.revision(), code_action.revision(), word);
         if key != self.menu_key {
-            let revised = key.0 != self.menu_key.0 || key.1 != self.menu_key.1;
             self.completions = Rc::new(visible_completions(&completion.items, &key.2));
             self.actions = Rc::new(code_action.items.clone());
             self.menu_key = key;
-            if revised {
-                self.selected = 0;
-                self.list.scroll_to_item(0, ScrollStrategy::Top);
+            let chosen = if completion.open {
+                self.chosen.as_ref().and_then(|chosen| {
+                    self.completions
+                        .iter()
+                        .position(|item| ItemKey::of(item) == *chosen)
+                })
+            } else {
+                None
+            };
+            if chosen.is_none() {
+                self.chosen = None;
             }
+            self.selected = chosen.unwrap_or(0);
+            self.list
+                .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         }
         let shown = if completion.open {
             self.completions.len()
@@ -139,18 +156,23 @@ impl EditorPopups {
             return false;
         }
         if action.partial_eq(&MoveUp) {
-            self.select((self.selected + len - 1) % len, cx);
+            self.select(kind, (self.selected + len - 1) % len, cx);
         } else if action.partial_eq(&MoveDown) {
-            self.select((self.selected + 1) % len, cx);
-        } else if Enter::is_primary(&*action) || action.partial_eq(&IndentInline) {
-            self.accept(kind, self.selected, window, cx);
+            self.select(kind, (self.selected + 1) % len, cx);
+        } else if Enter::is_primary(&*action) {
+            self.accept(kind, self.selected, CompletionInsert::Insert, window, cx);
+        } else if action.partial_eq(&IndentInline) {
+            self.accept(kind, self.selected, CompletionInsert::Replace, window, cx);
         } else if !action.partial_eq(&Escape) {
             return false;
         }
         true
     }
 
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select(&mut self, kind: InputOverlayKind, index: usize, cx: &mut Context<Self>) {
+        if kind == InputOverlayKind::Completion {
+            self.chosen = self.completions.get(index).map(ItemKey::of);
+        }
         self.selected = index;
         self.list.scroll_to_item(index, ScrollStrategy::Nearest);
         cx.notify();
@@ -160,6 +182,7 @@ impl EditorPopups {
         &mut self,
         kind: InputOverlayKind,
         index: usize,
+        how: CompletionInsert,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -175,7 +198,7 @@ impl EditorPopups {
                 window.defer(cx, move |window, cx| {
                     state.update(cx, |state, cx| {
                         state.dismiss_completion_overlay(cx);
-                        insert(state, &item, window, cx);
+                        insert(state, &item, how, window, cx);
                     });
                     if let Some(handler) = accepted {
                         ask::<serde_json::Value>(&handler, &item, window, cx).detach();
@@ -228,7 +251,9 @@ impl EditorPopups {
                         .hover(move |style| style.bg(colors.accent))
                         .on_click(move |_, window, cx| {
                             popups
-                                .update(cx, |popups, cx| popups.accept(kind, index, window, cx))
+                                .update(cx, |popups, cx| {
+                                    popups.accept(kind, index, CompletionInsert::Insert, window, cx)
+                                })
                                 .ok();
                         })
                         .child(div().flex_1().min_w_0().truncate().child(label))
@@ -339,53 +364,37 @@ fn popup_frame(state: &Entity<EditorState>, tokens: &SemanticThemeTokens) -> gpu
     frame
 }
 
-fn word_start(state: &EditorState) -> usize {
-    let cursor = state.cursor();
-    let word: usize = state
-        .text()
-        .chars_at(cursor)
-        .reversed()
-        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-        .map(char::len_utf8)
-        .sum();
-    cursor - word
+/// Which completion an entry is, across answers that rebuild the list.
+#[derive(Clone, PartialEq, Eq)]
+struct ItemKey {
+    label: String,
+    detail: Option<String>,
+    sort_text: Option<String>,
+}
+
+impl ItemKey {
+    fn of(item: &CompletionItem) -> Self {
+        Self {
+            label: item.label.clone(),
+            detail: item.detail.clone(),
+            sort_text: item.sort_text.clone(),
+        }
+    }
 }
 
 fn insert(
     state: &mut EditorState,
     item: &CompletionItem,
+    how: CompletionInsert,
     window: &mut Window,
     cx: &mut Context<EditorState>,
 ) {
-    // Base inserts a label over the range it's given but an `insertText` after
-    // it, which would leave the typed prefix in front of the completion.
-    let mut item = item.clone();
-    if item.text_edit.is_none()
-        && let Some(text) = item.insert_text.take()
-    {
-        item.label = text;
-    }
-    // Typing on while the menu waits for its next answer leaves the item's range
-    // short of the caret, and the characters past it after the completion.
-    let caret = state.cursor_position();
-    let end = match &mut item.text_edit {
-        Some(CompletionTextEdit::Edit(edit)) => Some(&mut edit.range.end),
-        Some(CompletionTextEdit::InsertAndReplace(edit)) => Some(&mut edit.replace.end),
-        None => None,
-    };
-    if let Some(end) = end
-        && end.line == caret.line
-        && end.character < caret.character
-    {
-        *end = caret;
-    }
-    let range = word_start(state)..state.cursor();
-    state.insert_completion(&item, range, window, cx);
+    state.insert_completion(item, how, window, cx);
     // Edits outside the completion's own, an auto-import most often. They read
     // against the document from before the insert, which only moved what's
     // after it, and servers put them before it.
     if let Some(edits) = &item.additional_text_edits {
-        state.apply_lsp_edits(edits, window, cx);
+        state.apply_lsp_edits(edits, window, cx).ok();
     }
 }
 
@@ -451,7 +460,7 @@ impl Render for EditorPopups {
 
         let mut anchor = None;
         let menu = if completion.open && !self.completions.is_empty() {
-            let start = word_start(state);
+            let start = state.completion_word_range().start;
             state.range_to_bounds(&(start..start)).map(|bounds| {
                 let rows = self
                     .completions
