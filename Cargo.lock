@@ -3518,41 +3518,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d337c9acf058238e45ce0570d8a5958439242889492f91ae2d8e324211a61ccd"
 
 [[package]]
-name = "gpui-shell"
-version = "0.7.1"
-dependencies = [
- "anyhow",
- "async-channel",
- "cap-std",
- "chrono",
- "fs2",
- "gpui-base",
- "gpui-fps",
- "gpui-pre",
- "gpui-pre-platform",
- "gpui-pre-reqwest",
- "image",
- "instant",
- "libc",
- "quickjs-jit",
- "quickjs-jit-runtime",
- "quickjs-jit-stdlib",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "smallvec",
- "smol",
- "syntect",
- "tracing",
- "tungstenite",
- "usvg",
- "wait-timeout",
- "windows 0.58.0",
-]
-
-[[package]]
 name = "group"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3710,7 +3675,7 @@ dependencies = [
  "gpui-pre-platform",
  "gpui-pre-wgpu",
  "gpui-pre-windows",
- "gpui-shell",
+ "herdr-shell",
  "image",
  "libc",
  "notify",
@@ -3733,6 +3698,42 @@ dependencies = [
  "uds_windows",
  "windows-sys 0.61.2",
  "winresource",
+]
+
+[[package]]
+name = "herdr-shell"
+version = "0.7.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "cap-std",
+ "chrono",
+ "fs2",
+ "gpui-base",
+ "gpui-fps",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "gpui-pre-reqwest",
+ "image",
+ "instant",
+ "libc",
+ "quickjs-jit",
+ "quickjs-jit-runtime",
+ "quickjs-jit-stdlib",
+ "schemars",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "smallvec",
+ "smol",
+ "syntect",
+ "tempfile",
+ "tracing",
+ "tungstenite",
+ "usvg",
+ "wait-timeout",
+ "windows 0.58.0",
 ]
 
 [[package]]
