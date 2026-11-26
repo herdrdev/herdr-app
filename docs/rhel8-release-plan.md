@@ -39,8 +39,8 @@ and publishing to the release bucket. `ci.yml` stays untouched.
 | Environment | GitHub-hosted runner + `container:` pinned to `quay.io/almalinux/almalinux:8@sha256:b068b59649ddecf7c95cea3d3f16941eaf1d8a77fcf6ce94c779abae7552e2ea` (glibc 2.28). |
 | Trigger | `workflow_dispatch` so `gh workflow run release.yml --ref <branch>` starts it directly. No tag/publish trigger. |
 | App build | `scripts/package x86_64-unknown-linux-gnu` → `dist/herdr-app-linux-x86_64.tar.gz`. |
-| Core build | Clone upstream `https://github.com/herdrdev/herdr-core` (shallow), checkout the tag matching `distribution/core-version` (currently `0.1.11`, tag `v0.1.11`), apply its patch, init submodules, and build `cargo build --locked --release -p herdr-core` with the same Rust/Zig toolchains in the same container. |
-| Core patch | `distribution/rhel8/herdr-core-rhel8.patch` is a port of herdr-core master commit `a84b5af0a6f967511c92a12f1eb4f96a77d260c5` onto `v0.1.11`: systemd 239 has neither `--same-dir`/`--working-directory` nor `OOMPolicy`. Kept here so upstream core stays untouched; refresh it when that fix changes on master. |
+| Core build | Clone upstream `https://github.com/herdrdev/herdr-core` (shallow, `master`), apply its patch, init submodules, and build `cargo build --locked --release -p herdr-core` with the same Rust/Zig toolchains in the same container. No core fork and no pinned core tag. |
+| Core patch | `distribution/rhel8/herdr-core-rhel8.patch` is a port of master commit `a84b5af0a6f967511c92a12f1eb4f96a77d260c5` onto `v0.1.11`: systemd 239 has neither `--same-dir`/`--working-directory` nor `OOMPolicy`. Kept here instead of in a core fork; master already has the fix, so this port currently does not apply to master and needs re-deriving (or dropping) before the run succeeds. |
 | Output | One tarball, `dist/herdr-app-rhel8-x86_64.tar.gz`: the `scripts/package` app tree plus `herdr-core`, an `hc` symlink, the `herdr-app-rhel8` launcher and `README-rhel8.md` in `herdr-app/`. Upload as artifact `herdr-app-rhel8-x86_64`. Nothing goes to the release bucket or manifest. |
 | X11 scale | This build ships a launcher, `herdr-app-rhel8`, that defaults `GPUI_X11_SCALE_FACTOR=1` when unset (an explicit value still wins). RHEL 8 X11 desktops often report `Xft.dpi: 192` on a 1080p screen, which makes GPUI lay the window out at 2x and render more pixels than the screen. The app's own code keeps its normal scale detection. |
 | Rasterizer threads | The same launcher defaults `LP_NUM_THREADS=1` when unset (Mesa llvmpipe/lavapipe: one thread instead of one per core), so rasterization doesn't compete with the compositor and the core on a small VM. An explicit value still wins. This trades frame time for CPU headroom; it is not a speedup on machines with cores to spare. |
@@ -76,8 +76,8 @@ Commit `9a3c18f` on branch `build/rhel8-release-gha`.
 - `scripts/ci-sources restore`, then `scripts/package
   x86_64-unknown-linux-gnu` for the app (already working in run 3).
 - **Build herdr-core in the same job** (still to implement):
-  - Clone upstream into a temp dir:
-    `git clone --depth 1 --branch "v$(cat distribution/core-version)" https://github.com/herdrdev/herdr-core.git <tmp>/herdr-core`.
+  - Clone upstream `master` into a temp dir:
+    `git clone --depth 1 --branch master https://github.com/herdrdev/herdr-core.git <tmp>/herdr-core`.
   - Apply `distribution/rhel8/herdr-core-rhel8.patch` with
     `git -C <tmp>/herdr-core apply "$GITHUB_WORKSPACE/distribution/rhel8/herdr-core-rhel8.patch"`.
   - `git -C <tmp>/herdr-core submodule update --init --depth 1`.
@@ -168,9 +168,10 @@ build, and `HERDR_APP_PRESENT_MODE=fifo` restores vsync.
   use plain `run:` steps (`git clone --recurse-submodules`) and `rustup`/`curl`
   for toolchains.
 - **herdr-core build**: it uses LTO + `strip` in release mode, so the build may
-  take several minutes; keep the 60-minute job timeout. If the patch no longer
-  applies, re-derive it from the current herdr-core master fix against
-  `distribution/core-version`, then note the core tag in the handoff.
+  take several minutes; keep the 60-minute job timeout. The patch was rebased
+  onto `v0.1.11` and does not apply to master as of `329cb66`; re-derive it
+  against master (or drop it if the fix is already there) before dispatching,
+  then note the core commit in the handoff.
 - **Runtime compatibility**: glibc 2.28 is the floor, not a guarantee; the app
   still needs a desktop session and a working Vulkan driver (README.md). Test
   the artifact on a real RHEL 8 machine before any future publication.
