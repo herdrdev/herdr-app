@@ -527,6 +527,80 @@ fn typing_after_escape_leaves_the_menu_closed(cx: &mut TestAppContext) {
     assert_eq!(h.text(), "xy");
 }
 
+/// A provider that answers its first request at once and leaves every later
+/// one on its way, so a test sees what the menu shows while it waits.
+const SLOW_AFTER_FIRST: &str = r#"
+  init() {
+    this.log = [];
+    this.code = EditorState.new({
+      value: "",
+      lsp: {
+        completion: async () => {
+          // Holding the resolver keeps the promise alive; a freed one reads as
+          // the mod giving up.
+          if (this.waiting) await new Promise((resolve) => { this.pending = resolve; });
+          this.waiting = true;
+          return [
+            { label: "fax", sortText: "1" },
+            { label: "focus", sortText: "2" },
+          ];
+        },
+      },
+    });
+  }
+"#;
+
+fn menu_open(h: &mut Harness) -> bool {
+    let editor = h.editor.clone();
+    h.context
+        .update(|_, cx| editor.read(cx).completion_menu_state().open)
+}
+
+#[gpui::test]
+fn the_kept_menu_narrows_to_the_longer_word(cx: &mut TestAppContext) {
+    let mut h = open(cx, SLOW_AFTER_FIRST);
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    assert!(menu_open(&mut h));
+    h.context.simulate_input("o");
+    h.settle();
+    assert!(menu_open(&mut h), "the next answer hasn't come, and the menu is still up");
+    h.context.simulate_keystrokes("enter");
+    h.settle();
+    assert_eq!(h.text(), "focus", "`fax` no longer matches `fo`, so `focus` is first");
+}
+
+#[gpui::test]
+fn a_character_outside_the_word_closes_the_menu(cx: &mut TestAppContext) {
+    let mut h = open(cx, SLOW_AFTER_FIRST);
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    assert!(menu_open(&mut h));
+    h.context.simulate_input(" ");
+    h.settle();
+    assert!(!menu_open(&mut h));
+}
+
+#[gpui::test]
+fn a_paste_closes_the_menu(cx: &mut TestAppContext) {
+    let mut h = open(cx, SLOW_AFTER_FIRST);
+    h.focus();
+    h.context.simulate_input("f");
+    h.settle();
+    assert!(menu_open(&mut h));
+    h.context
+        .update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("o".into())));
+    h.context.simulate_keystrokes("ctrl-v");
+    h.settle();
+    assert_eq!(h.text(), "fo");
+    assert!(
+        !menu_open(&mut h),
+        "only typing keeps the menu, even when the paste continues its word"
+    );
+}
+
 #[gpui::test]
 fn code_actions_get_their_diagnostics_and_run_through_the_mod(cx: &mut TestAppContext) {
     let mut h = open(

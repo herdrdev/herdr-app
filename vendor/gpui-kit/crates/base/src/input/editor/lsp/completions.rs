@@ -123,7 +123,6 @@ impl InputBaseState<EditorMode> {
         &mut self,
         _range: &Range<usize>,
         new_text: &str,
-        completion_was_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -152,32 +151,10 @@ impl InputBaseState<EditorMode> {
             return;
         }
 
-        // `trigger_start_offset` latches where the word a menu was opened for
-        // begins, so later keystrokes refine the same query instead of starting
-        // over at each character. It only describes this edit while the edit
-        // continues that word: the document between the latch and the edit
-        // must still read as a prefix of the last query. Deleting back into
-        // the word keeps it; typing somewhere else, or into a document that
-        // has since been replaced, starts a new query at this edit instead of
-        // handing the provider text the user never typed as a prefix.
-        let completion = &self.extras.context_menu_content.completion;
-        let latched = completion.trigger_start_offset.filter(|&latched| {
-            latched <= start
-                && start <= latched + completion.query.len()
-                && self.text.is_char_boundary(latched)
-                && self.text.is_char_boundary(start)
-                && completion
-                    .query
-                    .starts_with(self.text.slice(latched..start).to_string().as_str())
-        });
-        let start_offset = latched.unwrap_or(start);
+        let start_offset = self.completion_word_start(start).unwrap_or(start);
         if new_offset < start_offset {
             return;
         }
-        // HERDR: typing on through the word keeps the menu up while the next
-        // answer is on its way, instead of blinking out at every key.
-        self.extras.context_menu_content.completion.open =
-            latched.is_some() && completion_was_open;
 
         let query = self
             .text_for_range(
@@ -259,6 +236,45 @@ impl InputBaseState<EditorMode> {
             window,
             cx,
         );
+    }
+
+    /// Where the word the last completion request was for begins, if an edit
+    /// at `at` continues it.
+    ///
+    /// `trigger_start_offset` latches where the word a menu was opened for
+    /// begins, so later keystrokes refine the same query instead of starting
+    /// over at each character. It only describes an edit while the edit
+    /// continues that word: the document between the latch and the edit
+    /// must still read as a prefix of the last query. Deleting back into
+    /// the word keeps it; typing somewhere else, or into a document that
+    /// has since been replaced, starts a new query at the edit instead of
+    /// handing the provider text the user never typed as a prefix.
+    fn completion_word_start(&self, at: usize) -> Option<usize> {
+        let completion = &self.extras.context_menu_content.completion;
+        completion.trigger_start_offset.filter(|&latched| {
+            latched <= at
+                && at <= latched + completion.query.len()
+                && self.text.is_char_boundary(latched)
+                && self.text.is_char_boundary(at)
+                && completion
+                    .query
+                    .starts_with(self.text.slice(latched..at).to_string().as_str())
+        })
+    }
+
+    /// HERDR: whether typing `text` over `range` (pre-edit offsets) extends the
+    /// word the open menu is for. Such a keystroke leaves the menu up, its
+    /// items filtered by the longer word, so it doesn't blink out at every key
+    /// while the next answer is on its way.
+    pub(crate) fn typing_extends_completion(&self, range: &Range<usize>, text: &str) -> bool {
+        self.extras.context_menu_content.completion.open
+            && self.ime_marked_range.is_none()
+            && self.selections.is_single()
+            && range.is_empty()
+            && range.start == self.cursor()
+            && !text.is_empty()
+            && text.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+            && self.completion_word_start(range.start).is_some()
     }
 
     /// Record the word a menu is for and ask `provider` about the caret.
