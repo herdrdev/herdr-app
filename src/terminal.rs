@@ -1575,7 +1575,10 @@ fn caret_keys(vt: &mut Vt, rows: &[Rc<Vec<vt::Cell>>], from: (u16, u16), to: (u1
     // next line: a right arrow past the last character wraps in some editors.
     let tx = rows.get(ty as usize).map_or(tx, |row| {
         let end = row.iter().rposition(|c| !c.text.is_empty()).map_or(0, |x| x + if row[x].wide { 2 } else { 1 });
-        tx.min(end as u16)
+        // The caret's own cell stays a position even past the printed text (a program
+        // can move its cursor there without writing), so a click on it moves nothing.
+        let end = if ty == fy { (end as u16).max(fx) } else { end as u16 };
+        tx.min(end)
     });
     let positions = |lo: u16, hi: u16| (lo..hi).filter(|&x| !tail(x as usize, ty as usize)).count() as u16;
     let mut out = Vec::new();
@@ -3865,6 +3868,20 @@ mod tests {
     }
 
     #[test]
+    fn option_click_on_the_caret_moves_nothing_even_past_the_text() {
+        use super::caret_keys;
+        let mut vt = Vt::new(20, 3);
+        // A program puts its cursor at column 10 without writing anything after "abc".
+        vt.write(b"abc\x1b[1;11H");
+        let frame = vt.frame();
+        assert_eq!(frame.cursor_cell, Some((10, 0)));
+        let rows = frame.rows;
+        assert!(caret_keys(&mut vt, &rows, (10, 0), (10, 0)).is_empty());
+        // Clicks left of the caret still count from it.
+        assert_eq!(caret_keys(&mut vt, &rows, (10, 0), (8, 0)), b"\x1b[D\x1b[D".to_vec());
+    }
+
+    #[test]
     fn option_click_counts_caret_positions_not_cells() {
         use super::caret_keys;
         let mut vt = Vt::new(10, 3);
@@ -3931,8 +3948,12 @@ mod tests {
         root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().vt.write(b"\x1b[?1000h"));
         cx.simulate_mouse_down(pos, MouseButton::Left, alt);
         assert!(!typed(cx), "alt+click was taken from a mouse-tracking program");
-        assert!(!sent().windows(3).any(|w| w == b"\x1b[D"), "caret keys went to a mouse-tracking program");
+        // The program gets the click as a mouse report with Alt held (bit 8 of the button byte),
+        // not caret keys, and the release follows.
+        let down = sent();
+        assert!(down.starts_with(b"\x1b[M") && down.len() == 6 && down[3] & 8 != 0, "alt+click not forwarded: {down:?}");
         cx.simulate_mouse_up(pos, MouseButton::Left, alt);
+        assert!(sent().starts_with(b"\x1b[M"), "the release was not forwarded");
         root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().vt.write(b"\x1b[?1000l"));
         // A click on another row is a plain click: no arrows, and the selection starts.
         let below = root.read_with(cx, |root, cx| {
