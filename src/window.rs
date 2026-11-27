@@ -1587,7 +1587,17 @@ impl AppWindow {
                 }
             }
         }
-        let want_terms: HashSet<String> = terms.iter().map(|(id, _)| id.clone()).collect();
+        let mut want_terms: HashSet<String> = terms.iter().map(|(id, _)| id.clone()).collect();
+        // Keep already attached layout terminals when a stack selects another
+        // child or is hidden. Dropping the last viewer resets the PTY to its
+        // headless size, reflowing it on each switch.
+        for node in self.chrome.terminals() {
+            if let Some(term) = self.terms.get(&node.id)
+                && node.terminal() == Some(term.address.as_str())
+            {
+                want_terms.insert(node.id.clone());
+            }
+        }
         for (id, address) in terms {
             if self.terms.get(&id).is_some_and(|t| t.address == address) {
                 continue;
@@ -6809,6 +6819,44 @@ mod tests {
         view.update(cx, |this, _| {
             assert_eq!(this.copies.values().filter(|c| c.error.is_some()).count(), 1);
         });
+    }
+
+    #[test]
+    fn hidden_stack_terminals_keep_their_views() {
+        in_own_process("keep_stack_terminal_views");
+    }
+
+    #[gpui::test]
+    fn keep_stack_terminal_views(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_stack_terminal_views") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "fixture", "", json!({
+            "id": "dock", "type": "stack", "active": "first", "children": [
+                { "id": "first", "type": "block", "content": { "terminal": "t1" } },
+                { "id": "second", "type": "block", "content": { "terminal": "t2" } }
+            ]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let first = this.terms["first"].view.clone();
+            assert!(!this.terms.contains_key("second"), "never shown");
+            let result = this.control(json!({ "do": "layout.select", "args": { "stack": "dock", "child": "second" } }), window, cx);
+            assert!(result.get("error").is_none(), "{result}");
+            assert_eq!(this.terms.get("first").map(|t| &t.view), Some(&first), "switching must keep the hidden viewer attached");
+            let second = this.terms["second"].view.clone();
+            assert_eq!(this.visible_addresses(), ["t2"]);
+            let result = this.control(json!({ "do": "layout.hide", "args": { "id": "dock" } }), window, cx);
+            assert!(result.get("error").is_none(), "{result}");
+            assert!(this.visible_addresses().is_empty());
+            assert_eq!(&this.terms["second"].view, &second);
+            let result = this.control(json!({ "do": "layout.show", "args": { "id": "dock" } }), window, cx);
+            assert!(result.get("error").is_none(), "{result}");
+            assert_eq!(&this.terms["second"].view, &second);
+            this.chrome.remove_slot("first");
+            this.sync(window, cx);
+            assert!(!this.terms.contains_key("first"), "removing the slot releases its view");
+        }));
     }
 
     #[test]
