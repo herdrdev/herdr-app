@@ -754,7 +754,18 @@ export default class Settings extends View {
       )
       .child(this.row(t, "An agent needs you", file(sounds.blocked), this.button(t, "st-play-blocked", "Play", () => playSound("blocked"))))
       .child(this.row(t, "An agent finished", file(sounds.done), this.button(t, "st-play-done", "Play", () => playSound("done"))))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."))
+      .child(this.heading(t, "Notifications"))
+      .child(
+        this.row(
+          t,
+          "Send a test notification",
+          window()?.platform === "macos"
+            ? "The first time, macOS asks whether Herdr may send notifications. Answer here, so no mod's notification is lost to the question."
+            : "See how a notification shows outside Herdr.",
+          this.button(t, "st-test-notification", "Send", () => run("app.test_notification")),
+        ),
+      );
   }
 
   // Updates --------------------------------------------------------------

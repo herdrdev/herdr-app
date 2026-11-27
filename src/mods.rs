@@ -442,6 +442,10 @@ pub enum Request {
     SetWindowTitle(Option<String>),
     /// The app icon's badge (the Dock on macOS); `None` clears it.
     SetBadge(Option<String>),
+    /// A native notification a mod posts (alert.rs); the same tag replaces it.
+    SystemNotify(gpui::SystemNotification),
+    /// Takes down the notification with this system tag (alert.rs).
+    WithdrawSystemNotification(String),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -1127,6 +1131,8 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         commands.retain(|(_, _, tx)| !tx.is_closed());
         commands.push((copy, inst.name.clone(), cmd_tx));
     });
+    let clicks = crate::alert::listen(&inst.name);
+    let (notify_as, withdraw_as) = (inst.name.clone(), inst.name.clone());
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
@@ -1300,6 +1306,20 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             request(Request::SetBadge(text));
             Ok(HostValue::Null)
         })
+        .function("systemNotify", move |a| {
+            let n = from_host(a.value(0)?);
+            let field = |k: &str| n.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+            let (tag, title) = (field("tag"), field("title"));
+            if tag.is_empty() || title.is_empty() {
+                return Err(HostError::new("systemNotify needs { tag, title }"));
+            }
+            request(Request::SystemNotify(crate::alert::notification(&notify_as, &tag, title, field("body"))));
+            Ok(HostValue::Null)
+        })
+        .function("withdrawSystemNotification", move |a| {
+            request(Request::WithdrawSystemNotification(crate::alert::system_tag(&withdraw_as, a.string(0)?)));
+            Ok(HostValue::Null)
+        })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
@@ -1366,6 +1386,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("nextCommand", move |_| {
             let rx = commands.clone();
             Ok(async move { rx.recv().await.map(HostValue::Str).map_err(|_| HostError::new("herdr-app is shutting down")) })
+        })
+        .async_function("nextSystemNotificationClick", move |_| {
+            let rx = clicks.clone();
+            Ok(async move {
+                let tag = rx.recv().await.map_err(|_| HostError::new("herdr-app is shutting down"))?;
+                Ok(HostObject::new().field("tag", tag).into())
+            })
         })
 }
 
