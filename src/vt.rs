@@ -1091,11 +1091,11 @@ impl Vt {
     }
 
     pub fn select_at(&mut self, at: Option<CellPosition>, mode: &str) -> Result<(), String> {
-        if !matches!(mode, "cell" | "word" | "line") {
-            return Err("terminal.select mode is cell, word or line".into());
+        if !matches!(mode, "cell" | "word" | "line" | "output") {
+            return Err("terminal.select mode is cell, word, line or output".into());
         }
-        let at = at.unwrap_or_else(|| self.cursor_position());
-        let reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, at.col, at.row).ok_or("terminal.select at is outside the screen and history")?;
+        let pos = at.unwrap_or_else(|| self.cursor_position());
+        let reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, pos.col, pos.row).ok_or("terminal.select at is outside the screen and history")?;
         let mut selection = GhosttySelection {
             size: std::mem::size_of::<GhosttySelection>(), start: reference, end: reference, ..Default::default()
         };
@@ -1109,6 +1109,30 @@ impl Vt {
                     let options = GhosttyTerminalSelectLineOptions { size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(), ref_: reference, semantic_prompt_boundary: true, ..Default::default() };
                     ghostty_terminal_select_line(self.term, &options, &mut selection)
                 }
+                "output" => {
+                    let mut res = ghostty_terminal_select_output(self.term, reference, &mut selection);
+                    if res == GHOSTTY_NO_VALUE && self.is_prompt_or_input(pos.row) {
+                        let (mut row, max_row) = (pos.row, self.cursor_position().row);
+                        while row > 0 && self.prompt_row(row) != GHOSTTY_ROW_SEMANTIC_PROMPT && self.is_prompt_or_input(row) {
+                            row -= 1;
+                        }
+                        let found = if at.is_none() {
+                            let mut prev = false;
+                            while row > 0 {
+                                row -= 1;
+                                if self.prompt_row(row) == GHOSTTY_ROW_SEMANTIC_PROMPT { prev = true; break; }
+                            }
+                            prev
+                        } else {
+                            self.prompt_row(row) == GHOSTTY_ROW_SEMANTIC_PROMPT
+                        };
+                        if let Some(sel) = found.then(|| self.prompt_output(row, max_row)).flatten() {
+                            selection = sel;
+                            res = GHOSTTY_SUCCESS;
+                        }
+                    }
+                    res
+                }
                 _ => GHOSTTY_SUCCESS,
             }
         };
@@ -1120,6 +1144,88 @@ impl Vt {
             return Err("terminal.select could not select that cell".into());
         }
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        Ok(())
+    }
+
+    fn prompt_row(&self, row: u32) -> GhosttyRowSemanticPrompt {
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, row) else { return GHOSTTY_ROW_SEMANTIC_NONE };
+        let (mut raw, mut prompt) = (GhosttyRow::default(), GHOSTTY_ROW_SEMANTIC_NONE);
+        unsafe {
+            ghostty_grid_ref_row(&r, &mut raw);
+            ghostty_row_get(raw, GHOSTTY_ROW_DATA_SEMANTIC_PROMPT, &mut prompt as *mut _ as *mut c_void);
+        }
+        prompt
+    }
+
+    fn is_prompt_or_input(&self, row: u32) -> bool {
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, row) else { return false };
+        let (mut cell, mut content) = (GhosttyCell::default(), GHOSTTY_CELL_SEMANTIC_OUTPUT);
+        unsafe {
+            ghostty_grid_ref_cell(&r, &mut cell);
+            ghostty_cell_get(cell, GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, &mut content as *mut _ as *mut c_void);
+        }
+        self.prompt_row(row) != GHOSTTY_ROW_SEMANTIC_NONE || content != GHOSTTY_CELL_SEMANTIC_OUTPUT
+    }
+
+    fn prompt_output(&self, mut row: u32, max_row: u32) -> Option<GhosttySelection> {
+        loop {
+            row += 1;
+            if row > max_row || self.prompt_row(row) == GHOSTTY_ROW_SEMANTIC_PROMPT {
+                return None;
+            }
+            if !self.is_prompt_or_input(row) {
+                let r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, row)?;
+                let mut sel = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+                return (unsafe { ghostty_terminal_select_output(self.term, r, &mut sel) } == GHOSTTY_SUCCESS).then_some(sel);
+            }
+        }
+    }
+
+    pub fn select_output_prompts(&mut self, prompts: isize) -> Result<(), String> {
+        if prompts == 0 {
+            return Ok(());
+        }
+        let max_row = self.cursor_position().row;
+        let mut cur = self.selection_positions().map_or(max_row, |s| s.start.row).min(max_row);
+        while cur > 0 && self.prompt_row(cur) != GHOSTTY_ROW_SEMANTIC_PROMPT {
+            cur -= 1;
+        }
+        if self.prompt_row(cur) != GHOSTTY_ROW_SEMANTIC_PROMPT {
+            self.clear_selection();
+            return Ok(());
+        }
+        let mut target = None;
+        if prompts < 0 {
+            for _ in 0..prompts.unsigned_abs() {
+                let Some(y) = (0..cur).rev().find(|&y| self.prompt_row(y) == GHOSTTY_ROW_SEMANTIC_PROMPT && self.prompt_output(y, max_row).is_some()) else { break };
+                cur = y;
+                target = Some(y);
+            }
+        } else if self.selection().is_some() {
+            for _ in 0..prompts as usize {
+                if let Some(y) = ((cur + 1)..=max_row).find(|&y| self.prompt_row(y) == GHOSTTY_ROW_SEMANTIC_PROMPT && self.prompt_output(y, max_row).is_some()) {
+                    cur = y;
+                    target = Some(y);
+                } else {
+                    self.clear_selection();
+                    self.scroll_to_bottom();
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(y) = target
+            && let Some(sel) = self.prompt_output(y, max_row)
+        {
+            let end_row = self.cell_position(&sel.end).map_or(y, |p| p.row);
+            unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &sel as *const _ as *const c_void); }
+            let sb = self.scrollbar();
+            if u64::from(y) < sb.offset {
+                self.scroll_to_row(y as usize);
+            } else if u64::from(end_row) >= sb.offset.saturating_add(sb.len) {
+                let top = u64::from(y).min(u64::from(end_row).saturating_sub(sb.len.saturating_sub(1)));
+                self.scroll_to_row(top as usize);
+            }
+        }
         Ok(())
     }
 
@@ -1463,6 +1569,14 @@ impl Vt {
         self.placements_cache.get_mut().take();
         let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_DELTA, ..Default::default() };
         s.value.delta = delta;
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
+    }
+
+    pub fn scroll_prompts(&mut self, prompts: isize) {
+        self.placements_cache.get_mut().take();
+        let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_DELTA_PROMPT, ..Default::default() };
+        s.value.delta_prompt = prompts;
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
         self.feed_search();
     }
@@ -3023,5 +3137,72 @@ mod tests {
         vt.scroll_to_bottom();
         let bottom = visible(&mut vt);
         assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
+    }
+
+    #[test]
+    fn semantic_prompts_scroll_and_select_command_output() {
+        let mut vt = Vt::new(40, 3);
+        vt.write(concat!(
+            "\x1b]133;A\x07$ \x1b]133;B\x07cmd1\r\n",
+            "\x1b]133;C\x07line1\r\nline2\r\n",
+            "\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07true\r\n",
+            "\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07cmd3\r\n",
+            "\x1b]133;C\x07alpha\r\nbeta\r\n",
+            "\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+        ).as_bytes());
+        assert_eq!(vt.scrollbar().offset, 5);
+        vt.scroll_prompts(-1);
+        assert_eq!(vt.scrollbar().offset, 4);
+        vt.scroll_prompts(-1);
+        assert_eq!(vt.scrollbar().offset, 3);
+        vt.scroll_prompts(-1);
+        assert_eq!(vt.scrollbar().offset, 0);
+        vt.scroll_prompts(-10);
+        assert_eq!(vt.scrollbar().offset, 0);
+        vt.scroll_prompts(1);
+        assert_eq!(vt.scrollbar().offset, 3);
+        vt.scroll_prompts(10);
+        assert_eq!(vt.scrollbar().offset, 5);
+        assert_eq!(vt.selection_text(), None);
+
+        vt.select_output_prompts(-1).unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("alpha\nbeta"));
+        vt.select_output_prompts(-1).unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("line1\nline2"));
+        assert_eq!(vt.scrollbar().offset, 0);
+        vt.select_output_prompts(-10).unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("line1\nline2"));
+        vt.select_output_prompts(1).unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("alpha\nbeta"));
+        vt.select_output_prompts(1).unwrap();
+        assert_eq!(vt.selection_text(), None);
+        assert_eq!(vt.scrollbar().offset, 5);
+
+        vt.select_at(None, "output").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("alpha\nbeta"));
+        vt.select_at(Some(CellPosition { row: 1, col: 2 }), "output").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("line1\nline2"));
+        vt.select_at(Some(CellPosition { row: 0, col: 0 }), "output").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("line1\nline2"));
+        vt.select_at(Some(CellPosition { row: 3, col: 0 }), "output").unwrap();
+        assert_eq!(vt.selection_text(), None);
+
+        // An empty command before the live prompt clears selection instead of grabbing earlier output.
+        vt.select_at(None, "output").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("alpha\nbeta"));
+        vt.write(b"true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+        vt.select_at(None, "output").unwrap();
+        assert_eq!(vt.selection_text(), None);
+
+        // Without OSC 133 markers, prompt scroll is a no-op and output selection clears.
+        let mut plain = Vt::new(20, 3);
+        plain.write(b"one\r\ntwo\r\nthree\r\nfour");
+        plain.scroll_to_row(0);
+        plain.scroll_prompts(1);
+        assert_eq!(plain.scrollbar().offset, 0);
+        plain.select_at(Some(CellPosition { row: 1, col: 0 }), "line").unwrap();
+        assert_eq!(plain.selection_text().as_deref(), Some("two"));
+        plain.select_at(None, "output").unwrap();
+        assert_eq!(plain.selection_text(), None);
     }
 }

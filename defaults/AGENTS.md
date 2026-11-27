@@ -669,12 +669,14 @@ The main ones:
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu),
-  `terminal.scroll {lines | pages | to: "top" | "bottom", terminal?}` (moves Herdr's view of the
-  history, not the program: negative lines or pages go up, toward history; pages may be
-  fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
-  there is no history, so nothing moves),
-  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
-  (replaces the selection, at the program's cursor by default; word/line act like double/triple click),
+  `terminal.scroll {lines | pages | prompts | to: "top" | "bottom", terminal?}` (moves Herdr's view of the
+  history, not the program: negative lines, pages or prompts go up, toward history; pages may be
+  fractional, one page is the terminal's rows; `prompts` jumps between shell prompts marked with OSC 133;
+  on the alternate screen, such as vim or less, there is no history, so nothing moves),
+  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line" | "output", prompts?}`
+  (replaces the selection, at the program's cursor by default; word/line act like double/triple click;
+  `output` selects a command's output when marked with OSC 133, or the previous command's at the live prompt cursor;
+  `prompts` steps by whole numbers of non-empty command outputs when mode is `output` and scrolls them into view),
   `terminal.adjust_selection {terminal?, direction}` (left, right, up, down, page_up, page_down,
   home, end, line_start, line_end; moves the selection's end and follows it in the view;
   fails with no selection), `terminal.clear_selection {terminal?}`.

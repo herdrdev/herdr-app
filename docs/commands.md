@@ -314,13 +314,14 @@ Select a terminal's whole screen and scrollback (default: the focused one), read
 
 ## `terminal.select`
 
-Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word", "line" (like double/triple click) or "output" (a command's output when the shell marks prompts with OSC 133; at the live prompt cursor, selects the previous command's output). prompts (a whole number with mode "output" and without at; negative goes up) steps through commands with output and follows them in the view. Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
 
 | Argument | Required |
 |---|---|
 | `terminal` | no |
 | `at` | no |
 | `mode` | no |
+| `prompts` | no |
 
 ## `terminal.adjust_selection`
 
@@ -347,12 +348,13 @@ No arguments.
 
 ## `terminal.scroll`
 
-Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: "top" (oldest history) or "bottom" (the live screen). This scrolls Herdr's view, not the program.
+Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), prompts (a whole number of shell prompts when marked with OSC 133; negative goes up), to: "top" (oldest history) or "bottom" (the live screen). This scrolls Herdr's view, not the program.
 
 | Argument | Required |
 |---|---|
 | `lines` | no |
 | `pages` | no |
+| `prompts` | no |
 | `to` | no |
 | `terminal` | no |
 
