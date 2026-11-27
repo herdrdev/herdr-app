@@ -63,7 +63,7 @@ export function playSound(sound: string): null;
  *   space.move {id, index}, space.select {index | id}, space.next, space.prev.
  * Tabs: tab.new {name?, space?, folder?, argv?, task?, focus?} (argv: an agent, task: its first message)
  *   or {name?, space?, mod, props?, focus?} (a tab whose only pane is a mod),
- *   tab.close {id?}, tab.rename {id?, name}, tab.move {id?, index | by} (by: -1 left, 1 right, wrapping), tab.select {index | id},
+ *   tab.close {id?}, tab.rename {id?, name}, tab.move {id?, index | by} (by: -1 left, 1 right, wrapping), tab.detach {id, x?, y?}, tab.select {index | id},
  *   tab.next, tab.prev.
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
@@ -122,6 +122,8 @@ export interface TabInfo {
   settled: boolean;
   /** ms since the epoch, or null. */
   settled_at: number | null;
+  /** This tab is open in another macOS window. Absent in the main window's tabs. */
+  detached?: true;
   /** When something in it last changed state (null: nothing since the app started). */
   changed_at: number | null;
   /** Since when an agent in it has been working, or null. */

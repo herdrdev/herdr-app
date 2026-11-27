@@ -101,6 +101,16 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 | `index` | no |
 | `by` | no |
 
+## `tab.detach`
+
+Open a tab in a separate macOS window. Optional x and y are a drop point in window pixels; drops inside the source window are ignored.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+| `x` | no |
+| `y` | no |
+
 ## `pane.split`
 
 Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.

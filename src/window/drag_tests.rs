@@ -1,4 +1,120 @@
 #[test]
+fn the_shipped_tab_follows_the_pointer_before_reordering() {
+    in_own_process("tab_strip_drag");
+}
+
+#[gpui::test]
+fn tab_strip_drag(app_cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton, point, px, size};
+    use serde_json::json;
+    if !running_alone("tab_strip_drag") { return; }
+
+    let (view, cx) = open_window(app_cx, "tabs", include_str!("../../defaults/mods/tabs/main.js"), json!({
+        "id": "root", "type": "column", "titlebar": "none", "children": [
+            { "id": "tabs", "type": "block", "size": { "px": 42 }, "content": { "mod": "tabs" } },
+            { "id": "body", "type": "block", "content": { "tab": "active" } }
+        ]
+    }));
+    view.update_in(cx, |this, window, cx| {
+        this.model.add_space("space", "test", "/", super::Tab::new("t1", "", "first", "term-a"));
+        this.model.add_tab_unselected("space", super::Tab::new("t2", "", "second", "term-b"));
+        this.model.add_tab_unselected("space", super::Tab::new("t3", "", "third", "term-c"));
+        this.documents.entry(String::new()).or_default().available = true;
+        this.write_person(|p| p.zoom = 1.25, window, cx);
+        this.sync(window, cx);
+    });
+    cx.simulate_resize(size(px(800.), px(240.)));
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    };
+    let order = |cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |this, _| this.model.active_space().unwrap().tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>())
+    };
+    draw(cx);
+    let start = cx.update(|window, _| {
+        let raised = super::c("raised").into();
+        let quads = window.painted_quads();
+        let tab = quads.iter().find(|q| q.background == raised && q.corner_radii.top_left.0 > 0.)
+            .expect("the active tab should be painted");
+        let scale = window.scale_factor();
+        point(px((tab.bounds.origin.x.0 + tab.bounds.size.width.0 / 4.) / scale),
+            px((tab.bounds.origin.y.0 + tab.bounds.size.height.0 / 2.) / scale))
+    });
+    let end = start + point(px(370.), px(2.));
+    let none = Modifiers::default();
+    let drag = |cx: &mut gpui::VisualTestContext| {
+        cx.simulate_mouse_down(start, MouseButton::Left, none);
+        draw(cx);
+        cx.simulate_mouse_move(end, MouseButton::Left, none);
+        draw(cx);
+    };
+    drag(cx);
+    assert_eq!(order(cx), ["t1", "t2", "t3"]);
+    cx.update(|window, _| {
+        let quads = window.painted_quads();
+        assert!(quads.iter().any(|q| q.border_color == super::c("accent") && q.border_widths.top.0 > 0.),
+            "drop slot is painted");
+        let pointer = end.scale(window.scale_factor());
+        let hover = super::c("hover").into();
+        assert!(quads.iter().any(|q| q.background == hover && q.bounds.contains(&pointer)), "held tab is painted under the pointer");
+    });
+    let outside = end + point(px(0.), px(80.));
+    cx.simulate_mouse_move(outside, MouseButton::Left, none);
+    draw(cx);
+    cx.update(|window, _| {
+        let quads = window.painted_quads();
+        let pointer = outside.scale(window.scale_factor());
+        let hover = super::c("hover").into();
+        assert!(quads.iter().any(|q| q.background == hover
+            && q.bounds.contains(&pointer) && q.content_mask.bounds.contains(&pointer)),
+            "held tab is visible over the terminal");
+        assert!(!quads.iter().any(|q| q.border_color == super::c("accent") && q.border_widths.top.0 > 0.),
+            "no drop slot over the terminal");
+    });
+    cx.simulate_mouse_up(outside, MouseButton::Left, none);
+    cx.run_until_parked();
+    assert_eq!(order(cx), ["t1", "t2", "t3"]);
+
+    #[cfg(target_os = "macos")]
+    {
+        let main = cx.update(|window, _| window.window_handle());
+        let terminal = view.read_with(cx, |this, _| this.terms["first"].view.clone());
+        let outside = point(px(810.), end.y);
+        drag(cx);
+        cx.simulate_mouse_move(outside, MouseButton::Left, none);
+        cx.simulate_mouse_up(outside, MouseButton::Left, none);
+        cx.run_until_parked();
+        let detached = view.read_with(cx, |this, _| {
+            assert!(this.terms["first"].view == terminal);
+            assert_eq!(this.main_tab().unwrap().id, "t2");
+            this.detached_tabs["t1"]
+        });
+        let mut detached_cx = gpui::VisualTestContext::from_window(detached.into(), app_cx);
+        assert!(detached_cx.simulate_close());
+        detached_cx.update(|window, _| window.remove_window());
+        let mut main_cx = gpui::VisualTestContext::from_window(main, app_cx);
+        draw(&mut main_cx);
+        view.read_with(&main_cx, |this, _| {
+            assert!(this.detached_tabs.is_empty());
+            assert_eq!(this.main_tab().unwrap().id, "t1");
+            assert!(this.terms["first"].view == terminal);
+        });
+        drag(&mut main_cx);
+        main_cx.simulate_mouse_up(end, MouseButton::Left, none);
+        main_cx.run_until_parked();
+        assert_eq!(order(&mut main_cx), ["t2", "t3", "t1"]);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        drag(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, none);
+        cx.run_until_parked();
+        assert_eq!(order(cx), ["t2", "t3", "t1"]);
+    }
+}
+
+#[test]
 fn dividers_follow_the_current_layout() {
     in_own_process("divider_interaction");
 }

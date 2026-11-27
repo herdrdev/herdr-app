@@ -41,6 +41,8 @@ default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
 Tabs opened from the + agent menu are unnamed. `ls` lists their position
 even when the tab bar shows the program or its session title.
+On macOS, `tab.detach {id}` opens an existing tab in a native window.
+Closing that window or dragging its title bar onto the main tab bar brings the tab back.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
