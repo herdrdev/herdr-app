@@ -3089,11 +3089,17 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
 
     let mouse_move_state = state.downgrade();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-        if phase.bubble()
-            && let Some(state) = mouse_move_state.upgrade()
-            // Moving the pointer only moves a selection being made.
-            && state.read(cx).is_selecting
-        {
+        if !phase.bubble() {
+            return;
+        }
+        let Some(state) = mouse_move_state.upgrade() else {
+            return;
+        };
+        // Moving the pointer only moves a selection being made.
+        if !state.read(cx).is_selecting {
+            return;
+        }
+        if event.pressed_button == Some(MouseButton::Left) {
             state.update(cx, |state, cx| {
                 // A handle drag maps the pointer through the handle's offset;
                 // the raw pointer must not fight it.
@@ -3103,6 +3109,14 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
                 state.update_in_window(event.position, window, cx)
             });
             WindowSelectionState::resolve_content_keys(&state, cx);
+        } else if state.read(cx).touch.drag.is_none() {
+            // HERDR: a selection left over after a swallowed button-up (e.g. a
+            // native window resize) must not keep moving, and must not stay
+            // stuck for later clicks/scrolls. End it on the first buttonless move.
+            state.update(cx, |state, cx| {
+                state.mouse_down_prepared = false;
+                state.end(cx);
+            });
         }
     });
 
@@ -4842,6 +4856,60 @@ mod tests {
             let selection = view.read(cx).selection.clone();
             selection.update_runs(&[text_run(0, text, layout)], cx);
             assert_eq!(TextSelection::selected_text(window, cx), "alpha beta");
+        });
+    }
+
+    #[gpui::test]
+    fn swallowed_button_up_ends_stale_selection_on_buttonless_move(cx: &mut TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| DoubleSelectionElementView {
+            selection: TextSelectionHandle::new("text", cx),
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(
+            point(px(1.), px(1.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(8.), px(1.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let state = live_text_selection_state(window, cx).unwrap();
+            assert!(state.read(cx).is_selecting());
+            assert!(state.read(cx).mouse_down_prepared);
+        });
+        let selected_before = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        // The matching button-up is swallowed: no mouse_up is delivered.
+        cx.simulate_mouse_move(point(px(80.), px(1.)), None, gpui::Modifiers::default());
+        cx.update(|window, cx| {
+            let state = live_text_selection_state(window, cx).unwrap();
+            assert!(!state.read(cx).is_selecting());
+            assert!(!state.read(cx).mouse_down_prepared);
+            let selected_after = TextSelection::selected_text(window, cx);
+            assert_eq!(selected_after, selected_before);
+        });
+        // A fresh, complete gesture still selects text.
+        cx.simulate_mouse_down(
+            point(px(1.), px(1.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(8.), px(1.)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(8.), px(1.)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            assert!(TextSelection::has_selection(window, cx));
         });
     }
 }
