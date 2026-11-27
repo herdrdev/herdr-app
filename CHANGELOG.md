@@ -1,5 +1,59 @@
 # Herdr changelog
 
+## [0.1.18] - 2026-11-24
+
+### New
+- **Shift+click extends a terminal selection,** like in other terminals. (#1409, thanks @nathankim0)
+- **Fade the panes you're not in.** A layout sets how much with veil on its pane frame. (#701, thanks @jaklimoff)
+- **Bold text can have its own weight:** font_weight_bold in settings.json or a layout. (#1186, thanks @Rinai-R)
+- **Jump to an agent by its place in the list** with agent.select. (#1176, thanks @martintrifunov)
+- Agents read your own notes in AGENTS.local.md in your Herdr folder, and Herdr never overwrites that file. (#1090, thanks @darkwebber)
+- For mod authors, a lot more to build with:
+  - Add entries to the command palette. (#1354, thanks @Mharlin)
+  - Open the system file picker with pickFiles. (#1385, thanks @Srv-02)
+  - Read and highlight what someone selects in a text view, and pause work while the window is hidden. (#1265, #1320, thanks @bkegley and @melnychuk)
+  - Read where a list is scrolled, follow a drag outside its element, and handle the mouse's back and forward buttons. (#971, #523, #1142, thanks @jaklimoff, @bborn and @davonium)
+  - Editors: switch soft wrap, set the tab width, color Markdown, and give back focus with blur(). (#1077, #1256, #1316, #1257, thanks @JinJieBeWater, @chasereyn and @Ituking)
+  - Show HTML inside Markdown as plain text, get line and column for clicked file links, and color dividers on hover. (#1073, #1237, #1041, thanks @aetoskevin, @barnuri and @jlopezlira)
+
+### Fixed
+- **Closing a tab no longer ends agents started with --outlive-parent,** or the spaces showing them.
+- **Files and Changes use far less CPU on big repositories.** They share one git scan, slow down when scans are expensive, and stop while the window isn't focused.
+- **Remove worktree stops the space's programs before it deletes the folder,** so running dev servers can't leave a half-deleted checkout behind. (#1430)
+- **The Files panel opens files on remote Windows machines again.** 0.1.17 showed every file as unavailable when Git was installed there.
+- **Starting Herdr from a terminal with herdr-app & no longer freezes it.** (#1291, #1295, thanks @archit15singh)
+- On WSL and other desktops without a primary selection, middle-click pastes the clipboard again.
+- A zoomed tab unzooms when it's back to one pane. (#1424, thanks @jaklimoff)
+- Ctrl/Cmd-clicking a file link with a line range or a #L anchor opens the file. (#1422, thanks @Ituking)
+- A space name that starts with an emoji shows the whole emoji as its avatar, skin tones and flags included. (#1394, thanks @Srv-02)
+
+## [0.1.17] - 2026-11-22
+<!-- spotlight -->
+
+### New
+- **Choose what a Ctrl/Cmd-click does.** A mod can take over clicks on links and file paths in your terminals. Open localhost links through your SSH tunnel, jump to file.rs:42 in the Neovim you already have open, or show a screenshot in a pane. Ask your agent to write one for you. (#228, #1203)
+- **Resize panes from the keyboard.** Add pane.resize to keys.json, for example on Ctrl+Alt+arrows. (#1087, thanks @darkwebber)
+- **Name your panes.** Rename is at the top of the pane menu. (#1086, #1160, thanks @darkwebber and @abhijit-s)
+- Cursor and VS Code remote links open when you Ctrl/Cmd-click them. (#998, thanks @martintrifunov)
+- The file preview and the Changes diff use your terminal font size. (#648, thanks @carun)
+- For mod authors: a layout turns link mods on with link_handlers, scripts can name panes with pane.rename, and copies of a mod with the same props now share localStorage.
+
+### Fixed
+- **A mod or layout with a dot, colon or emoji in its name no longer crashes Herdr.** Before, it crashed every time that mod or layout opened, startup included.
+- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked.
+- **The Changes panel keeps up when you switch spaces,** even if the last repository was slow or a file preview got stuck. (#1253)
+- **A mod waiting on a TCP connection no longer freezes the whole window.** Saving it reloads in a moment instead of several seconds. (#1234)
+- **Toasts show the whole message,** long errors included, and scroll if it doesn't fit. (#782, thanks @Danipulok)
+- Keeping a peeked agent from another machine puts it in a space on that machine. (#1165, thanks @DeevsDeevs)
+- In the agents list, a sub-agent you kept as a pane shows its own "done", names keep an emoji at the start, and the rail marks the agent you're on. (#1004, #1141, #969, thanks @martintrifunov, @eatnows and @jaklimoff)
+- The command palette only offers themes that fit your light or dark window. (#1120, thanks @Fiyxxx)
+- A text field in a dialog keeps the keyboard when you come back to it. (#1089, thanks @darkwebber)
+- A repository kept as project/.bare is named after the project. (#1001, thanks @mfassaie)
+- Agents start and show up under shells like nushell, and NixOS wrappers stay first on PATH. (#240, #686, thanks @gek0v)
+- Pasting an image or files into a terminal on another machine shows "Sending" while it's on the way.
+- After a mod reload, the app log says which of its tasks were cut off. (#1034, thanks @tjbtiller)
+- The status bar says "1 agent", and Split down has its own icon. (#982, #996, thanks @henrik and @nhat251)
+
 ## [0.1.16] - 2026-11-14
 
 ### New

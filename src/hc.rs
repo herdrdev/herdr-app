@@ -248,6 +248,10 @@ fn semver(v: &str) -> (u64, u64, u64) {
     (p.next().unwrap_or(0), p.next().unwrap_or(0), p.next().unwrap_or(0))
 }
 
+pub fn legacy_child_lifetime(version: &Value) -> bool {
+    version.as_str().is_some_and(|v| semver(v) < (0, 1, 13))
+}
+
 /// Whether a core's hello says it can serve this app.
 pub fn check(hello: &Value) -> Result<(), Mismatch> {
     let generation = hello.get("generation").and_then(Value::as_u64).unwrap_or(0);
@@ -464,11 +468,7 @@ impl Core {
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
     pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
-        let mut env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        // A split's launch token, for its wrapper (`remote_shell::cannot_start`).
-        if let Some(token) = labels.get("herdr.launch") {
-            env["HERDR_LAUNCH"] = token.clone();
-        }
+        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
@@ -582,36 +582,6 @@ pub fn offline() -> Arc<Core> {
         child: Mutex::new(child),
         lost,
     })
-}
-
-/// A core that answers every call at once: `terminal.run` with a new address,
-/// whose argv it passes on to `runs`; anything else with `{}`.
-#[cfg(test)]
-pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
-    let (writer, frames) = mpsc::channel::<Vec<u8>>();
-    let (runs_tx, runs) = mpsc::channel();
-    let (lost_tx, lost) = async_channel::bounded(1);
-    std::mem::forget(lost_tx);
-    let routes = Arc::new(Mutex::new(Routes::default()));
-    let replies = routes.clone();
-    std::thread::spawn(move || {
-        for (n, frame) in frames.into_iter().enumerate() {
-            let Some(Ok(req)) = frame.get(HEADER..).map(serde_json::from_slice::<Value>) else { continue };
-            let result = if req["method"] == "terminal.run" {
-                let _ = runs_tx.send(req["params"]["argv"].clone());
-                json!({ "address": format!("t{}", 100 + n) })
-            } else {
-                json!({})
-            };
-            let id = req["id"].as_u64().unwrap_or_default();
-            if let Some(tx) = replies.lock().unwrap().replies.remove(&id) {
-                let _ = tx.send(Ok(result));
-            }
-        }
-    });
-    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let core = Arc::new(Core { hello: Value::Null, writer, routes, next_id: AtomicU64::new(1), child: Mutex::new(child), lost });
-    (core, runs)
 }
 
 #[cfg(test)]
@@ -840,11 +810,12 @@ mod tests {
                 assert_eq!(size["cols"], expected);
             }
         }
+        core.automatic_input(leader.channel, b"done");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let received = std::fs::read(root.join("received")).unwrap_or_default();
-            if received.windows(3).filter(|w| *w == b";OK").count() == 6 {
-                eprintln!("program received six kitty replies (two per query): {:?}", String::from_utf8_lossy(&received));
+            if received.ends_with(b"done") {
+                assert_eq!(received.windows(3).filter(|w| *w == b";OK").count(), 3, "{received:?}");
                 break;
             }
             assert!(std::time::Instant::now() < deadline);
@@ -865,5 +836,13 @@ mod tests {
         assert_eq!(check(&hello(1, "9.9.9", &["terminal.run"])), Err(Mismatch::Missing(USES[1..].iter().map(|m| m.to_string()).collect())));
         // 0.10 is newer than 0.9 (numbers, not text).
         assert!(semver("0.10.0") > semver("0.9.3"));
+    }
+
+    #[test]
+    fn cores_without_the_new_child_lifetime_default_can_still_serve_the_app() {
+        for have in ["0.1.11", "0.1.12"] {
+            assert_eq!(check(&hello(GENERATION, have, USES)), Ok(()));
+        }
+        assert!(matches!(check(&hello(GENERATION, "0.1.10", USES)), Err(Mismatch::TooOld { .. })));
     }
 }

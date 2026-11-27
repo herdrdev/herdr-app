@@ -1,14 +1,36 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
-use gpui_shell::{HostError, HostValue};
+use herdr_shell::{HostError, HostValue};
+use std::collections::{HashMap, hash_map::Entry};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 pub const LIMIT: u64 = 1024 * 1024;
 static WRITES: Mutex<()> = Mutex::new(());
+type ReadResult = Result<Option<String>, String>;
+type PendingReads = HashMap<(Option<String>, String), Vec<async_channel::Sender<ReadResult>>>;
+static READS: LazyLock<Mutex<PendingReads>> = LazyLock::new(Mutex::default);
 
-pub fn read(path: &Path) -> Result<Option<String>, String> {
-    let file = match std::fs::File::open(path) {
+pub fn read(path: &Path) -> ReadResult {
+    let open = || {
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::other("Not a regular file"));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // The path can be replaced with a pipe between metadata and open.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other("Not a regular file"));
+        }
+        Ok(file)
+    };
+    let file = match open() {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.to_string()),
@@ -77,20 +99,26 @@ fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> 
 
 /// Reads off the UI thread: the text, or null when absent.
 pub fn read_with(
-    read: impl FnOnce() -> Result<Option<String>, String> + Send + 'static,
-) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+    on: Option<String>,
+    path: String,
+    read: impl FnOnce(Option<&str>, &str) -> ReadResult + Send + 'static,
+) -> async_channel::Receiver<ReadResult> {
     let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let _ = tx.send_blocking(read());
-    });
-    async move {
-        let value = rx
-            .recv()
-            .await
-            .map_err(|e| HostError::new(e.to_string()))?
-            .map_err(HostError::new)?;
-        Ok(value.map(HostValue::from).unwrap_or(HostValue::Null))
+    let key = (on, path);
+    match READS.lock().unwrap().entry(key.clone()) {
+        Entry::Occupied(mut entry) => entry.get_mut().push(tx),
+        Entry::Vacant(entry) => {
+            entry.insert(vec![tx]);
+            std::thread::spawn(move || {
+                let result = read(key.0.as_deref(), &key.1);
+                let waiting = READS.lock().unwrap().remove(&key).unwrap_or_default();
+                for tx in waiting {
+                    let _ = tx.try_send(result.clone());
+                }
+            });
+        }
     }
+    rx
 }
 
 pub fn write_text(
@@ -131,5 +159,41 @@ mod tests {
         assert!(write(&path, "stale", Some("- [ ] Task\n")).is_err());
         assert_eq!(read(&path).unwrap().unwrap(), "- [x] Task\n");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_fifo_is_rejected_without_waiting_for_a_writer() {
+        use std::{ffi::CString, os::unix::{ffi::OsStrExt, fs::symlink}, time::Duration};
+        let root = crate::test_tmp().join(format!("herdr-app-preview-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("pipe");
+        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let link = root.join("preview");
+        symlink(fifo, &link).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(read(&link)); });
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap().unwrap_err(), "Not a regular file");
+    }
+
+    #[test]
+    fn same_file_reads_share_outstanding_work_only_on_the_same_machine() {
+        let (release, blocked) = std::sync::mpsc::channel();
+        let path = "duplicate-preview-test".to_string();
+        let first = read_with(None, path.clone(), move |_, _| {
+            blocked.recv().unwrap();
+            Ok(Some("first".into()))
+        });
+        let second = read_with(None, path.clone(), |_, _| Ok(Some("duplicate".into())));
+        let remote = read_with(Some("remote".into()), path.clone(), |_, _| Ok(Some("remote".into())));
+        release.send(()).unwrap();
+        assert_eq!(first.recv_blocking().unwrap().unwrap().as_deref(), Some("first"));
+        assert_eq!(second.recv_blocking().unwrap().unwrap().as_deref(), Some("first"));
+        assert_eq!(remote.recv_blocking().unwrap().unwrap().as_deref(), Some("remote"));
+        let again = read_with(None, path, |_, _| Ok(Some("new".into())));
+        assert_eq!(again.recv_blocking().unwrap().unwrap().as_deref(), Some("new"));
     }
 }

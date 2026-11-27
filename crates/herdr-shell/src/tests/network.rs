@@ -4,7 +4,7 @@ use std::{
     ops::Deref,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::{Entity, IntoElement as _, TestAppContext, VisualTestContext};
@@ -93,12 +93,15 @@ export default class Probe extends View {
     this.state = "pending";
     cx.spawn(async (cx) => {
       const socket = await connect("127.0.0.1", __PORT__);
-      const reading = socket.read(1).catch(() => undefined);
+      const reading = socket.read(1).catch(() => null).then((bytes) => {
+        this.state = bytes === null ? "closed" : "unexpected data";
+        cx.notify();
+      });
+      this.state = "read pending";
+      cx.notify();
       await cx.sleep(50);
       socket.close();
       await reading;
-      this.state = "closed";
-      cx.notify();
     });
   }
   render() { return v_flex().child(this.state); }
@@ -211,6 +214,7 @@ export default class Probe extends View {
         const socket = await WebSocket.connect("__URL__");
         const reading = socket.read().catch(() => undefined);
         await socket.write("while read is pending");
+        await cx.sleep(10);
         await socket.close();
         await reading;
         this.state = "write-and-close-finished";
@@ -404,12 +408,14 @@ fn net_connect_is_bounded_and_capability_gated(cx: &mut TestAppContext) {
     });
 
     let source = NET_PROBE.replace("__PORT__", &port.to_string());
+    cx.executor().allow_parking();
     let (_runtime, view, mut context) = probe(cx, &source);
-    context.run_until_parked();
-    draw(&mut context, &view);
+    let expected = "true|112,111,110,103|true";
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let rendered = wait_for_socket_snapshot(&mut context, &view, expected, deadline);
     assert!(
-        snapshot(&mut context, &view).contains("true|112,111,110,103|true"),
-        "raw TCP reads should preserve bytes and report EOF"
+        rendered.contains(expected),
+        "raw TCP reads should preserve bytes and report EOF: {rendered}"
     );
     server.join().expect("TCP server");
 }
@@ -418,29 +424,31 @@ fn net_connect_is_bounded_and_capability_gated(cx: &mut TestAppContext) {
 fn net_close_does_not_wait_for_a_pending_read(cx: &mut TestAppContext) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("TCP listener");
     let port = listener.local_addr().expect("listener address").port();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("TCP connection");
-        thread::sleep(Duration::from_millis(300));
-        let _ = stream.write_all(b"x");
+    let server = thread::spawn(move || -> std::io::Result<_> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let count = stream.read(&mut [0])?;
+        Ok((stream, count))
     });
 
     let source = NET_PENDING_READ_CLOSE_PROBE.replace("__PORT__", &port.to_string());
+    cx.executor().allow_parking();
     let (_runtime, view, mut context) = probe(cx, &source);
-    context.run_until_parked();
-    thread::sleep(Duration::from_millis(20));
-    context.executor().advance_clock(Duration::from_millis(50));
-    let started = std::time::Instant::now();
-    context.run_until_parked();
-    let close_elapsed = started.elapsed();
-    draw(&mut context, &view);
-    let rendered = snapshot(&mut context, &view);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pending = wait_for_socket_snapshot(&mut context, &view, "read pending", deadline);
+    assert!(pending.contains("read pending"), "{pending}");
 
-    server.join().expect("TCP server");
+    let started = Instant::now();
+    let close_budget = Duration::from_millis(150);
+    context.executor().advance_clock(Duration::from_millis(50));
+    let rendered = wait_for_socket_snapshot(&mut context, &view, "closed", started + close_budget);
+    let close_elapsed = started.elapsed();
     assert!(
-        close_elapsed < Duration::from_millis(150),
-        "socket.close() waited {close_elapsed:?} for the pending read"
+        rendered.contains("closed") && close_elapsed < close_budget,
+        "socket.close() did not unblock the pending read within {close_budget:?} ({close_elapsed:?}): {rendered}"
     );
-    assert!(rendered.contains("closed"), "{rendered}");
+    let (_peer, count) = server.join().expect("TCP server").expect("peer saw EOF");
+    assert_eq!(count, 0);
 }
 
 #[gpui::test]
@@ -765,11 +773,11 @@ fn websocket_reads_and_writes_text_and_binary_messages(cx: &mut TestAppContext) 
 fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("WebSocket listener");
     let address = listener.local_addr().expect("listener address");
-    let (text_received, text_receiver) = mpsc::channel();
+    let (ready_to_close, ready_receiver) = mpsc::channel();
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("WebSocket connection");
         stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("server read timeout");
         let mut socket = tungstenite::accept(stream).expect("WebSocket handshake");
         socket
@@ -779,16 +787,18 @@ fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext)
         let mut saw_pong = false;
         let mut saw_text = false;
         let mut saw_close = false;
+        let mut signaled = false;
         for _ in 0..3 {
             match socket.read() {
                 Ok(Message::Pong(bytes)) if bytes.as_ref() == [7] => saw_pong = true,
-                Ok(Message::Text(text)) if text == "while read is pending" => {
-                    saw_text = true;
-                    let _ = text_received.send(());
-                }
+                Ok(Message::Text(text)) if text == "while read is pending" => saw_text = true,
                 Ok(message) if message.is_close() => saw_close = true,
                 Ok(_) => {}
                 Err(_) => break,
+            }
+            if !signaled && saw_pong && saw_text {
+                signaled = true;
+                let _ = ready_to_close.send(());
             }
         }
         (saw_pong, saw_text, saw_close)
@@ -798,16 +808,31 @@ fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext)
         WEBSOCKET_PENDING_READ_PROBE.replace("__URL__", &format!("ws://{address}/pending"));
     let (_runtime, view, mut context) = probe(cx, &source);
     context.run_until_parked();
-    text_receiver
-        .recv_timeout(Duration::from_millis(500))
-        .expect("client write while read is pending");
-    context.executor().advance_clock(Duration::from_millis(10));
-    context.run_until_parked();
+    ready_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("client pong and write while read is pending");
+    // The close leaves through real socket I/O: keep driving the client until
+    // the server has seen it, instead of blocking the client on the join.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.is_finished() && std::time::Instant::now() < deadline {
+        context.executor().advance_clock(Duration::from_millis(10));
+        context.run_until_parked();
+        thread::sleep(Duration::from_millis(5));
+    }
     let server_events = server.join().expect("WebSocket server");
-    context.executor().advance_clock(Duration::from_millis(10));
-    context.run_until_parked();
-    draw(&mut context, &view);
-    let rendered = snapshot(&mut context, &view);
+    // The client actor flushes the close frame before settling the close and
+    // pending-read promises, so keep driving the executor until the view updates.
+    let mut rendered;
+    loop {
+        context.executor().advance_clock(Duration::from_millis(10));
+        context.run_until_parked();
+        draw(&mut context, &view);
+        rendered = snapshot(&mut context, &view);
+        if !rendered.contains("pending") || std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(server_events, (true, true, true));
     assert!(rendered.contains("write-and-close-finished"), "{rendered}");
 }
@@ -1173,6 +1198,24 @@ fn draw(context: &mut VisualTestContext, view: &Entity<ScriptView>) {
         gpui::size(gpui::px(400.), gpui::px(300.)),
         move |_, _| view.into_any_element(),
     );
+}
+
+fn wait_for_socket_snapshot(
+    context: &mut VisualTestContext,
+    view: &Entity<ScriptView>,
+    expected: &str,
+    deadline: Instant,
+) -> String {
+    // The socket reactor wakes the work from outside GPUI's test scheduler.
+    loop {
+        context.run_until_parked();
+        draw(context, view);
+        let rendered = snapshot(context, view);
+        if rendered.contains(expected) || Instant::now() >= deadline {
+            return rendered;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn snapshot(context: &mut VisualTestContext, view: &Entity<ScriptView>) -> String {

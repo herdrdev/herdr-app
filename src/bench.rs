@@ -36,7 +36,7 @@ pub static SCRIPT_US: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_US: AtomicU64 = AtomicU64::new(0);
 
-pub fn note_mods(m: &gpui_shell::metrics::RuntimeMetrics) {
+pub fn note_mods(m: &herdr_shell::metrics::RuntimeMetrics) {
     SCRIPT_RENDERS.store(m.script_renders(), Relaxed);
     SCRIPT_US.store(m.script_render_time().as_micros() as u64, Relaxed);
     MATERIALIZE.store(m.materializations(), Relaxed);

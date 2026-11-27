@@ -9,6 +9,13 @@ class Element {
   // `calls` keeps the last registration per method; listeners keeps every one,
   // so a button handler can be picked out of several on_mouse_down calls.
   listeners: Record<string, unknown[][]> = {};
+  findById(id: string): Element | undefined {
+    if (this.calls.id?.[0] === id) return this;
+    for (const child of this.nodes) {
+      const found = child?.findById?.(id);
+      if (found) return found;
+    }
+  }
   constructor() {
     const proxy: Element = new Proxy(this, {
       get: (target, key: string) => key in target ? Reflect.get(target, key) : (...args: unknown[]) => {
@@ -109,6 +116,34 @@ const label = new Function("View", `${source.replace(/^import .*;\n/gm, "").repl
 
 const claude = { program: { name: "Claude Code", key: "claude", agent: true }, title: "my-task" };
 
+test("opening an agent from the + menu leaves the tab label free to follow the shell and the next agent", async () => {
+  const menuSource = await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8");
+  const launches: { name?: string; space: string; argv: string[] }[] = [];
+  const globals = {
+    ...values, v_flex: element, keys: () => [], props: () => ({}), closeOverlay() {},
+    run(command: string, args: typeof launches[number]) {
+      expect(command).toBe("tab.new");
+      launches.push(args);
+    },
+  };
+  const Menu = new Function(...Object.keys(globals), menuSource.replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "return class NewMenu"))(...Object.values(globals));
+  const menu = new Menu();
+  menu.agents = [{ ...claude.program, run: ["claude"], installed: true }];
+  const root: Element = menu.render();
+  (root.findById("claude")!.calls.on_click[0] as () => void)();
+  (root.calls.on_key_down[0] as Handler)({ key: "1", modifiers: {} });
+
+  expect(launches).toHaveLength(2);
+  for (const launch of launches) {
+    expect(launch.space).toBe("s1");
+    expect(launch.argv).toEqual(["claude"]);
+    const tab = { name: launch.name || "2", named: Boolean(launch.name) };
+    expect(label(tab, { program: claude.program })).toBe("Claude Code");
+    expect(label(tab, { program: { name: "bash" } })).toBe("bash");
+    expect(label(tab, { program: { key: "codex", name: "Codex", agent: true } })).toBe("Codex");
+  }
+});
+
 test("a tab Herdr named after its agent follows the agent's session title", () => {
   expect(label({ name: "Claude Code", named: true }, claude)).toBe("my-task");
   expect(label({ name: "", named: false }, claude)).toBe("my-task");
@@ -145,21 +180,10 @@ test("a shell's title never replaces its tab's name", () => {
   expect(label({ name: "", named: false }, undefined)).toBe("Terminal");
 });
 
-function byId(view: unknown, id: string): Element | undefined {
-  const walk = (node: Element): Element | undefined => {
-    if (node.calls.id?.[0] === id) return node;
-    for (const child of node.nodes) {
-      const found = walk(child);
-      if (found) return found;
-    }
-  };
-  return walk((view as { render(): Element }).render());
-}
-
 test("a middle click closes the tab it hit, not the one on screen", () => {
   const view = new Tabs();
   view.init();
-  const element = byId(view, "tab-t1");
+  const element = (view.render() as Element).findById("tab-t1");
   expect(element).toBeDefined();
   const middle = element!.listeners.on_mouse_down?.find(([button]) => button === "middle");
   expect(middle).toBeDefined();
