@@ -70,6 +70,9 @@ including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder. If an inherited local folder was deleted, new spaces,
 tabs and splits retry in that machine's home. An explicit invalid folder
 still fails.
+`focus: false` on `pane.split` or `terminal.open` creates a split or tab without
+changing the selected space, tab, pane focus, or zoom. It defaults to true and
+must be a boolean.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
@@ -82,6 +85,12 @@ Use `commands` to confirm the command's exact shape:
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
+
+An existing core terminal without a pane can be placed beside an explicit
+anchor using `terminal.keep {terminal, place, pane, focus:false}`. The reply
+may be pending: wait for `herdr-app ls` to show the returned pane before sizing
+it. `pane.size_managed {main, agents, direction, main_percent}` accepts only
+the exact main-plus-agent-stack shape and leaves focus and other tabs alone.
 
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
 the focused one) and its neighbor in a direction, or `target`, another pane of

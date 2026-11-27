@@ -103,7 +103,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
@@ -112,6 +112,7 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `argv` | no |
 | `mod` | no |
 | `props` | no |
+| `focus` | no |
 
 ## `pane.close`
 
@@ -123,7 +124,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
@@ -131,15 +132,18 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 | `folder` | no |
 | `place` | no |
 | `name` | no |
+| `focus` | no |
 
 ## `terminal.keep`
 
-Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down".
+Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down" of pane. An explicit pane target requires a local, unplaced terminal with no herdr.space or herdr.tab label; it cannot target a terminal that already has a pane. Without pane, right/down uses the focused pane. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
 | `terminal` | yes |
 | `place` | no |
+| `pane` | no |
+| `focus` | no |
 
 ## `terminal.park`
 
@@ -276,6 +280,17 @@ Move the border of a pane (default: the focused one) "left", "right", "up" or "d
 | `direction` | yes |
 | `pane` | no |
 | `px` | no |
+
+## `pane.size_managed`
+
+Set a main pane's percentage and evenly size the listed agent panes. The tab must match exactly: main first, agents stacked beside it (right or down), and no other panes. A zoomed tab is not changed.
+
+| Argument | Required |
+|---|---|
+| `main` | yes |
+| `agents` | yes |
+| `direction` | yes |
+| `main_percent` | yes |
 
 ## `pane.swap`
 
