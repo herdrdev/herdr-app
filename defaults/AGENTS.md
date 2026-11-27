@@ -958,7 +958,9 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
-  example pane header, not used by the default layouts), and `worktree`
+  example pane header, not used by the default layouts), `workspace-chrome`
+  (the sidebar's top row; its search button opens `picker`, or the mod a
+  layout names in that block's `"props": {"picker": "my-picker"}`), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,
   Open worktree (the repo's checkouts, filtered; one already shown is gone
   to) and Remove worktree open it as a dialog with props `{space, folder?,
