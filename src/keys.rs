@@ -5,7 +5,8 @@
 //!   "global":   { "ctrl-shift-t": "tab.new", "ctrl-1": "tab.select:1" },
 //!   "terminal": { "ctrl-left": "send:\u001bb", "ctrl-shift-t": "terminal" },
 //!   "layout:terminals": { "ctrl-]": "space.next" },
-//!   "mod:editor": { "ctrl-s": "editor.save" }
+//!   "mod:editor": { "ctrl-s": "editor.save" },
+//!   "program:nvim": { "ctrl-h": "terminal" }
 //! }
 //! ```
 //!
@@ -117,15 +118,21 @@ pub fn path() -> std::path::PathBuf {
 /// it would beat `layout:` (same depth, added earlier) and only lose to
 /// `terminal` and `mod:` by order.
 fn tab(section: &str) -> Result<KeyBindingContextPredicate, String> {
-    use KeyBindingContextPredicate::{Equal, Identifier};
+    use KeyBindingContextPredicate::{And, Equal, Identifier};
     match section {
         "global" => Ok(Identifier("Herdr".into())),
         "terminal" => Ok(Identifier("Terminal".into())),
-        s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
-            (Some(p), _) if !p.is_empty() => Ok(Equal("mod".into(), p.to_owned().into())),
+        s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:"), s.strip_prefix("program:")) {
+            (Some(p), _, _) if !p.is_empty() => Ok(Equal("mod".into(), p.to_owned().into())),
             // While layouts/<name>.json is shown (the window's tab says which).
-            (_, Some(l)) if !l.is_empty() => Ok(Equal("layout".into(), l.to_owned().into())),
-            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
+            (_, Some(l), _) if !l.is_empty() => Ok(Equal("layout".into(), l.to_owned().into())),
+            // A terminal running this program (its programs.json key, as `panes()` shows it).
+            // Same depth as `terminal`: `parse` binds these after it, so they win.
+            (_, _, Some(p)) if !p.is_empty() => Ok(And(
+                Box::new(Identifier("Terminal".into())),
+                Box::new(Equal("program".into(), p.to_owned().into())),
+            )),
+            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\", \"mod:<name>\" or \"program:<key>\"")),
         },
     }
 }
@@ -193,7 +200,10 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
     let sections: Sections = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut problems = Vec::new();
-    for (section, keys) in &sections {
+    // `program:` sections go last: at the same depth as `terminal`, the later binding wins.
+    let mut ordered: Vec<_> = sections.iter().collect();
+    ordered.sort_by_key(|(section, _)| section.starts_with("program:"));
+    for (section, keys) in ordered {
         let predicate = match tab(section) {
             Ok(c) => Some(Rc::new(c)),
             Err(e) => {
@@ -420,6 +430,47 @@ mod tests {
             assert_eq!(crate::commands::shorthand(crate::commands::find(name).unwrap(), payload), json!({"name":value}));
         }
         assert_eq!(crate::commands::shorthand(crate::commands::find("tab.select").unwrap(), "3"), json!({"index":3}));
+    }
+
+    #[test]
+    fn program_sections_beat_terminal_only_in_that_program() {
+        use gpui::{KeyContext, Keymap, Keystroke, NoAction};
+        use herdr_shell::action::ShellAction;
+        let text = serde_json::json!({
+            // Listed first and sorting before "terminal": order in the file must not matter.
+            "program:nvim": { "ctrl-h": "terminal", "ctrl-j": "send:x" },
+            "terminal": { "ctrl-h": "pane.go:left", "ctrl-j": "pane.go:down" },
+            "global": { "ctrl-h": "app.help" },
+        });
+        let keymap = Keymap::new(super::parse(&text.to_string()).unwrap());
+        let stack = |program: Option<&str>| {
+            let mut herdr = KeyContext::default();
+            herdr.add("Herdr");
+            let mut terminal = KeyContext::default();
+            terminal.add("Terminal");
+            if let Some(p) = program {
+                terminal.set("program", p.to_owned());
+            }
+            vec![herdr, terminal]
+        };
+        let first = |keys: &str, program: Option<&str>| {
+            let (found, _) = keymap.bindings_for_input(&[Keystroke::parse(keys).unwrap()], &stack(program));
+            found.first().map(|b| b.action().boxed_clone())
+        };
+        let shell_action = |a: Option<Box<dyn gpui::Action>>| {
+            a.and_then(|a| a.as_any().downcast_ref::<ShellAction>().map(|s| s.id().to_owned()))
+        };
+        // nvim gets ctrl-h itself: NoAction suppresses `terminal` and `global`.
+        let (found, _) = keymap.bindings_for_input(&[Keystroke::parse("ctrl-h").unwrap()], &stack(Some("nvim")));
+        assert!(found.is_empty());
+        assert!(first("ctrl-h", Some("nvim")).is_none_or(|a| a.as_any().is::<NoAction>()));
+        assert_eq!(shell_action(first("ctrl-j", Some("nvim"))).as_deref(), Some("send:x"));
+        // Any other program, or none known yet, keeps the `terminal` section.
+        for program in [Some("shell"), Some("lazygit"), None] {
+            assert_eq!(shell_action(first("ctrl-h", program)).as_deref(), Some("pane.go:left"), "{program:?}");
+            assert_eq!(shell_action(first("ctrl-j", program)).as_deref(), Some("pane.go:down"), "{program:?}");
+        }
+        assert!(super::parse(r#"{"program:":{"f6":"app.help"}}"#).is_err());
     }
 
     #[test]

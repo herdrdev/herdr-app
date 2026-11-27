@@ -548,8 +548,30 @@ shortcuts must then be added by hand.
 ```
 
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
-  `terminal` (a terminal has focus), `mod:<name>`. The more specific section
-  wins: `layout:terminals` over `global`, `terminal` over both.
+  `terminal` (a terminal has focus), `program:<key>` (a terminal running that
+  program has focus: its `programs.json` key, `panes()[i].program.key`, e.g.
+  `nvim`), `mod:<name>`. The more specific section wins: `layout:terminals`
+  over `global`, `terminal` over both, `program:<key>` over `terminal`.
+- Seamless editor/pane navigation (vim-tmux-navigator style): bind the keys
+  to `pane.go` in `terminal` and give them back to the editor with
+  `program:nvim`; the editor calls `herdr-app do pane.go --direction <dir>`
+  when it has no split that way. Any keys work, not only ctrl+h/j/k/l.
+  ```json
+  { "terminal":     { "ctrl-h": "pane.go:left", "ctrl-l": "pane.go:right" },
+    "program:nvim": { "ctrl-h": "terminal",     "ctrl-l": "terminal" } }
+  ```
+  ```lua
+  -- init.lua: wincmd inside nvim, Herdr's pane at the edge
+  for key, d in pairs({ h = "left", j = "down", k = "up", l = "right" }) do
+    vim.keymap.set("n", "<C-" .. key .. ">", function()
+      local w = vim.fn.winnr()
+      vim.cmd("wincmd " .. key)
+      if vim.fn.winnr() == w then
+        vim.system({ "herdr-app", "do", "pane.go", "--direction", d })
+      end
+    end)
+  end
+  ```
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
