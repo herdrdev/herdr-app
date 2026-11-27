@@ -1,4 +1,63 @@
 #[test]
+fn divider_drags_do_not_select_terminal_text() {
+    in_own_process("divider_beside_terminal");
+    in_own_process("divider_above_terminal");
+}
+
+#[gpui::test]
+fn divider_beside_terminal(cx: &mut gpui::TestAppContext) {
+    if running_alone("divider_beside_terminal") { check_terminal_drag(cx, super::Axis::Row); }
+}
+
+#[gpui::test]
+fn divider_above_terminal(cx: &mut gpui::TestAppContext) {
+    if running_alone("divider_above_terminal") { check_terminal_drag(cx, super::Axis::Column); }
+}
+
+fn check_terminal_drag(cx: &mut gpui::TestAppContext, axis: super::Axis) {
+    use gpui::{point, px, size, Modifiers, MouseButton, VisualTestContext};
+    use serde_json::json;
+    let row = axis == super::Axis::Row;
+    let (view, cx) = open_window(cx, "divider-probe", "export default () => null;", json!({
+        "id": "root", "type": if row { "row" } else { "column" }, "titlebar": "none", "divider": {"width": 1, "color": "border"},
+        "children": [
+            {"id": "first", "type": "block", "size": {"px": 140}, "content": {"mod": "divider-probe"}},
+            {"id": "term", "type": "block", "content": {"terminal": "t1"}}
+        ]
+    }));
+    cx.simulate_resize(size(px(700.), px(700.)));
+    let draw = |cx: &mut VisualTestContext| { cx.update(|w, cx| w.draw(cx).clear(cx)); cx.run_until_parked(); };
+    draw(cx);
+    let term = view.read_with(cx, |v, _| v.terms["term"].view.clone());
+    view.update_in(cx, |v, w, cx| v.terms["term"].focus.focus(w, cx));
+    term.update(cx, |t, _| t.write_test_output("abcdefghijklmnopqrstuvwxyz0123456789\r\n".repeat(12).as_bytes()));
+    let edge = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| {
+        let first = v.bounds.borrow()["first"];
+        f32::from(if row { first.right() } else { first.bottom() })
+    });
+    // The 1 px gap has a 6 px handle. A press at +2 hits the handle AND the terminal;
+    // at +4 it hits only the terminal. Vary the distance between move events.
+    for (offset, step, resize) in [(20., 80, false), (0., 80, true), (2., 80, true), (2., 10, true), (2., 5, true), (4., 80, false)] {
+        term.update(cx, |t, cx| t.clear_selection(cx));
+        draw(cx);
+        let before = edge(cx);
+        let pos = |delta| {
+            let p = px(before + offset + delta);
+            if row { point(p, px(62.)) } else { point(px(62.), p) }
+        };
+        cx.simulate_mouse_down(pos(0.), MouseButton::Left, Modifiers::default());
+        for dx in (step..=80).step_by(step) {
+            cx.simulate_mouse_move(pos(dx as f32), MouseButton::Left, Modifiers::default());
+            draw(cx);
+        }
+        cx.simulate_mouse_up(pos(80.), MouseButton::Left, Modifiers::default());
+        draw(cx);
+        let selected = term.read_with(cx, |t, _| t.selection().is_some());
+        assert_eq!((edge(cx) != before, selected), (resize, !resize), "offset={offset}, step={step}");
+    }
+}
+
+#[test]
 fn dividers_follow_the_current_layout() {
     in_own_process("divider_interaction");
 }

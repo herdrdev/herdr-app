@@ -851,6 +851,11 @@ impl TerminalView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn write_test_output(&self, bytes: &[u8]) {
+        self.grid.borrow_mut().vt.write(bytes);
+    }
+
     pub fn selection(&self) -> Option<vt::SelectionPositions> {
         self.grid.borrow().vt.selection_positions()
     }
