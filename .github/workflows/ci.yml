@@ -86,12 +86,12 @@ jobs:
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
-      # herdr-shell's own tests run on Linux only until their macOS and
-      # Windows failures (which predate running them anywhere) are sorted out.
+      # Run the Wayland backend tests on Linux. herdr-shell's own tests run on
+      # Linux only until its macOS and Windows failures are sorted out.
       - name: Pick packages
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            echo "PKGS=-p herdr-app -p herdr-shell" >>"$GITHUB_ENV"
+            echo "PKGS=-p herdr-app -p herdr-shell -p gpui-pre-linux" >>"$GITHUB_ENV"
           else
             echo "PKGS=-p herdr-app" >>"$GITHUB_ENV"
           fi

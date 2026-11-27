@@ -38,7 +38,7 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     protocol::{
         wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
-        wl_shm_pool, wl_surface,
+        wl_shm_pool, wl_surface, wl_touch,
     },
 };
 use wayland_protocols::wp::pointer_gestures::zv1::client::{
@@ -81,6 +81,7 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
 
 use super::{
     display::WaylandDisplay,
+    touch::{TouchState, TouchUpdate},
     window::{ImeInput, WaylandWindowStatePtr},
 };
 
@@ -358,6 +359,8 @@ pub(crate) struct WaylandClientState {
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
     pinch_scale: f32,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
+    wl_touch: Option<wl_touch::WlTouch>,
+    touch: TouchState<ObjectId>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     data_device: Option<wl_data_device::WlDataDevice>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
@@ -759,10 +762,45 @@ impl WaylandClientStatePtr {
         }
     }
 
+    fn dispatch_touch_updates(
+        client: &RefCell<WaylandClientState>,
+        updates: impl IntoIterator<Item = TouchUpdate<ObjectId>>,
+    ) {
+        for update in updates {
+            let delivery = {
+                let mut state = client.borrow_mut();
+                // A preceding callback in this frame may have closed the window.
+                if let TouchUpdate::Down { surface, .. } = &update
+                    && !state.windows.contains_key(surface)
+                {
+                    continue;
+                }
+                state.touch.apply(update).and_then(|(surface, event)| {
+                    Some((state.windows.get(&surface)?.clone(), event))
+                })
+            };
+            // Input handlers can re-enter the platform, for example to set the clipboard.
+            if let Some((window, event)) = delivery {
+                window.handle_input(PlatformInput::Touch(event));
+            }
+        }
+    }
+
+    fn cancel_touches(client: &RefCell<WaylandClientState>) {
+        let cancelled = client.borrow_mut().touch.cancel().collect::<SmallVec<[_; 8]>>();
+        for (surface, event) in cancelled {
+            let window = client.borrow().windows.get(&surface).cloned();
+            if let Some(window) = window {
+                window.handle_input(PlatformInput::Touch(event));
+            }
+        }
+    }
+
     pub fn drop_window(&self, surface_id: &ObjectId) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let closed_window = state.windows.remove(surface_id).unwrap();
+        state.touch.forget_surface(surface_id);
         if let Some(window) = state.mouse_focused_window.take()
             && !window.ptr_eq(&closed_window)
         {
@@ -1026,6 +1064,8 @@ impl WaylandConnection {
             wl_seat: seat,
             wl_pointer: None,
             wl_keyboard: None,
+            wl_touch: None,
+            touch: TouchState::new(),
             pinch_gesture: None,
             pinch_scale: 1.0,
             cursor_shape_device: None,
@@ -1159,7 +1199,16 @@ impl WaylandConnection {
         client.register_source(
             handle.insert_source(WaylandSource::new(conn, event_queue), {
                 let mut client = pointer;
-                move |_, queue, _| queue.dispatch_pending(&mut client)
+                move |_, queue, _| {
+                    let dispatched = queue.dispatch_pending(&mut client)?;
+                    // Mutter and Weston can omit the frame after an up. Finish
+                    // those releases after queued frames and cancels have run.
+                    if let Some(state) = client.try_get_client() {
+                        let releases = state.borrow_mut().touch.take_unframed_releases();
+                        WaylandClientStatePtr::dispatch_touch_updates(&state, releases);
+                    }
+                    Ok(dispatched)
+                }
             }),
             "failed to register Wayland connection source",
         )?;
@@ -1394,7 +1443,7 @@ impl WaylandConnection {
             state.clipboard.set_primary(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
-                    "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
+                    "Skipping Wayland primary selection ownership request because no eligible input serial has been received"
                 );
                 return;
             };
@@ -1419,7 +1468,7 @@ impl WaylandConnection {
             state.clipboard.set(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
-                    "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
+                    "Skipping Wayland clipboard ownership request because no eligible input serial has been received"
                 );
                 return;
             };
@@ -1944,6 +1993,70 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
 
                 state.wl_pointer = Some(pointer);
             }
+            if capabilities.contains(wl_seat::Capability::Touch) {
+                if state.wl_touch.is_none() {
+                    state.wl_touch = Some(seat.get_touch(qh, ()));
+                }
+            } else if let Some(touch) = state.wl_touch.take() {
+                touch.release();
+                drop(state);
+                Self::cancel_touches(&client);
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        touch: &wl_touch::WlTouch,
+        event: wl_touch::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        if state.wl_touch.as_ref() != Some(touch) {
+            return;
+        }
+
+        match event {
+            wl_touch::Event::Down {
+                serial,
+                surface,
+                id,
+                x,
+                y,
+                ..
+            } => {
+                let surface = surface.id();
+                if state.windows.contains_key(&surface) {
+                    state.serial_tracker.update(SerialKind::TouchDown, serial);
+                    // Wayland coordinates are already logical, like pointer coordinates.
+                    state.touch.push(TouchUpdate::Down {
+                        id,
+                        surface,
+                        position: point(px(x as f32), px(y as f32)),
+                    });
+                }
+            }
+            wl_touch::Event::Motion { id, x, y, .. } => state.touch.push(TouchUpdate::Motion {
+                id,
+                position: point(px(x as f32), px(y as f32)),
+            }),
+            wl_touch::Event::Up { id, .. } => state.touch.push(TouchUpdate::Up { id }),
+            wl_touch::Event::Frame => {
+                let updates = state.touch.take_frame();
+                drop(state);
+
+                Self::dispatch_touch_updates(&client, updates);
+            }
+            wl_touch::Event::Cancel => {
+                drop(state);
+                Self::cancel_touches(&client);
+            }
+            _ => {}
         }
     }
 }

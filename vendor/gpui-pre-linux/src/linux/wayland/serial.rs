@@ -7,6 +7,7 @@ pub(crate) enum SerialKind {
     MouseEnter,
     MousePress,
     KeyPress,
+    TouchDown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,7 +46,10 @@ impl SerialTracker {
     pub fn update(&mut self, kind: SerialKind, value: u32) {
         let serial = Serial(value);
 
-        if matches!(&kind, SerialKind::KeyPress | SerialKind::MousePress) {
+        if matches!(
+            &kind,
+            SerialKind::KeyPress | SerialKind::MousePress | SerialKind::TouchDown
+        ) {
             self.selection_serial = Some(SelectionSerial(serial));
         }
 
@@ -92,6 +96,19 @@ mod tests {
         serial_tracker.update(SerialKind::MousePress, 3783);
 
         assert_eq!(raw_selection_serial(&serial_tracker), Some(3783));
+    }
+
+    #[test]
+    fn touch_updates_selection_without_replacing_the_pointer_press() {
+        let mut tracker = SerialTracker::new();
+        tracker.update(SerialKind::TouchDown, 3783);
+        assert_eq!(raw_selection_serial(&tracker), Some(3783));
+        assert_eq!(tracker.get(SerialKind::MousePress).as_raw(), 0);
+
+        tracker.update(SerialKind::MousePress, 3787);
+        tracker.update(SerialKind::TouchDown, 3788);
+        assert_eq!(raw_selection_serial(&tracker), Some(3788));
+        assert_eq!(tracker.get(SerialKind::MousePress).as_raw(), 3787);
     }
 
     #[test]

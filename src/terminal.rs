@@ -1556,20 +1556,18 @@ fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, mods: Modifiers, x: f32, y
 /// moves: they add up to a line before one scrolls (as in Zed), and each
 /// gesture starts from nothing. Kept under a screen, so turning back is quick.
 fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) -> i32 {
-    match phase {
-        TouchPhase::Started => {
-            *scrolled = 0.0;
-            0
-        }
-        TouchPhase::Moved => {
-            let before = scrolled.trunc() as i32;
-            *scrolled += lines;
-            let after = scrolled.trunc() as i32;
-            *scrolled %= rows.max(1.0);
-            after - before
-        }
-        _ => 0,
+    if phase == TouchPhase::Started {
+        // GPUI puts the movement that crossed the touch slop in this first step.
+        *scrolled = 0.0;
     }
+    if !matches!(phase, TouchPhase::Started | TouchPhase::Moved) {
+        return 0;
+    }
+    let before = scrolled.trunc() as i32;
+    *scrolled += lines;
+    let after = scrolled.trunc() as i32;
+    *scrolled %= rows.max(1.0);
+    after - before
 }
 
 /// Lines for a macOS mouse wheel event, as Ghostty scrolls them. macOS reports
@@ -4558,6 +4556,17 @@ mod tests {
         assert_eq!(steps(Moved, -9.0, -19.0), point(0, 0));
         assert_eq!(steps(Moved, -2.0, -2.0), point(-1, -1));
         assert_eq!(steps(Ended, 100.0, 100.0), point(0, 0));
+    }
+
+    #[test]
+    fn first_touch_scroll_step_applies_its_delta() {
+        use gpui::{point, px, size, ScrollDelta, TouchPhase};
+        let mut scrolled = point(0.0, -0.75);
+        let cell = size(px(10.0), px(20.0));
+        let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(0.0), px(30.0))), TouchPhase::Started, cell, 80, 24, 1.0);
+        assert_eq!(steps, point(0, 1));
+        let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(0.0), px(10.0))), TouchPhase::Moved, cell, 80, 24, 1.0);
+        assert_eq!(steps, point(0, 1));
     }
 
     #[test]
