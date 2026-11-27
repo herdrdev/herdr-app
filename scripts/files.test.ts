@@ -127,3 +127,46 @@ test("Files follows directory links one level at a time", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Render the rows with recording elements: what each row is built with is what GPUI gets.
+class Element {
+  calls: Record<string, unknown[]> = {};
+  constructor() {
+    const proxy: Element = new Proxy(this, {
+      get: (target, key: string) => key in target ? Reflect.get(target, key) : (...args: unknown[]) => {
+        if (key === "when") { if (args[0]) (args[1] as (el: Element) => void)(proxy); }
+        else target.calls[key] = args;
+        return proxy;
+      },
+    });
+    return proxy;
+  }
+}
+const element = () => new Element();
+const values: Record<string, unknown> = {
+  View: class {}, div: element, svg: element, v_flex: element, h_flex: element, Editor: { new: element }, EditorState: { new: element },
+  spaces: () => [], panes: () => [], focused: () => null, exec: async () => ({ code: 1, stdout: "", stderr: "" }), readTextFile: async () => null,
+  watchFolder: async () => [], theme: () => ({}), settings: () => ({}), window: () => null,
+};
+const Files = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Files", "return class Files"))(...Object.values(values));
+function rows(root: string, on: string | null) {
+  const view = new Files();
+  Object.assign(view, { root, on, marks: {}, folders: new Set(["src"]), entries: new Map([
+    ["", [{ name: "src", dir: true }, { name: "README.md", dir: false }]],
+    ["src", [{ name: "main.ts", dir: false }]],
+  ]) });
+  return (view.rows("", 0, [], {}) as Element[]).map(row => row.calls.drag_paths);
+}
+
+test("Files rows drag their path onto a terminal, from the folder's machine", () => {
+  expect(rows("/home/me/app", null)).toEqual([
+    [["/home/me/app/src"], { on: null }],
+    [["/home/me/app/src/main.ts"], { on: null }],
+    [["/home/me/app/README.md"], { on: null }],
+  ]);
+  expect(rows("/srv/api", "build-box")).toEqual([
+    [["/srv/api/src"], { on: "build-box" }],
+    [["/srv/api/src/main.ts"], { on: "build-box" }],
+    [["/srv/api/README.md"], { on: "build-box" }],
+  ]);
+});
