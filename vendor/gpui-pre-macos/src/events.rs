@@ -405,7 +405,13 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
             .to_string();
         let mut key_char = None;
         let mut unshifted_key = None;
-        let first_char = characters.chars().next().map(|ch| ch as u16);
+        // A text expander can post a whole chunk beginning with a named key.
+        // Only a single character should take the named-key path.
+        let mut characters = characters.chars();
+        let named_key = match (characters.next(), characters.next()) {
+            (Some(ch), None) => u16::try_from(ch as u32).ok(),
+            _ => None,
+        };
         let modifiers = native_event.modifierFlags();
 
         let control = modifiers.contains(NSEventModifierFlags::NSControlKeyMask);
@@ -413,11 +419,11 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
         let mut shift = modifiers.contains(NSEventModifierFlags::NSShiftKeyMask);
         let command = modifiers.contains(NSEventModifierFlags::NSCommandKeyMask);
         let function = modifiers.contains(NSEventModifierFlags::NSFunctionKeyMask)
-            && first_char
+            && named_key
                 .is_none_or(|ch| !(NSUpArrowFunctionKey..=NSModeSwitchFunctionKey).contains(&ch));
 
         #[allow(non_upper_case_globals)]
-        let key = match first_char {
+        let key = match named_key {
             Some(SPACE_KEY) => {
                 key_char = Some(" ".to_string());
                 "space".to_string()
@@ -827,6 +833,36 @@ mod tests {
         assert_eq!(native_key_with_text(0x31, none, "ê").key_char, None);
         assert_eq!(native_key_with_text(0x00, NSEventModifierFlags::NSShiftKeyMask, "Ê").key_char, None);
         assert_eq!(native_key_with_text(0x00, none, "ường").key_char, None);
+    }
+
+    #[test]
+    fn posted_text_starting_with_space_reaches_text_input() {
+        use cocoa::{base::nil, foundation::NSAutoreleasePool};
+        use core_graphics::{
+            event::CGEvent,
+            event_source::{CGEventSource, CGEventSourceStateID},
+        };
+        use foreign_types::ForeignType;
+
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        let source = CGEventSource::new(CGEventSourceStateID::Private).unwrap();
+        let event = CGEvent::new_keyboard_event(source, 0x31, true).unwrap();
+        event.set_string(" -> ");
+        let (text, keystroke) = unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let native_event = NSEvent::eventWithCGEvent_(nil, event.as_ptr().cast());
+            assert!(!native_event.is_null());
+            let text = native_event.characters().to_str().to_owned();
+            let keystroke = parse_keystroke(native_event);
+            pool.drain();
+            (text, keystroke)
+        };
+
+        assert_eq!(text, " -> ");
+        assert_eq!(keystroke.key_char, None);
+        let space = native_key_with_text(0x31, NSEventModifierFlags::empty(), " ");
+        assert_eq!(space.key, "space");
+        assert_eq!(space.key_char.as_deref(), Some(" "));
     }
 
     #[test]
