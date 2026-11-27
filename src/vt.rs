@@ -193,8 +193,9 @@ pub struct Placement {
 }
 
 impl Placement {
-    pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32) -> [f32; 4] {
-        let [sx, sy] = self.cell_pixels.map_or([1.0, 1.0], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
+    pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32, scale: f32) -> [f32; 4] {
+        // Direct placements use device pixels, while placeholders scale with the cell.
+        let [sx, sy] = self.cell_pixels.map_or([1.0 / scale; 2], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
         [
             self.col as f32 * cell_width + self.offset[0] as f32 * sx,
             self.row as f32 * cell_height + self.offset[1] as f32 * sy,
@@ -849,6 +850,12 @@ impl Vt {
                     }
                     let mut generation = 0u64;
                     ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+                    let mut offset = [0u32; 2];
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET, &mut offset[0] as *mut _ as *mut c_void);
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET, &mut offset[1] as *mut _ as *mut c_void);
+                    // Ghostty sizes placements using offsets clamped to the first cell.
+                    offset[0] = offset[0].min(self.shared.size.cell_width.saturating_sub(1));
+                    offset[1] = offset[1].min(self.shared.size.cell_height.saturating_sub(1));
                     out.push(Placement {
                         image: id,
                         generation,
@@ -857,7 +864,7 @@ impl Vt {
                         width: info.pixel_width,
                         height: info.pixel_height,
                         source: [info.source_x, info.source_y, info.source_width, info.source_height],
-                        offset: [0, 0],
+                        offset,
                         cell_pixels: None,
                         z,
                     });
@@ -2550,12 +2557,28 @@ mod tests {
         let p = vt.placements();
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row), (7, 0, 0));
-        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5, 1.0), [0.0, 0.0, 1.0, 1.0]);
         let (w, h, bgra) = vt.image_bgra(7, p[0].source).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(&bgra[..], &[0, 0, 255, 255]);
         let reply = String::from_utf8(vt.take_replies()).unwrap();
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
+    }
+
+    #[test]
+    fn kitty_direct_placement_offsets_apply_in_device_pixels() {
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        vt.write(b"\x1b[2;3H\x1b_Ga=T,f=32,s=1,v=1,i=7,c=1,r=1,X=7,Y=5,C=1;/wAA/w==\x1b\\");
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].pixel_geometry(8.0, 16.0, 1.0), [23.0, 21.0, 1.0, 11.0]);
+        assert_eq!(p[0].pixel_geometry(4.0, 8.0, 2.0), [11.5, 10.5, 0.5, 5.5]);
+
+        vt.resize(20, 5, 4, 4);
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].pixel_geometry(4.0, 4.0, 1.0), [11.0, 7.0, 1.0, 1.0]);
     }
 
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
@@ -2588,7 +2611,7 @@ mod tests {
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row, p[0].width, p[0].height), (7, 0, 0, 64, 32));
         assert_eq!(p[0].source, [0, 0, 8, 4]);
-        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 78.0, 82.0]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5, 2.0), [0.0, 0.0, 78.0, 82.0]);
         vt.write(b"\x1b[6;1H\n\n");
         vt.frame();
         let p = vt.placements();
