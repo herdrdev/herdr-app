@@ -186,6 +186,10 @@ export interface AgentInfo {
   /** "done" means it finished while you weren't looking; it becomes "idle" once you look
    *  (here or on another Herdr client). */
   status: Status;
+  /** Epoch milliseconds when the agent's reported state last changed.
+   *  Looking at a done agent leaves this alone. Null if the core omits the initial
+   *  time (as with older cores for remote agents). */
+  since: number | null;
   /** What the agent reported (OSC 7501 `app`), e.g. "claude-code", "pi", "codex". */
   app: string | null;
   program: Program;

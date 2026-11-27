@@ -1976,6 +1976,7 @@ impl AppWindow {
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx), "pane_name": p.title,
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
+                        "since": self.live.get(addr).and_then(crate::hc::agent_since),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
@@ -2304,7 +2305,7 @@ impl AppWindow {
         for t in list.as_array_mut().into_iter().flatten() {
             let Some(obj) = t.as_object_mut() else { continue };
             let report = obj.remove("status").unwrap_or(Value::Null);
-            let word = report.get("state").cloned().unwrap_or_else(|| if report.is_string() { report.clone() } else { Value::Null });
+            let word = crate::hc::status_word(&report).clone();
             obj.insert("status".into(), word);
             obj.insert("program".into(), program_of(&report, running_argv(obj)));
             obj.insert("report".into(), report);
@@ -2315,6 +2316,7 @@ impl AppWindow {
             if let Some(a) = obj.get("address").and_then(Value::as_str) {
                 live.insert(a.to_owned(), Value::Object(obj.clone()));
             }
+            obj.remove(crate::hc::AGENT_SINCE);
         }
         self.live = live;
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));

@@ -29,6 +29,17 @@ pub enum Stream {
     Lost,
 }
 
+// Keep inferred times separate from the core's raw status_ms exposed by terminals().
+pub const AGENT_SINCE: &str = "agent_since";
+
+pub fn status_word(report: &Value) -> &Value {
+    report.get("state").unwrap_or(if report.is_string() { report } else { &Value::Null })
+}
+
+pub fn agent_since(record: &Value) -> Option<u64> {
+    record[AGENT_SINCE].as_u64().or_else(|| record["status_ms"].as_u64()).filter(|&ms| ms > 0)
+}
+
 /// Event streams are lines; DATA frame boundaries can fall anywhere in a line.
 #[derive(Default)]
 pub struct EventLines {
@@ -159,7 +170,17 @@ impl EventLines {
         };
         if let Some(record) = whole {
             match at {
-                Some(i) => self.terminals[i] = record.clone(),
+                Some(i) => {
+                    let prev = &self.terminals[i];
+                    let mut record = record.clone();
+                    if kind == "labels"
+                        && status_word(&prev["status"]) == status_word(&record["status"])
+                        && let Some(since) = agent_since(prev)
+                    {
+                        record[AGENT_SINCE] = since.into();
+                    }
+                    self.terminals[i] = record;
+                }
                 None => self.terminals.push(record.clone()),
             }
             return true;
@@ -180,7 +201,15 @@ impl EventLines {
                 }
                 t.as_object_mut().map(|r| r.remove("foreground"));
             }
-            "status" => set(&["status", "records", "reported"]),
+            "status" => {
+                let changed = status_word(&t["status"]) != status_word(&data["status"]);
+                if let Some(ms) = data["status_ms"].as_u64().filter(|&ms| ms > 0) {
+                    t[AGENT_SINCE] = ms.into();
+                } else if changed {
+                    t[AGENT_SINCE] = crate::model::now_ms().into();
+                }
+                for key in ["status", "records", "reported"] { t[key] = data[key].clone(); }
+            }
             "turn" => set(&["turn"]),
             "title" => set(&["title"]),
             "labels" => set(&["labels"]),
@@ -625,6 +654,35 @@ mod tests {
         assert!(got.terminals && got.docs, "missed: everything again");
         assert_eq!(addresses(&lines), ["t9"]);
         assert!(lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 21, "type": "doc"}})).as_bytes()).docs);
+    }
+
+    #[test]
+    fn agent_times_follow_state_words_and_support_older_cores() {
+        let mut lines = EventLines::new(&json!({"terminals": [
+            {"address": "t1", "state": "live", "status": {"state": "working"}, "status_ms": 123},
+            {"address": "remote/t1", "state": "live", "status": {"state": "working"}}
+        ]}));
+        assert_eq!(agent_since(&lines.terminals[0]), Some(123));
+        assert_eq!(agent_since(&lines.terminals[1]), None);
+
+        let status = |lines: &mut EventLines, address: &str, data: Value| {
+            assert!(lines.apply(&json!({"terminal": address, "type": "status", "data": data})));
+        };
+        status(&mut lines, "t1", json!({"status": {"state": "working", "app": "pi"}}));
+        assert_eq!(agent_since(&lines.terminals[0]), Some(123));
+        status(&mut lines, "t1", json!({"status": {"state": "idle"}, "status_ms": 456}));
+        assert_eq!(agent_since(&lines.terminals[0]), Some(456));
+        status(&mut lines, "remote/t1", json!({"status": {"state": "blocked"}}));
+        let observed = agent_since(&lines.terminals[1]).unwrap();
+        assert!(observed > 0);
+        assert!(lines.apply(&json!({"terminal": "remote/t1", "type": "labels", "data": {
+            "record": {"address": "remote/t1", "state": "live", "status": {"state": "blocked"}, "labels": {"herdr.seen": "1"}}
+        }})));
+        assert_eq!(agent_since(&lines.terminals[1]), Some(observed));
+        assert!(lines.apply(&json!({"terminal": "t1", "type": "labels", "data": {
+            "record": {"address": "t1", "state": "live", "status": {"state": "idle"}, "status_ms": 455, "labels": {"herdr.seen": "1"}}
+        }})));
+        assert_eq!(agent_since(&lines.terminals[0]), Some(456));
     }
 
     #[test]

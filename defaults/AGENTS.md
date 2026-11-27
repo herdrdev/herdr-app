@@ -1201,9 +1201,10 @@ All of it is in `herdr.d.ts`. In short:
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
-  `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
-  once someone looks at it on any Herdr client), `terminals()`
-  (every core terminal), `focused()`, `layout()`, `theme()` (every color by
+  `agents()` (status, app, space, tab, pinned, focused and `since`, which is
+  null when the initial time is unknown and stays the same when looking at a
+  "done" agent on any Herdr client turns it "idle"), `terminals()` (every core
+  terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
   input (a stronger border), foreground, muted, dim, accent,
