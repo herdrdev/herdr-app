@@ -43,11 +43,22 @@ impl<Surface: Clone + Eq> TouchState<Surface> {
     }
 
     pub(super) fn take_unframed_releases(&mut self) -> SmallVec<[TouchUpdate<Surface>; 8]> {
-        let Some(release) = self
-            .pending
-            .iter()
-            .rposition(|update| matches!(update, TouchUpdate::Up { .. }))
-        else {
+        // A late or duplicate up must not flush updates from an unrelated
+        // contact that is still waiting for its frame.
+        let Some(release) = (0..self.pending.len()).rev().find(|&index| {
+            let TouchUpdate::Up { id } = self.pending[index] else {
+                return false;
+            };
+            self.pending[..index]
+                .iter()
+                .rev()
+                .find_map(|update| match *update {
+                    TouchUpdate::Down { id: earlier, .. } if earlier == id => Some(true),
+                    TouchUpdate::Up { id: earlier } if earlier == id => Some(false),
+                    _ => None,
+                })
+                .unwrap_or_else(|| self.active.contains_key(&id))
+        }) else {
             return SmallVec::new();
         };
         self.pending.drain(..=release).collect()

@@ -82,6 +82,40 @@ fn a_release_without_a_frame_finishes_before_the_next_touch_frame() {
 }
 
 #[test]
+fn release_from_closed_surface_does_not_flush_another_surfaces_pending_contact() {
+    let mut state = TouchState::new();
+    state.push(down(1, 12));
+    assert_eq!(dispatch_frame(&mut state).len(), 1);
+
+    state.push(down(2, 18));
+    state.push(TouchUpdate::Up { id: 1 });
+    state.forget_surface(&12);
+
+    assert!(state.take_unframed_releases().is_empty());
+    assert_eq!(state.cancel().count(), 0);
+}
+
+#[test]
+fn duplicate_release_does_not_flush_past_the_last_live_release() {
+    let mut state = TouchState::new();
+    let (_, first) = state.apply(down(1, 12)).unwrap();
+    state.push(TouchUpdate::Up { id: 1 });
+    state.push(down(2, 18));
+    state.push(TouchUpdate::Up { id: 1 });
+
+    let fallback: Vec<_> = state
+        .take_unframed_releases()
+        .into_iter()
+        .filter_map(|update| state.apply(update))
+        .collect();
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].1.id, first.id);
+    assert_eq!(fallback[0].1.phase, TouchPhase::Ended);
+    assert!(state.take_unframed_releases().is_empty());
+    assert_eq!(dispatch_frame(&mut state)[0].0, 18);
+}
+
+#[test]
 fn cancellation_discards_pending_updates_and_finalizes_delivered_contacts() {
     let mut state = TouchState::new();
     state.push(down(0, 12));
