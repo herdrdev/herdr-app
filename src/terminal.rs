@@ -1016,6 +1016,15 @@ impl TerminalView {
         }));
     }
 
+    pub fn send_key(&mut self, keys: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let event = synthetic_key(keys)?;
+        if self.grid.borrow().channel.is_none() {
+            return Err(format!("terminal {:?} has no attached input channel", self.address));
+        }
+        self.send_key_event(&event, true, cx);
+        Ok(())
+    }
+
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
             self.close_search(window, cx);
@@ -1027,16 +1036,23 @@ impl TerminalView {
             // leak its keystrokes into the shell running in this terminal.
             return;
         }
+        if self.send_key_event(ev, false, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn send_key_event(&mut self, ev: &KeyDownEvent, force_alt: bool, cx: &mut Context<Self>) -> bool {
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
             self.clear_selection(cx);
         }
-        let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
+        let bytes = key_bytes_with_alt_override(&mut self.grid.borrow_mut().vt, ev, force_alt);
         if let Some(bytes) = bytes {
             self.send(&bytes);
-            cx.stop_propagation();
+            return true;
         }
+        false
     }
 
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -1642,9 +1658,35 @@ fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> 
     key_bytes(vt, &KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
 }
 
+fn synthetic_key(keys: &str) -> Result<KeyDownEvent, String> {
+    let invalid = || format!("unknown terminal key {keys:?}; use one key in keys.json syntax");
+    let mut keystroke = Keystroke::parse(keys).map_err(|_| invalid())?;
+    let (key, shifted, base) = map_key(&keystroke.key).ok_or_else(invalid)?;
+    if key == GHOSTTY_KEY_UNIDENTIFIED || keystroke.key_char.is_some() {
+        return Err(invalid());
+    }
+    let modifiers = keystroke.modifiers;
+    if !(modifiers.control || cfg!(target_os = "macos") && modifiers.platform) {
+        keystroke.key_char = base.map(|base| {
+            let text = if shifted || modifiers.shift {
+                SHIFTED_KEYS.iter().find(|(_, unshifted)| *unshifted == base)
+                    .map_or_else(|| base.to_ascii_uppercase(), |(shifted, _)| *shifted)
+            } else {
+                base
+            };
+            text.to_string()
+        });
+    }
+    Ok(KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
+}
+
 /// What a key press sends to the program: the key described to libghostty,
 /// which encodes it once, in the mode the program asked for (as Ghostty does).
 fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
+    key_bytes_with_alt_override(vt, ev, false)
+}
+
+fn key_bytes_with_alt_override(vt: &mut vt::Vt, ev: &KeyDownEvent, force_alt: bool) -> Option<Vec<u8>> {
     // GPUI sets this preference on replayed shortcut prefixes too; only
     // Windows' native composition previews defer to the text input handler.
     #[cfg(windows)]
@@ -1711,7 +1753,9 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     // That text can be ASCII too (Slovenian Shift-Option-2 -> "@").
     // Other platforms keep Alt shortcuts unless they produced non-ASCII text.
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
-    let option_as_alt = {
+    // A named Alt stroke carries a modifier without native Option text.
+    let force_alt = force_alt && m.alt;
+    let option_as_alt = force_alt || {
         #[cfg(target_os = "macos")]
         { gpui_macos::option_as_alt().uses_alt(k.option_side) }
         #[cfg(not(target_os = "macos"))]
@@ -1720,7 +1764,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_empty() && (cfg!(target_os = "macos") || !t.is_ascii())) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
-    Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
+    Some(vt.encode_key_with_alt_override(key, mods, consumed, text.as_deref(), unshifted, force_alt))
 }
 
 fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bool, legacy: Vec<u8>) -> Vec<u8> {
@@ -1730,6 +1774,12 @@ fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bo
     let encoded = vt.encode_key(key, mods, 0, Some(text), text.chars().next());
     if encoded.starts_with(b"\x1b[27;") { encoded } else { legacy }
 }
+
+const SHIFTED_KEYS: &[(char, char)] = &[
+    ('~', '`'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'),
+    ('*', '8'), ('(', '9'), (')', '0'), ('_', '-'), ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'),
+    (':', ';'), ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'),
+];
 
 fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     let named = match key {
@@ -1761,12 +1811,7 @@ fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     }
     let mut chars = key.chars();
     let (Some(c), None) = (chars.next(), chars.next()) else { return None };
-    const SHIFTED: &[(char, char)] = &[
-        ('~', '`'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'),
-        ('*', '8'), ('(', '9'), (')', '0'), ('_', '-'), ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'),
-        (':', ';'), ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'),
-    ];
-    let (base, shifted) = match SHIFTED.iter().find(|(s, _)| *s == c) {
+    let (base, shifted) = match SHIFTED_KEYS.iter().find(|(s, _)| *s == c) {
         Some((_, b)) => (*b, true),
         None => (c, false),
     };
@@ -4799,6 +4844,55 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[test]
+    fn synthetic_keys_follow_the_terminal_keyboard_mode() {
+        for (setup, ctrl_b, shift_1, left) in [
+            (b"".as_slice(), b"\x02".as_slice(), b"!".as_slice(), b"\x1b[D".as_slice()),
+            (b"\x1b[>1u", b"\x1b[98;5u", b"!", b"\x1b[D"),
+            (b"\x1b[>9u", b"\x1b[98;5u", b"\x1b[49;2u", b"\x1b[D"),
+            (b"\x1b[?1h", b"\x02", b"!", b"\x1bOD"),
+        ] {
+            let mut vt = Vt::new(20, 3);
+            vt.write(setup);
+            for (spec, expected) in [("ctrl-b", ctrl_b), ("shift-1", shift_1), ("left", left)] {
+                let event = super::synthetic_key(spec).unwrap();
+                assert_eq!(super::key_bytes_with_alt_override(&mut vt, &event, true).as_deref(), Some(expected), "{spec}, setup={setup:?}");
+            }
+        }
+        for spec in ["ctrl-frobnicate", "ctrl-b ctrl-b", "b->text", ""] {
+            assert!(super::synthetic_key(spec).unwrap_err().contains("unknown terminal key"));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn synthetic_alt_keys_stay_alt_regardless_of_option_setting() {
+        use gpui_macos::OptionAsAlt;
+        use super::key_bytes_with_alt_override;
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        let event = super::synthetic_key("alt-b").unwrap();
+        for option in [OptionAsAlt::Left, OptionAsAlt::Right, OptionAsAlt::Both, OptionAsAlt::None] {
+            gpui_macos::set_option_as_alt(Some(option));
+            let mut vt = Vt::new(20, 3);
+            assert_eq!(key_bytes_with_alt_override(&mut vt, &event, true).unwrap(), b"\x1bb", "{option:?}");
+            vt.write(b"\x1b[>1u");
+            assert_eq!(key_bytes_with_alt_override(&mut vt, &event, true).unwrap(), b"\x1b[98;3u", "{option:?}");
+            if option == OptionAsAlt::None {
+                assert_eq!(key_bytes(&mut vt, &press("alt-b", Some("∫"))).unwrap(), "∫".as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_keys_follow_win32_input_mode() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?9001h");
+        let enter = super::synthetic_key("shift-enter").unwrap();
+        assert_eq!(super::key_bytes_with_alt_override(&mut vt, &enter, true).unwrap(), b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
+        vt.write(b"\x1b[>1u");
+        assert_eq!(super::key_bytes_with_alt_override(&mut vt, &enter, true).unwrap(), b"\x1b[13;2u");
     }
 
     #[test]

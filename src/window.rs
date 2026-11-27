@@ -3498,6 +3498,17 @@ impl AppWindow {
                     self.focused_pane = None;
                 }
             }
+            "terminal.send_key" => {
+                let Some(keys) = Self::arg(a, "keys") else { return self.fail("terminal.send_key keys must be a string") };
+                let view = match Self::arg(a, "terminal") {
+                    Some(address) => self.shown_terminal_view(address, window, cx),
+                    None => self.focused_terminal(window, cx).map(|t| t.view.clone()).ok_or_else(|| "no focused terminal to send a key to".into()),
+                };
+                if let Err(error) = view.and_then(|view| view.update(cx, |view, cx| view.send_key(keys, cx))) {
+                    self.fail(error);
+                }
+                return;
+            }
             "terminal.search" => {
                 let Some(t) = self.focused_terminal(window, cx) else { return self.fail("no focused terminal to search") };
                 t.view.update(cx, |view, cx| view.open_search(window, cx));

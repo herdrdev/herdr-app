@@ -1886,11 +1886,16 @@ impl Vt {
     /// Option for "\u{df}" on a Mac), as Ghostty reports them. Without it the
     /// kitty keyboard protocol reports shift+; and Neovim never sees ":".
     pub fn encode_key(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>) -> Vec<u8> {
+        self.encode_key_with_alt_override(key, mods, consumed, text, unshifted, false)
+    }
+
+    pub fn encode_key_with_alt_override(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>, _force_alt: bool) -> Vec<u8> {
         unsafe {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
             #[cfg(target_os = "macos")]
             {
-                let option = match gpui_macos::option_as_alt() {
+                let option_as_alt = if _force_alt { gpui_macos::OptionAsAlt::Both } else { gpui_macos::option_as_alt() };
+                let option = match option_as_alt {
                     gpui_macos::OptionAsAlt::None => GHOSTTY_OPTION_AS_ALT_FALSE,
                     gpui_macos::OptionAsAlt::Both => GHOSTTY_OPTION_AS_ALT_TRUE,
                     gpui_macos::OptionAsAlt::Left => GHOSTTY_OPTION_AS_ALT_LEFT,

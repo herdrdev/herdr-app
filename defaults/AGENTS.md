@@ -666,6 +666,9 @@ The main ones:
   Windows, clipboard text is pasted; otherwise Ctrl+V goes to the program, which
   reads the clipboard itself). TIFF and BMP clipboard
   images are converted to PNG before sending,
+  `terminal.send_key {keys, terminal?}` (one key in keys.json syntax, defaulting to
+  the focused terminal; requires an attached view and uses the terminal's current
+  keyboard mode and typing connection),
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu),

@@ -356,6 +356,15 @@ Scroll a terminal's view of its history (default: the focused one). Give exactly
 | `to` | no |
 | `terminal` | no |
 
+## `terminal.send_key`
+
+Send one key in keys.json syntax, such as ctrl-b, to a terminal (default: the focused one). It uses the program's current keyboard mode and goes through the same connection as typing. The terminal must have a view.
+
+| Argument | Required |
+|---|---|
+| `keys` | yes |
+| `terminal` | no |
+
 ## `terminal.paste`
 
 Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).
