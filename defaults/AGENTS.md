@@ -793,7 +793,7 @@ What's about the user, never a look:
   waiting, the next launch installs it before opening a window. The first
   start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
-  Package-managed cores stay with their package manager; Settings shows available releases.
+  Package-managed apps and cores stay with their package manager; Settings shows available core releases.
   A core update error can be dismissed with its × or `overlay.close {id:"core-update-error"}`
   until the error changes or the update recovers.
   Settings → Updates keeps app and core actions together;

@@ -119,8 +119,22 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
     }
 }
 
+/// The package manager that owns this app, from where its binary lives.
+fn app_managed() -> Option<&'static str> {
+    static MANAGED: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *MANAGED.get_or_init(|| std::env::current_exe().ok().and_then(|exe| installed_by(&exe)))
+}
+
+fn installed_by(exe: &Path) -> Option<&'static str> {
+    let path = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    let path = path.to_string_lossy();
+    [("/Cellar/", "homebrew"), ("/nix/store/", "nix"), ("/mise/installs/", "mise")]
+        .into_iter()
+        .find_map(|(mark, manager)| path.contains(mark).then_some(manager))
+}
+
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
+    root().filter(|_| app_managed().is_none() && checks_core())
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
@@ -131,7 +145,7 @@ fn checks_core() -> bool {
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
-        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "app": { "version": env!("CARGO_PKG_VERSION"), "managed": app_managed(), "ready": ready(), "updates": checks_app().is_some() },
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
@@ -159,7 +173,10 @@ pub fn start() {
     let app = checks_app();
     let core = checks_core();
     if app.is_none() && !core {
-        tracing::info!("a build from source: no updates");
+        match app_managed() {
+            Some(manager) => tracing::info!("managed by {manager}: no updates"),
+            None => tracing::info!("a build from source: no updates"),
+        }
         return;
     }
     RUNNING.store(true, Ordering::Relaxed);
@@ -899,5 +916,27 @@ mod tests {
     #[test]
     fn sha256_is_hex() {
         assert_eq!(sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn package_managed_apps_are_detected_from_their_path() {
+        assert_eq!(installed_by(Path::new("/opt/homebrew/Cellar/herdr-app/0.1.18/bin/herdr-app")), Some("homebrew"));
+        assert_eq!(installed_by(Path::new("/nix/store/abc-herdr-app/bin/herdr-app")), Some("nix"));
+        assert_eq!(installed_by(Path::new("/home/me/.local/share/mise/installs/herdr-app/0.1.18/herdr-app")), Some("mise"));
+        assert_eq!(installed_by(Path::new("/Applications/Herdr.app/Contents/MacOS/Herdr")), None);
+        assert_eq!(installed_by(Path::new("/home/me/.local/share/herdr-app/herdr-app")), None);
+        assert!(status()["app"].as_object().unwrap().contains_key("managed"));
+        #[cfg(unix)]
+        {
+            let work = std::env::temp_dir().join(format!("herdr-managed-link-{}", std::process::id()));
+            let target = work.join("nix/store/abc-herdr-app/bin/herdr-app");
+            let link = work.join("profile/herdr-app");
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::fs::write(&target, "").unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(installed_by(&link), Some("nix"));
+            std::fs::remove_dir_all(work).unwrap();
+        }
     }
 }
