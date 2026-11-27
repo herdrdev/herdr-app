@@ -617,7 +617,7 @@ The main ones:
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
-  skip settled tabs).
+  skip settled tabs, and so does the tab shown when the shown one closes).
 - New spaces and tabs are shown at once. `focus: false` on `space.new` or
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
