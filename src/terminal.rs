@@ -1973,7 +1973,7 @@ fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowText
 
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
-    Bg { from: usize, to: usize, color: Hsla },
+    Bg { from: usize, to: usize, color: Hsla, selected: bool },
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
@@ -1995,10 +1995,11 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             continue;
         };
         let start = x;
-        while x < row.len() && row[x].bg == Some(bg) {
+        let selected = row[x].selected;
+        while x < row.len() && row[x].bg == Some(bg) && row[x].selected == selected {
             x += 1;
         }
-        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg) });
+        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg), selected });
     }
     let mut x = 0;
     while x < row.len() {
@@ -2122,6 +2123,13 @@ fn find_input_style() -> InputEditorStyle {
 }
 
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+    #[derive(PartialEq)]
+    enum ImageLayer {
+        BelowBackground,
+        BelowText,
+        AboveText,
+    }
+
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
@@ -2136,7 +2144,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.origin = origin;
     let frame = g.vt.frame();
     let placements = g.vt.placements();
-    let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
+    let mut images = Vec::new();
     let mut keep = std::collections::HashSet::new();
     for p in &placements {
         let key = (p.image, p.generation, p.source);
@@ -2150,9 +2158,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         if let Some(img) = g.images.get(&key) {
             let [x, y, width, height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height), scale);
             let pos = origin + point(px(x), px(y));
-            // Placeholder runs contain no text and must cover explicit cell backgrounds.
-            let below = p.z < 0 && p.cell_pixels.is_none();
-            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
+            // Placeholder runs contain no text and keep their fixed layer.
+            let layer = if p.cell_pixels.is_some() || p.z >= 0 {
+                ImageLayer::AboveText
+            } else if p.z < i32::MIN / 2 {
+                ImageLayer::BelowBackground
+            } else {
+                ImageLayer::BelowText
+            };
+            images.push((layer, Bounds::new(pos, size(px(width), px(height))), img.clone()));
         }
     }
     g.images.retain(|k, _| keep.contains(k));
@@ -2168,14 +2182,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let (y0, y1) = (snap(b.origin.y), snap(b.origin.y + b.size.height));
         Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
     };
-    let paint_images = |below: bool, window: &mut Window| {
-        for (image_below, b, img) in &images {
-            if *image_below == below {
+    let paint_images = |layer: ImageLayer, window: &mut Window| {
+        for (image_layer, b, img) in &images {
+            if *image_layer == layer {
                 let _ = window.paint_image(*b, *b, Corners::default(), img.clone(), 0, false);
             }
         }
     };
-    paint_images(true, window);
+    paint_images(ImageLayer::BelowBackground, window);
 
     // Each row's drawing is built once and painted again while the row is the
     // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
@@ -2203,19 +2217,25 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         }
     }
 
-    // Paint all program backgrounds first, then search overlays, then text.
-    // This lets a match highlight sit below glyphs without contaminating
-    // cached RowOps or the terminal's own selection/copy state.
+    let mut selection = Vec::new();
     for (y, (_, ops, _)) in painted.iter().enumerate() {
         for op in ops {
-            match op {
-                RowOp::Bg { from, to, color } => {
-                    let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
-                    window.paint_quad(fill(snap_box(b), *color));
+            if let RowOp::Bg { from, to, color, selected } = op {
+                let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
+                let quad = fill(snap_box(b), *color);
+                if *selected {
+                    selection.push(quad);
+                } else {
+                    window.paint_quad(quad);
                 }
-                _ => {}
             }
         }
+    }
+    paint_images(ImageLayer::BelowText, window);
+
+    // Keep selection and search highlights visible over negative-z images.
+    for quad in selection {
+        window.paint_quad(quad);
     }
     for selected in [false, true] {
         for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
@@ -2305,7 +2325,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         window.paint_quad(fill(snap_box(line), color));
     }
 
-    paint_images(false, window);
+    paint_images(ImageLayer::AboveText, window);
 
     if let Some(cur) = frame.cursor {
         let (x, y) = (cur.x as usize, cur.y as usize);
@@ -3927,6 +3947,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kitty_images_stack_with_cell_backgrounds_and_glyphs_by_z() {
+        use super::*;
+        use base64::Engine as _;
+
+        struct KittyGrid(Rc<RefCell<Grid>>);
+        impl Render for KittyGrid {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let grid = self.0.clone();
+                canvas(|_, _, _| {}, move |bounds, _, window, cx| {
+                    paint_grid(bounds, &grid, false, window, cx);
+                }).size_full()
+            }
+        }
+
+        let platform = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT));
+        TextSystem::new(platform.clone()).add_fonts(vec![
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf")),
+        ]).unwrap();
+        let mut cx = HeadlessAppContext::with_platform(platform, Arc::new(()), gpui_platform::current_headless_renderer);
+        let window = cx.open_window(size(px(160.), px(100.)), |window, cx| {
+            let view = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (6, 3), cx));
+            let grid = view.read(cx).grid.clone();
+            {
+                let mut grid = grid.borrow_mut();
+                grid.fit(6, 3, size(px(9.), px(18.)), window.scale_factor());
+                let solid = |rgb: [u8; 3]| base64::engine::general_purpose::STANDARD.encode(rgb.repeat(16));
+                let blue = solid([0, 0, 255]);
+                let green = solid([0, 255, 0]);
+                for (id, col, rows, z, payload) in [
+                    (1, 1, 3, -1073741825, &blue),
+                    (2, 2, 2, i32::MIN / 2, &blue),
+                    (3, 3, 3, -1, &blue),
+                    (4, 3, 2, -2, &green),
+                    (5, 4, 2, 0, &blue),
+                ] {
+                    grid.vt.write(format!("\x1b[1;{col}H\x1b_Ga=T,f=24,i={id},s=4,v=4,c=1,r={rows},C=1,z={z},q=2;{payload}\x1b\\").as_bytes());
+                }
+                grid.vt.write("\x1b[?25l\x1b[H\x1b[48;2;255;0;0m    \x1b[2;1H\x1b[38;2;255;255;255m████\x1b[0m\x1b[3;3H\x1b[38;2;255;255;255m▀".as_bytes());
+                let mut theme = vt::theme();
+                theme.selection_bg = vt::Rgb(255, 255, 0);
+                grid.vt.set_theme(theme);
+                grid.vt.select_at(Some(vt::CellPosition { row: 2, col: 2 }), "cell").unwrap();
+            }
+            cx.new(|_| KittyGrid(grid))
+        }).unwrap();
+        cx.update_window(window.into(), |view, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            let view = view.downcast::<KittyGrid>().unwrap();
+            let grid = view.read(cx).0.borrow();
+            let scale = window.scale_factor();
+            let pixel = |col: f32, row: f32| {
+                let x = f32::from(grid.origin.x + grid.cell.width * (col + 0.5)) * scale;
+                let y = f32::from(grid.origin.y + grid.cell.height * (row + 0.5)) * scale;
+                image.get_pixel(x as u32, y as u32).0
+            };
+            let blue = [0, 0, 255, 255];
+            let white = [255, 255, 255, 255];
+            assert_eq!(pixel(0., 0.), [255, 0, 0, 255], "deep negative image stays below the cell background");
+            assert_eq!(pixel(0., 2.), blue, "deep negative image remains visible on the default background");
+            assert_eq!(pixel(2., 2.25), [255, 255, 0, 255], "selection stays visible above the image at z=-1");
+            assert_eq!(pixel(2., 1.75), white, "selected glyph stays above the selection background");
+            assert_eq!(pixel(1., 0.), blue, "the cutoff itself is above the cell background");
+            assert_eq!(pixel(2., 0.), blue, "the higher negative z wins over the overlapping image");
+            assert_eq!(pixel(1., 1.), white, "glyph stays above the image at the cutoff");
+            assert_eq!(pixel(2., 1.), white, "glyph stays above the image at z=-1");
+            assert_eq!(pixel(3., 0.), blue, "image at z=0 covers the cell background");
+            assert_eq!(pixel(3., 1.), blue, "image at z=0 covers the glyph");
+        }).unwrap();
     }
 
     #[cfg(target_os = "linux")]
