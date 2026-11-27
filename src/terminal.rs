@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 use std::future::Future;
 use std::task::Poll;
 use crate::links;
@@ -125,8 +124,6 @@ struct Grid {
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
-    /// Kitty images uploaded for drawing, by (image, generation, source rect).
-    images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
     /// Where the pointer is over the pane.
     hover: Option<Point<Pixels>>,
     /// The link under the pointer to underline: (row, first column, last column).
@@ -334,7 +331,6 @@ impl TerminalView {
                 told_display: None,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
-                images: HashMap::new(),
                 hover: None,
                 link_spans: Vec::new(),
                 marked: None,
@@ -2135,32 +2131,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
     let frame = g.vt.frame();
-    let placements = g.vt.placements();
-    let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
-    let mut keep = std::collections::HashSet::new();
-    for p in &placements {
-        let key = (p.image, p.generation, p.source);
-        keep.insert(key);
-        if !g.images.contains_key(&key)
-            && let Some((w, h, bgra)) = g.vt.image_bgra(p.image, p.source)
-            && let Some(buf) = image::RgbaImage::from_raw(w, h, bgra)
-        {
-            g.images.insert(key, Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])));
-        }
-        if let Some(img) = g.images.get(&key) {
-            let [x, y, mut width, mut height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height));
-            if p.cell_pixels.is_none() {
-                // Direct placements are in device pixels.
-                width /= scale;
-                height /= scale;
-            }
-            let pos = origin + point(px(x), px(y));
-            // Placeholder runs contain no text and must cover explicit cell backgrounds.
-            let below = p.z < 0 && p.cell_pixels.is_none();
-            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
-        }
-    }
-    g.images.retain(|k, _| keep.contains(k));
+    let images = g.vt.render_images();
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
     drop(g);
@@ -2174,10 +2145,19 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
     };
     let paint_images = |below: bool, window: &mut Window| {
-        for (image_below, b, img) in &images {
-            if *image_below == below {
-                let _ = window.paint_image(*b, *b, Corners::default(), img.clone(), 0, false);
+        for (p, img) in images.iter() {
+            // Placeholder runs contain no text and must cover explicit cell backgrounds.
+            if (p.z < 0 && p.cell_pixels.is_none()) != below {
+                continue;
             }
+            let [x, y, mut width, mut height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height));
+            if p.cell_pixels.is_none() {
+                // Direct placements are in device pixels.
+                width /= scale;
+                height /= scale;
+            }
+            let b = Bounds::new(origin + point(px(x), px(y)), size(px(width), px(height)));
+            let _ = window.paint_image(b, b, Corners::default(), img.clone(), 0, false);
         }
     };
     paint_images(true, window);
