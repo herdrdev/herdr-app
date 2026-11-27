@@ -28,6 +28,8 @@
     "vendor/gpui-pre/LICENSE-APACHE",
     "vendor/quickjs-jit-runtime/Cargo.toml",
     "vendor/quickjs-jit-runtime/LICENSE",
+    "vendor/quickjs-jit-sys/Cargo.toml",
+    "vendor/quickjs-jit-sys/LICENSE",
     "vendor/taffy/Cargo.toml",
     "about.toml",
     "scripts/notices.ts",
@@ -72,6 +74,13 @@
       "source": "https://github.com/longbridge/quickjs-jit",
       "files": [
         "vendor/quickjs-jit-runtime/LICENSE"
+      ]
+    },
+    {
+      "name": "QuickJS JIT bindings (quickjs-jit-sys)",
+      "source": "https://github.com/longbridge/quickjs-jit/tree/96593cd7a54440ac060a391b8baea7e9a3cf1393/sys",
+      "files": [
+        "vendor/quickjs-jit-sys/LICENSE"
       ]
     },
     {

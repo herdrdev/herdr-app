@@ -1,0 +1,59 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -18804,27 +18804,44 @@ static JSJitHelperStatus qjsjit_validate_helper_frame(
+     return JS_JIT_HELPER_OK;
+ }
+ 
++static void qjsjit_unpoison_slot(JSValue *value)
++{
++#if defined(__has_feature)
++#if __has_feature(memory_sanitizer)
++    extern void __msan_unpoison(const volatile void *, size_t);
++    __msan_unpoison(value, sizeof(*value));
++#else
++    (void)value;
++#endif
++#else
++    (void)value;
++#endif
++}
++
+ static bool qjsjit_resolve_slot(JSJitExecFrame *frame,
+                                 JSFunctionBytecode *b, uint32_t slot,
+                                 JSValue **value)
+ {
+     uint32_t stack_count;
+     uint64_t local_base = b->arg_count;
+     uint64_t stack_base = local_base + b->var_count;
+ 
+     if (slot == JS_JIT_SLOT_NONE)
+         return false;
+     if ((uint64_t)slot < local_base) {
+         *value = (JSValue *)frame->arg_buf + slot;
++        qjsjit_unpoison_slot(*value);
+         return true;
+     }
+     if ((uint64_t)slot < stack_base) {
+         *value = frame->var_buf + (slot - (uint32_t)local_base);
++        qjsjit_unpoison_slot(*value);
+         return true;
+     }
+     stack_count = (uint32_t)(frame->stack_top - frame->stack_base);
+     if ((uint64_t)slot - stack_base >= stack_count)
+         return false;
+     *value = frame->stack_base + ((uint64_t)slot - stack_base);
++    qjsjit_unpoison_slot(*value);
+     return true;
+ }
+@@ -19785,7 +19802,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         rt->jit_backend_vtable->record_feedback) {
+         uint32_t call_types[8];
+-        for (i = 0; i < argc; i++)
++        for (i = 0; i < argc; i++) {
++            qjsjit_unpoison_slot(&arg_buf[i]);
+             call_types[i] = qjsjit_feedback_type(arg_buf[i]);
++        }
+         qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CALL, 0, 0,
+                                call_types, (uint32_t)argc, 0);
+     }

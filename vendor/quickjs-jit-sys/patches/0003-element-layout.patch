@@ -1,0 +1,155 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,6 +17,6 @@ extern "C" {
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 12u
++#define QJSJIT_ABI_MINOR 13u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+@@ -341,4 +341,29 @@ struct JSJitExecFrame {
+     JSValue *stack_capacity;
+ };
+ 
++typedef struct JSJitElementLayout {
++    uint32_t struct_size;
++    uint32_t object_class_id_offset;
++    uint32_t object_flags_offset;
++    uint32_t object_fast_array_mask;
++    uint32_t object_exotic_mask;
++    uint32_t object_union_offset;
++    uint32_t array_size_offset;
++    uint32_t array_count_offset;
++    uint32_t array_data_offset;
++    uint32_t typed_array_ptr_offset;
++    uint32_t typed_array_buffer_offset;
++    uint32_t typed_array_byte_offset_offset;
++    uint32_t typed_array_byte_length_offset;
++    uint32_t typed_array_track_rab_offset;
++    uint32_t array_buffer_data_offset;
++    uint32_t array_buffer_byte_length_offset;
++    uint32_t array_buffer_max_byte_length_offset;
++    uint32_t array_buffer_detached_offset;
++    uint32_t array_buffer_immutable_offset;
++    uint32_t array_class_id;
++    uint32_t int32_array_class_id;
++    uint32_t float64_array_class_id;
++} JSJitElementLayout;
++
+ typedef struct JSJitABIInfo {
+@@ -363,4 +387,6 @@ typedef struct JSJitABIInfo {
+     uint64_t exit_layout_fingerprint;
+     uint64_t runtime_api_layout_fingerprint;
+     uint64_t helper_table_fingerprint;
++    uint64_t element_layout_fingerprint;
++    JSJitElementLayout element_layout;
+ } JSJitABIInfo;
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2290,6 +2290,82 @@ static uint64_t qjsjit_abi_info_layout(void)
+                               exit_layout_fingerprint);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
+                                runtime_api_layout_fingerprint);
+-    return QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
+-                               helper_table_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              helper_table_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              element_layout_fingerprint);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, element_layout);
++}
++
++static uint64_t qjsjit_element_layout_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitElementLayout);
++#define QJSJIT_ELEMENT_LAYOUT_FIELD(field) \
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitElementLayout, field)
++    QJSJIT_ELEMENT_LAYOUT_FIELD(struct_size);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(object_class_id_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(object_flags_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(object_fast_array_mask);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(object_exotic_mask);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(object_union_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_size_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_count_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_data_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(typed_array_ptr_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(typed_array_buffer_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(typed_array_byte_offset_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(typed_array_byte_length_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(typed_array_track_rab_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_buffer_data_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_buffer_byte_length_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_buffer_max_byte_length_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_buffer_detached_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_buffer_immutable_offset);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(array_class_id);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(int32_array_class_id);
++    QJSJIT_ELEMENT_LAYOUT_FIELD(float64_array_class_id);
++#undef QJSJIT_ELEMENT_LAYOUT_FIELD
++    return hash;
++}
++
++static void qjsjit_init_element_layout(JSJitElementLayout *out)
++{
++    JSObject probe;
++    uint8_t *bytes = (uint8_t *)&probe;
++    uint32_t i, fast_offset = UINT32_MAX, exotic_offset = UINT32_MAX;
++    uint8_t fast_mask = 0, exotic_mask = 0;
++
++    memset(out, 0, sizeof(*out));
++    memset(&probe, 0, sizeof(probe));
++    probe.fast_array = 1;
++    for (i = 0; i < sizeof(probe); i++) {
++        if (bytes[i]) { fast_offset = i; fast_mask = bytes[i]; break; }
++    }
++    memset(&probe, 0, sizeof(probe));
++    probe.is_exotic = 1;
++    for (i = 0; i < sizeof(probe); i++) {
++        if (bytes[i]) { exotic_offset = i; exotic_mask = bytes[i]; break; }
++    }
++    out->struct_size = sizeof(*out);
++    out->object_class_id_offset = offsetof(JSObject, class_id);
++    out->object_flags_offset = fast_offset;
++    out->object_fast_array_mask = fast_mask;
++    out->object_exotic_mask = exotic_offset == fast_offset ? exotic_mask : 0;
++    out->object_union_offset = offsetof(JSObject, u);
++    out->array_size_offset = offsetof(JSObject, u.array.u1.size);
++    out->array_count_offset = offsetof(JSObject, u.array.count);
++    out->array_data_offset = offsetof(JSObject, u.array.u.values);
++    out->typed_array_ptr_offset = offsetof(JSObject, u.array.u1.typed_array);
++    out->typed_array_buffer_offset = offsetof(JSTypedArray, buffer);
++    out->typed_array_byte_offset_offset = offsetof(JSTypedArray, offset);
++    out->typed_array_byte_length_offset = offsetof(JSTypedArray, length);
++    out->typed_array_track_rab_offset = offsetof(JSTypedArray, track_rab);
++    out->array_buffer_data_offset = offsetof(JSArrayBuffer, data);
++    out->array_buffer_byte_length_offset = offsetof(JSArrayBuffer, byte_length);
++    out->array_buffer_max_byte_length_offset = offsetof(JSArrayBuffer, max_byte_length);
++    out->array_buffer_detached_offset = offsetof(JSArrayBuffer, detached);
++    out->array_buffer_immutable_offset = offsetof(JSArrayBuffer, immutable);
++    out->array_class_id = JS_CLASS_ARRAY;
++    out->int32_array_class_id = JS_CLASS_INT32_ARRAY;
++    out->float64_array_class_id = JS_CLASS_FLOAT64_ARRAY;
+ }
+@@ -2842,5 +2916,7 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
+     info.exit_layout_fingerprint = qjsjit_exit_layout();
+     info.runtime_api_layout_fingerprint = qjsjit_runtime_api_layout();
+     info.helper_table_fingerprint = QJSJIT_GENERATED_HELPER_FINGERPRINT;
++    info.element_layout_fingerprint = qjsjit_element_layout_layout();
++    qjsjit_init_element_layout(&info.element_layout);
+ 
+     build_fingerprint = qjsjit_hash_u64(UINT64_C(0xcbf29ce484222325),
+@@ -2869,7 +2945,9 @@ int JS_GetJitABIInfo(JSJitABIInfo *out)
+                                         info.exit_layout_fingerprint);
+     build_fingerprint = qjsjit_hash_u64(
+         build_fingerprint, info.runtime_api_layout_fingerprint);
+-    info.build_fingerprint = qjsjit_hash_u64(
++    build_fingerprint = qjsjit_hash_u64(
+         build_fingerprint, info.helper_table_fingerprint);
++    info.build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.element_layout_fingerprint);
+ 
+     copy_size = caller_size;

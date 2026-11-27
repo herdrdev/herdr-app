@@ -6515,7 +6515,6 @@ dependencies = [
 [[package]]
 name = "quickjs-jit-sys"
 version = "0.12.11"
-source = "git+https://github.com/longbridge/quickjs-jit?rev=96593cd7a54440ac060a391b8baea7e9a3cf1393#96593cd7a54440ac060a391b8baea7e9a3cf1393"
 dependencies = [
  "cc",
 ]

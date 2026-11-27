@@ -1,0 +1,90 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -114,6 +114,9 @@
+       CONSUMED, NONE, NONE, OWNED,                                         \
+       THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
+     X(GET_GLOBAL, get_global, JS_JitHelperGetGlobal, MAP_OUT_INDEX, 1, OWNED, \
+-      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)             \
++    X(CALL_CONSTRUCTOR, call_constructor, JS_JitHelperCallConstructor,       \
++      MAP_CALL, 4, OWNED, BORROWED, BORROWED, BORROWED, OWNED,               \
++      THROWING | ALLOCATING | REENTRANT)
+ 
+ typedef enum JSJitHelperId {
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 14u
++#define QJSJIT_ABI_MINOR 15u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -216,7 +216,7 @@
+  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
+  */
+ #define QJSJIT_RUNTIME_API_MAJOR 1u
+-#define QJSJIT_RUNTIME_API_MINOR 5u
++#define QJSJIT_RUNTIME_API_MINOR 6u
+ 
+ #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -19548,6 +19548,51 @@
+     *out = result;
+     return qjsjit_finish_output(frame, out);
+ }
++
++JSJitHelperStatus JS_JitHelperCallConstructor(
++    JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t output,
++    uint32_t function, uint32_t new_target, uint32_t argv, uint32_t argc)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *func, *target, *args = NULL, *slot;
++    JSValue result;
++    uint32_t i;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_CALL_CONSTRUCTOR);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, function, &func) ||
++        !qjsjit_resolve_slot(frame, b, new_target, &target) ||
++        out == func || out == target || argc > INT_MAX)
++        return qjsjit_reject_helper(frame, "invalid JIT constructor slots");
++    if (argc == 0) {
++        if (argv != JS_JIT_SLOT_NONE)
++            return qjsjit_reject_helper(frame, "invalid empty JIT constructor argv");
++    } else {
++        if (!qjsjit_resolve_slot(frame, b, argv, &args))
++            return qjsjit_reject_helper(frame, "invalid JIT constructor argv");
++        for (i = 0; i < argc; i++) {
++            if (!qjsjit_resolve_slot(frame, b, argv + i, &slot) ||
++                slot != args + i || out == slot)
++                return qjsjit_reject_helper(frame, "invalid JIT constructor argv range");
++        }
++    }
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT constructor output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = JS_CallConstructorInternal(frame->ctx, *func, *target, (int)argc,
++                                        (JSValueConst *)args, 0);
++    if (JS_IsException(result)) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
+ #endif
+ 
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */

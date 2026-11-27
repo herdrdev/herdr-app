@@ -1,0 +1,183 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -514,9 +514,23 @@
+    enough to call the interrupt callback often. */
+ #define JS_INTERRUPT_COUNTER_INIT 10000
+ 
++#ifdef CONFIG_JIT_ABI
++#define QJSJIT_SHAPE_CACHE_SLOTS 64
++#define QJSJIT_SHAPE_CACHE_BYTES (16 * 1024)
++typedef struct {
++    JSShape *shapes[QJSJIT_SHAPE_CACHE_SLOTS];
++    size_t charges[QJSJIT_SHAPE_CACHE_SLOTS];
++    size_t bytes;
++    uint32_t next;
++} JSJitShapeCache;
++#endif
++
+ struct JSContext {
+     JSGCObjectHeader header; /* must come first */
+     JSRuntime *rt;
++#ifdef CONFIG_JIT_ABI
++    JSJitShapeCache *jit_shape_cache;
++#endif
+     struct list_head link;
+ 
+     uint16_t binary_object_count;
+@@ -1471,6 +1485,10 @@
+ static int JS_AddIntrinsicBasicObjects(JSContext *ctx);
+ static void js_free_shape(JSRuntime *rt, JSShape *sh);
+ static void js_free_shape_null(JSRuntime *rt, JSShape *sh);
++#ifdef CONFIG_JIT_ABI
++static void qjsjit_remember_shape(JSContext *ctx, JSObject *receiver);
++static void qjsjit_clear_shape_cache(JSContext *ctx);
++#endif
+ static int js_shape_prepare_update(JSContext *ctx, JSObject *p,
+                                    JSShapeProperty **pprs);
+ static int init_shape_hash(JSRuntime *rt);
+@@ -2570,6 +2588,11 @@
+     if (rt->jit_suspended || b->jit_feedback_disabled || !vtable || !vtable->record_feedback || !receiver || !owner ||
+         !shape_property || !property || qjsjit_ensure_function_identity(rt, b))
+         return;
++    /* Keep canonical shared layouts alive between temporary receivers. The
++       cache owns shapes, never receiver objects; guards still validate both
++       identity and generation. Accessors and non-own properties stay generic. */
++    if (receiver == owner && !(shape_property->flags & JS_PROP_TMASK))
++        qjsjit_remember_shape(b->realm, receiver);
+     types[0] = JS_JIT_VALUE_OBJECT;
+     types[1] = qjsjit_feedback_type(value);
+     memset(&event, 0, sizeof(event));
+@@ -3074,6 +3097,13 @@
+         qjsjit_discard_cached_entry(rt);
+         rt->jit_backend_vtable = NULL;
+         rt->jit_backend_opaque = NULL;
++        {
++            struct list_head *el;
++            list_for_each(el, &rt->context_list) {
++                JSContext *ctx = list_entry(el, JSContext, link);
++                qjsjit_clear_shape_cache(ctx);
++            }
++        }
+         rt->jit_suspended = 0;
+         if (old_vtable->runtime_detach)
+             old_vtable->runtime_detach(old_opaque, rt);
+@@ -3660,6 +3690,10 @@
+ void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj)
+ {
+     assert(class_id < ctx->rt->class_count);
++#ifdef CONFIG_JIT_ABI
++    if (class_id == JS_CLASS_OBJECT)
++        qjsjit_clear_shape_cache(ctx);
++#endif
+     set_value(ctx, &ctx->class_proto[class_id], obj);
+ }
+ 
+@@ -3737,6 +3771,16 @@
+     JS_MarkValue(rt, ctx->regexp_ctor, mark_func);
+     JS_MarkValue(rt, ctx->function_ctor, mark_func);
+     JS_MarkValue(rt, ctx->function_proto, mark_func);
++
++#ifdef CONFIG_JIT_ABI
++    if (ctx->jit_shape_cache) {
++        for (i = 0; i < QJSJIT_SHAPE_CACHE_SLOTS; i++) {
++            JSShape *shape = ctx->jit_shape_cache->shapes[i];
++            if (shape)
++                mark_func(rt, &shape->header);
++        }
++    }
++#endif
+ 
+     if (ctx->array_shape)
+         mark_func(rt, &ctx->array_shape->header);
+@@ -3821,6 +3865,9 @@
+     JS_FreeValue(ctx, ctx->function_ctor);
+     JS_FreeValue(ctx, ctx->function_proto);
+ 
++#ifdef CONFIG_JIT_ABI
++    qjsjit_clear_shape_cache(ctx);
++#endif
+     js_free_shape_null(ctx->rt, ctx->array_shape);
+     js_free_shape_null(ctx->rt, ctx->arguments_shape);
+     js_free_shape_null(ctx->rt, ctx->mapped_arguments_shape);
+@@ -6542,6 +6589,80 @@
+     if (sh)
+         js_free_shape(rt, sh);
+ }
++
++#ifdef CONFIG_JIT_ABI
++static void qjsjit_clear_shape_cache(JSContext *ctx)
++{
++    JSJitShapeCache *cache = ctx->jit_shape_cache;
++    uint32_t i;
++    if (!cache)
++        return;
++    ctx->jit_shape_cache = NULL;
++    for (i = 0; i < QJSJIT_SHAPE_CACHE_SLOTS; i++)
++        js_free_shape_null(ctx->rt, cache->shapes[i]);
++    js_free_rt(ctx->rt, cache);
++}
++
++static void qjsjit_remember_shape(JSContext *ctx, JSObject *receiver)
++{
++    JSJitShapeCache *cache;
++    JSShape *shape = receiver->shape;
++    size_t bytes;
++    uint32_t i;
++    /* Shared hashed shapes use copy-on-write. Restrict prototype retention to
++       null or the context's own rooted Object prototype, so cache entries do
++       not keep arbitrary guest prototype graphs alive. */
++    if (receiver->class_id != JS_CLASS_OBJECT || !shape->is_hashed ||
++        (shape->proto && (!JS_IsObject(ctx->class_proto[JS_CLASS_OBJECT]) ||
++         shape->proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_OBJECT]))))
++        return;
++    cache = ctx->jit_shape_cache;
++    if (cache) {
++        for (i = 0; i < QJSJIT_SHAPE_CACHE_SLOTS; i++) {
++            if (cache->shapes[i] == shape)
++                return;
++        }
++    }
++    bytes = get_shape_size(shape->prop_hash_mask + 1, shape->prop_size);
++    if (bytes > QJSJIT_SHAPE_CACHE_BYTES - sizeof(*cache))
++        return;
++    /* Charge atom storage conservatively, including atoms shared by entries.
++       Long guest property names must not escape the retention budget. */
++    for (i = 0; i < shape->prop_count; i++) {
++        JSAtom atom = shape->prop[i].atom;
++        if (atom != JS_ATOM_NULL && !__JS_AtomIsTaggedInt(atom)) {
++            JSAtomStruct *str = ctx->rt->atom_array[atom];
++            bytes += sizeof(*str) + ((size_t)str->len << str->is_wide_char) +
++                     1 - str->is_wide_char;
++            if (bytes > QJSJIT_SHAPE_CACHE_BYTES - sizeof(*cache))
++                return;
++        }
++    }
++    if (!cache) {
++        cache = js_mallocz_rt(ctx->rt, sizeof(*cache));
++        if (!cache)
++            return; /* Optional feedback retention must not throw on OOM. */
++        ctx->jit_shape_cache = cache;
++    }
++    /* FIFO bounds shapes, atom storage, and cache metadata. A retained
++       hashed shape cannot grow in place. */
++    for (;;) {
++        JSShape *old = cache->shapes[cache->next];
++        if (old) {
++            cache->bytes -= cache->charges[cache->next];
++            cache->shapes[cache->next] = NULL;
++            js_free_shape(ctx->rt, old);
++        }
++        if (cache->bytes + bytes <= QJSJIT_SHAPE_CACHE_BYTES - sizeof(*cache))
++            break;
++        cache->next = (cache->next + 1) % QJSJIT_SHAPE_CACHE_SLOTS;
++    }
++    cache->shapes[cache->next] = js_dup_shape(shape);
++    cache->charges[cache->next] = bytes;
++    cache->bytes += bytes;
++    cache->next = (cache->next + 1) % QJSJIT_SHAPE_CACHE_SLOTS;
++}
++#endif
+ 
+ /* make space to hold at least 'count' properties */
+ static no_inline int resize_properties(JSContext *ctx, JSShape **psh,

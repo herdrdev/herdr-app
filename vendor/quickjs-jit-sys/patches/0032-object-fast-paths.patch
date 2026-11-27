@@ -1,0 +1,347 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -134,6 +134,53 @@
+ 
+ JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
+ 
++/* Versioned allocation and array-method fast paths (ABI 1.25). Every entry
++ * either completes the exact interpreter effect or misses with no observable
++ * effect; it never throws, calls user code or reenters the VM. `literal` may
++ * run the same allocation-triggered cycle collection as OP_object (C
++ * finalizers only) and allocates without throwing. `retain_shape` keeps a
++ * literal's final hashed shape in the bounded per-context JIT shape cache.
++ * The array entries only duplicate references and, for push, may grow the
++ * element buffer without throwing. Inputs are borrowed; a hit returns an owned
++ * value in `out`, a miss leaves `out` undefined. */
++#define QJSJIT_OBJECT_API_VERSION 1u
++#define JS_JIT_OBJECT_LITERAL_MAX_FIELDS 16u
++#define JS_JIT_OBJECT_EFFECT_ALLOCATE (1U << 0)
++#define JS_JIT_OBJECT_EFFECT_COLLECT (1U << 1)
++
++typedef enum JSJitObjectStatus {
++    JS_JIT_OBJECT_INVALID = -1,
++    JS_JIT_OBJECT_MISS = 0,
++    JS_JIT_OBJECT_OK = 1,
++} JSJitObjectStatus;
++
++typedef int JSJitObjectLiteralFunc(JSContext *ctx, const uint32_t *atoms,
++                                   const JSValue *values, uint32_t count,
++                                   JSValue *out);
++typedef int JSJitObjectRetainShapeFunc(JSContext *ctx, const JSValue *object);
++typedef int JSJitArrayMethodFunc(JSContext *ctx, const JSValue *receiver,
++                                 uint32_t atom, JSValue *out);
++typedef int JSJitArrayPushFunc(JSContext *ctx, const JSValue *function,
++                               const JSValue *receiver, const JSValue *value,
++                               JSValue *out);
++typedef int JSJitArrayPushMethodFunc(JSContext *ctx, const JSValue *receiver,
++                                     uint32_t atom, const JSValue *value,
++                                     JSValue *out);
++
++typedef struct JSJitObjectAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t effects;
++    uint32_t max_literal_fields;
++    JSJitObjectLiteralFunc *literal;
++    JSJitObjectRetainShapeFunc *retain_shape;
++    JSJitArrayMethodFunc *array_method;
++    JSJitArrayPushFunc *array_push;
++    JSJitArrayPushMethodFunc *array_push_method;
++} JSJitObjectAPI;
++
++JS_EXTERN const JSJitObjectAPI *JS_JitGetObjectAPI(uint32_t version);
++
+ /* Versioned continuing-path leaf for `for_of_next` over the built-in Array
+  * values iterator. It performs no allocation, throw, finalization or VM
+  * reentry. VALUE is returned only when the live iterator is an Array values
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -47976,7 +47976,11 @@
+                        (p->shape->prop->flags & JS_PROP_WRITABLE))) {
+                 array_len = JS_VALUE_GET_INT(p->prop[0].u.value);
+                 new_len = array_len + argc;
+-                if (likely(new_len >= array_len && new_len <= (uint32_t)INT32_MAX)) { /* no overflow and within fast-array bounds */
++                /* A fast array may keep count < length after `length` grows
++                   (set_array_length); appending at `length` would leave
++                   uninitialized holes, so take the generic path. */
++                if (likely(new_len >= array_len && new_len <= (uint32_t)INT32_MAX &&
++                           array_len == p->u.array.count)) { /* no overflow and within fast-array bounds */
+                     if (unlikely(new_len > p->u.array.u1.size)) {
+                         if (expand_fast_array(ctx, p, new_len))
+                             return JS_EXCEPTION;
+@@ -48021,6 +48025,273 @@
+     return JS_EXCEPTION;
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++/* Native allocation and array-method fast paths. Each entry either performs
++ * exactly the interpreter's effect or returns a miss after touching nothing
++ * observable, so generated code can always fall back to its generic helpers.
++ * None of them throws, calls user code or reenters the VM. */
++
++/* Object literal `{a: v0, b: v1, ...}` built by OP_object followed by one
++ * OP_define_field per atom. The final hashed shape is a pure function of the
++ * realm's Object.prototype and the ordered (atom, JS_PROP_C_W_E) list, so it
++ * is found directly in the runtime shape hash without the intermediate
++ * transition shapes (which QuickJS mutates in place and does not retain).
++ * Structurally equal hashed shapes are semantically indistinguishable. A
++ * missing shape, duplicate atom, uninitialized value or allocation failure
++ * misses without throwing; the generic path then reproduces every effect. */
++static int qjsjit_object_literal(JSContext *ctx, const uint32_t *atoms,
++                                 const JSValue *values, uint32_t count,
++                                 JSValue *out)
++{
++    JSRuntime *rt;
++    JSObject *proto, *p;
++    JSShape *sh;
++    JSProperty *props;
++    uint32_t h, i, j;
++
++    if (!ctx || !out || count > JS_JIT_OBJECT_LITERAL_MAX_FIELDS ||
++        (count != 0 && (!atoms || !values)))
++        return JS_JIT_OBJECT_INVALID;
++    *out = JS_UNDEFINED;
++    rt = ctx->rt;
++    for (i = 0; i < count; i++) {
++        if (!qjsjit_valid_atom(rt, atoms[i]))
++            return JS_JIT_OBJECT_INVALID;
++        if (JS_VALUE_GET_TAG(values[i]) == JS_TAG_UNINITIALIZED)
++            return JS_JIT_OBJECT_MISS;
++        for (j = 0; j < i; j++) {
++            if (atoms[j] == atoms[i])
++                return JS_JIT_OBJECT_MISS;
++        }
++    }
++    if (JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_OBJECT]) != JS_TAG_OBJECT)
++        return JS_JIT_OBJECT_MISS;
++    /* Same collection point as JS_NewObjectFromShape(). Look the shape up
++       afterwards: a collection can free unreferenced hashed shapes. */
++    js_trigger_gc(rt, sizeof(JSObject));
++    proto = JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_OBJECT]);
++    h = shape_initial_hash(proto);
++    for (i = 0; i < count; i++)
++        h = shape_hash(shape_hash(h, atoms[i]), JS_PROP_C_W_E);
++    for (sh = rt->shape_hash[get_shape_hash(h, rt->shape_hash_bits)];
++         sh != NULL; sh = sh->shape_hash_next) {
++        if (sh->hash != h || sh->proto != proto || !sh->is_hashed ||
++            sh->prop_count != count || sh->deleted_prop_count != 0 ||
++            sh->prop_size < count)
++            continue;
++        for (i = 0; i < count; i++) {
++            if (sh->prop[i].atom != atoms[i] ||
++                sh->prop[i].flags != JS_PROP_C_W_E)
++                break;
++        }
++        if (i == count)
++            break;
++    }
++    if (!sh || sh->prop_size == 0)
++        return JS_JIT_OBJECT_MISS;
++    p = js_malloc_rt(rt, sizeof(JSObject));
++    if (unlikely(!p))
++        return JS_JIT_OBJECT_MISS;
++    props = js_malloc_rt(rt, sizeof(JSProperty) * sh->prop_size);
++    if (unlikely(!props)) {
++        js_free_rt(rt, p);
++        return JS_JIT_OBJECT_MISS;
++    }
++    /* Mirrors JS_NewObjectFromShape() for JS_CLASS_OBJECT. */
++    p->class_id = JS_CLASS_OBJECT;
++    p->extensible = true;
++    p->free_mark = 0;
++    p->is_exotic = 0;
++    p->fast_array = 0;
++    p->is_constructor = 0;
++    p->is_uncatchable_error = 0;
++    p->tmp_mark = 0;
++    p->is_HTMLDDA = 0;
++    p->is_prototype = 0;
++    p->first_weak_ref = NULL;
++    p->u.opaque = NULL;
++    p->shape = js_dup_shape(sh);
++    p->prop = props;
++    for (i = 0; i < count; i++)
++        props[i].u.value = js_dup(values[i]);
++    p->header.ref_count = 1;
++    add_gc_object(rt, &p->header, JS_GC_OBJ_TYPE_JS_OBJECT);
++    *out = JS_MKPTR(JS_TAG_OBJECT, p);
++    return JS_JIT_OBJECT_OK;
++}
++
++/* Keep the final shape of a literal built on the generic path alive in the
++ * bounded, GC-traced per-context JIT shape cache (0012), so the next
++ * `literal` lookup finds it even when every receiver is later extended. */
++static int qjsjit_object_retain_shape(JSContext *ctx, const JSValue *object)
++{
++    JSObject *p;
++
++    if (!ctx || !object)
++        return JS_JIT_OBJECT_INVALID;
++    if (JS_VALUE_GET_TAG(*object) != JS_TAG_OBJECT)
++        return JS_JIT_OBJECT_MISS;
++    p = JS_VALUE_GET_OBJ(*object);
++    if (p->class_id != JS_CLASS_OBJECT || !p->shape->is_hashed)
++        return JS_JIT_OBJECT_MISS;
++    qjsjit_remember_shape(ctx, p);
++    return JS_JIT_OBJECT_OK;
++}
++
++/* Exact OP_get_field2 lookup on a fast Array when it resolves, without
++ * exotic handlers, getters or auto-initialization, to an own data property
++ * of the realm's Array.prototype. Returns the borrowed property value. */
++static JSValue *qjsjit_array_method_slot(JSContext *ctx, JSValueConst receiver,
++                                         uint32_t atom)
++{
++    JSObject *p, *proto;
++    JSProperty *pr;
++    JSShapeProperty *prs;
++
++    if (JS_VALUE_GET_TAG(receiver) != JS_TAG_OBJECT ||
++        __JS_AtomIsTaggedInt(atom) ||
++        JS_VALUE_GET_TAG(ctx->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT)
++        return NULL;
++    p = JS_VALUE_GET_OBJ(receiver);
++    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array)
++        return NULL;
++    if (find_own_property(&pr, p, atom))
++        return NULL;
++    proto = p->shape->proto;
++    if (!proto || proto != JS_VALUE_GET_OBJ(ctx->class_proto[JS_CLASS_ARRAY]))
++        return NULL;
++    prs = find_own_property(&pr, proto, atom);
++    if (!prs || (prs->flags & JS_PROP_TMASK))
++        return NULL;
++    return &pr->u.value;
++}
++
++static int qjsjit_array_method(JSContext *ctx, const JSValue *receiver,
++                               uint32_t atom, JSValue *out)
++{
++    JSValue *method;
++
++    if (!ctx || !receiver || !out || !qjsjit_valid_atom(ctx->rt, atom))
++        return JS_JIT_OBJECT_INVALID;
++    *out = JS_UNDEFINED;
++    method = qjsjit_array_method_slot(ctx, *receiver, atom);
++    if (!method)
++        return JS_JIT_OBJECT_MISS;
++    *out = js_dup(*method);
++    return JS_JIT_OBJECT_OK;
++}
++
++/* A one-argument call of the built-in Array.prototype.push. Mirrors the
++ * js_call_c_function() stack check and js_array_push()'s fast-array path;
++ * growth uses the same policy as expand_fast_array() without throwing. */
++static int qjsjit_array_push_one(JSContext *ctx, JSValueConst function,
++                                 JSValueConst receiver, JSValueConst value,
++                                 JSValue *out)
++{
++    JSRuntime *rt = ctx->rt;
++    JSContext *realm;
++    JSObject *f, *p;
++    JSValue *values;
++    uint32_t array_len, new_len, old_size, new_size;
++    size_t bytes, usable;
++
++    if (JS_VALUE_GET_TAG(function) != JS_TAG_OBJECT ||
++        JS_VALUE_GET_TAG(receiver) != JS_TAG_OBJECT ||
++        JS_VALUE_GET_TAG(value) == JS_TAG_UNINITIALIZED)
++        return JS_JIT_OBJECT_MISS;
++    f = JS_VALUE_GET_OBJ(function);
++    if (f->class_id != JS_CLASS_C_FUNCTION ||
++        f->u.cfunc.cproto != JS_CFUNC_generic_magic ||
++        f->u.cfunc.c_function.generic_magic != js_array_push ||
++        f->u.cfunc.magic != 0)
++        return JS_JIT_OBJECT_MISS;
++    realm = f->u.cfunc.realm;
++    if (!realm || realm->rt != rt ||
++        js_check_stack_overflow(rt, sizeof(JSValue) * f->u.cfunc.length))
++        return JS_JIT_OBJECT_MISS;
++    p = JS_VALUE_GET_OBJ(receiver);
++    if (p->class_id != JS_CLASS_ARRAY || !p->fast_array || !p->extensible ||
++        JS_VALUE_GET_TAG(realm->class_proto[JS_CLASS_ARRAY]) != JS_TAG_OBJECT ||
++        p->shape->proto != JS_VALUE_GET_OBJ(realm->class_proto[JS_CLASS_ARRAY]) ||
++        !realm->std_array_prototype)
++        return JS_JIT_OBJECT_MISS;
++    if (JS_VALUE_GET_TAG(p->prop[0].u.value) != JS_TAG_INT ||
++        !(p->shape->prop->flags & JS_PROP_WRITABLE))
++        return JS_JIT_OBJECT_MISS;
++    array_len = JS_VALUE_GET_INT(p->prop[0].u.value);
++    if (array_len != p->u.array.count || array_len >= (uint32_t)INT32_MAX)
++        return JS_JIT_OBJECT_MISS;
++    new_len = array_len + 1;
++    if (new_len > p->u.array.u1.size) {
++        old_size = p->u.array.u1.size;
++        new_size = old_size + old_size / 2;
++        if (new_size < old_size)
++            return JS_JIT_OBJECT_MISS;
++        new_size = max_uint32(new_len, new_size);
++        if ((size_t)new_size > SIZE_MAX / sizeof(JSValue))
++            return JS_JIT_OBJECT_MISS;
++        bytes = sizeof(JSValue) * new_size;
++        values = js_realloc_rt(rt, p->u.array.u.values, bytes);
++        if (!values)
++            return JS_JIT_OBJECT_MISS;
++        usable = js_malloc_usable_size_rt(rt, values);
++        if (usable > bytes)
++            new_size += (usable - bytes) / sizeof(JSValue);
++        p->u.array.u.values = values;
++        p->u.array.u1.size = new_size;
++    }
++    p->u.array.u.values[array_len] = js_dup(value);
++    p->u.array.count = new_len;
++    p->prop[0].u.value = js_uint32(new_len);
++    *out = js_int32(new_len);
++    return JS_JIT_OBJECT_OK;
++}
++
++static int qjsjit_array_push(JSContext *ctx, const JSValue *function,
++                             const JSValue *receiver, const JSValue *value,
++                             JSValue *out)
++{
++    if (!ctx || !function || !receiver || !value || !out)
++        return JS_JIT_OBJECT_INVALID;
++    *out = JS_UNDEFINED;
++    return qjsjit_array_push_one(ctx, *function, *receiver, *value, out);
++}
++
++/* The whole `receiver.<atom>(value)` statement when the method resolves to
++ * the built-in push: the lookup and call above without materializing the
++ * method, receiver or argument references. */
++static int qjsjit_array_push_method(JSContext *ctx, const JSValue *receiver,
++                                    uint32_t atom, const JSValue *value,
++                                    JSValue *out)
++{
++    JSValue *method;
++
++    if (!ctx || !receiver || !value || !out ||
++        !qjsjit_valid_atom(ctx->rt, atom))
++        return JS_JIT_OBJECT_INVALID;
++    *out = JS_UNDEFINED;
++    method = qjsjit_array_method_slot(ctx, *receiver, atom);
++    if (!method)
++        return JS_JIT_OBJECT_MISS;
++    return qjsjit_array_push_one(ctx, *method, *receiver, *value, out);
++}
++
++const JSJitObjectAPI *JS_JitGetObjectAPI(uint32_t version)
++{
++    static const JSJitObjectAPI api = {
++        sizeof(JSJitObjectAPI), QJSJIT_OBJECT_API_VERSION,
++        JS_JIT_OBJECT_EFFECT_ALLOCATE | JS_JIT_OBJECT_EFFECT_COLLECT,
++        JS_JIT_OBJECT_LITERAL_MAX_FIELDS,
++        qjsjit_object_literal,
++        qjsjit_object_retain_shape,
++        qjsjit_array_method,
++        qjsjit_array_push,
++        qjsjit_array_push_method,
++    };
++    return version == QJSJIT_OBJECT_API_VERSION ? &api : NULL;
++}
++#endif
++
+ static JSValue js_array_reverse(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv)
+ {

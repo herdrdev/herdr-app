@@ -1,0 +1,39 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -852,6 +852,7 @@
+     uint64_t jit_function_id;
+     uint64_t jit_generation;
+     uint8_t jit_feedback_disabled;
++    int jit_validated_pc_offset; /* known instruction boundary, initially zero */
+ #endif
+ } JSFunctionBytecode;
+ 
+@@ -2892,6 +2893,7 @@
+     old_generation = b->jit_generation;
+     b->jit_generation = ++ctx->rt->jit_next_generation;
+     b->jit_feedback_disabled = 0;
++    b->jit_validated_pc_offset = 0;
+     qjsjit_retire_identity(ctx->rt, b->jit_function_id, old_generation);
+     return JS_JIT_BACKEND_OK;
+ }
+@@ -18691,12 +18693,18 @@
+ 
+     if (value < start || (allow_end ? value > end : value >= end))
+         return false;
++    /* Published bytecode instruction lengths are immutable. Reuse only a
++       proven boundary at or before this query; backward branches rescan. */
++    if (value - start >= (uintptr_t)b->jit_validated_pc_offset)
++        offset = b->jit_validated_pc_offset;
+     while (offset < b->byte_code_len) {
+         const JSJitOpcodeInfo *info;
+         uint8_t opcode;
+ 
+-        if (pc == b->byte_code_buf + offset)
++        if (pc == b->byte_code_buf + offset) {
++            b->jit_validated_pc_offset = offset;
+             return true;
++        }
+         opcode = b->byte_code_buf[offset];
+         if (opcode >= countof(qjsjit_opcode_table))
+             return false;

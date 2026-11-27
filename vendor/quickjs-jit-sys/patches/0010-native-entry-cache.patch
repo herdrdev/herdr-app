@@ -1,0 +1,182 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -360,6 +360,11 @@
+ #ifdef CONFIG_JIT_ABI
+     const JSJitBackendVTable *jit_backend_vtable;
+     void *jit_backend_opaque;
++    JSJitEntryHandle jit_cached_entry;
++    uint64_t jit_cached_entry_id;
++    uint64_t jit_cached_entry_generation;
++    uint64_t jit_cached_entry_epoch;
++    bool jit_entry_cache_suppressed;
+     uint32_t jit_backend_active_depth;
+     uint8_t jit_suspended;
+     uint32_t jit_active_stack_map_count;
+@@ -2255,7 +2260,8 @@
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, memory_used);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_enter);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_exit);
+-    return QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, record_feedback);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, record_feedback);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, entry_cache_epoch);
+ }
+ 
+ static uint64_t qjsjit_abi_info_layout(void)
+@@ -3030,6 +3036,22 @@
+ }
+ #endif
+ 
++/* Move ownership out before invoking the backend: even a reentrant release
++ * cannot observe or release the same cached pin twice. */
++static void qjsjit_discard_cached_entry(JSRuntime *rt)
++{
++    JSJitEntryHandle entry = rt->jit_cached_entry;
++    memset(&rt->jit_cached_entry, 0, sizeof(rt->jit_cached_entry));
++    if (entry.pin) {
++        bool was_suppressed = rt->jit_entry_cache_suppressed;
++        rt->jit_entry_cache_suppressed = true;
++        rt->jit_backend_active_depth++;
++        rt->jit_backend_vtable->release_entry(rt->jit_backend_opaque, entry);
++        rt->jit_backend_active_depth--;
++        rt->jit_entry_cache_suppressed = was_suppressed;
++    }
++}
++
+ int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
+                      void *opaque)
+ {
+@@ -3047,6 +3069,7 @@
+             return JS_JIT_BACKEND_OK;
+         old_vtable = rt->jit_backend_vtable;
+         old_opaque = rt->jit_backend_opaque;
++        qjsjit_discard_cached_entry(rt);
+         rt->jit_backend_vtable = NULL;
+         rt->jit_backend_opaque = NULL;
+         rt->jit_suspended = 0;
+@@ -20038,7 +20061,10 @@
+         qjsjit_ensure_function_identity(rt, b) == 0) {
+         const JSJitBackendVTable *jit_vtable = rt->jit_backend_vtable;
+         void *jit_opaque = rt->jit_backend_opaque;
+-        JSJitEntryHandle entry;
++        const uint64_t entry_function_id = b->jit_function_id;
++        const uint64_t entry_generation = b->jit_generation;
++        JSJitEntryHandle entry = {0};
++        uint64_t entry_epoch = 0;
+         const uint8_t *entry_pc = pc;
+         JSValue *entry_sp = sp;
+         uint32_t entry_pc_offset = (uint32_t)(pc - b->byte_code_buf);
+@@ -20046,8 +20072,26 @@
+         /* acquire_entry is an external callback and may inspect the frame. */
+         sf->cur_pc = pc;
+         rt->jit_backend_active_depth++;
+-        entry = jit_vtable->acquire_entry(jit_opaque, b->jit_function_id,
+-                                          b->jit_generation, entry_pc_offset);
++        if (rt->jit_cached_entry.pin) {
++            entry_epoch = jit_vtable->entry_cache_epoch ?
++                jit_vtable->entry_cache_epoch(jit_opaque) : 0;
++            if (entry_pc_offset == 0 && entry_epoch != 0 &&
++                rt->jit_cached_entry_epoch == entry_epoch &&
++                rt->jit_cached_entry_id == entry_function_id &&
++                rt->jit_cached_entry_generation == entry_generation) {
++                entry = rt->jit_cached_entry;
++                memset(&rt->jit_cached_entry, 0, sizeof(rt->jit_cached_entry));
++            } else {
++                qjsjit_discard_cached_entry(rt);
++            }
++        }
++        if (!entry.pin) {
++            entry = jit_vtable->acquire_entry(jit_opaque, entry_function_id,
++                                              entry_generation, entry_pc_offset);
++            /* Acquisition may install code and advance the epoch. */
++            entry_epoch = entry.pin && entry_pc_offset == 0 && jit_vtable->entry_cache_epoch ?
++                jit_vtable->entry_cache_epoch(jit_opaque) : 0;
++        }
+         if (entry.struct_size != sizeof(entry) || entry.reserved != 0 ||
+             !entry.entry || !entry.pin ||
+             entry.helper_abi_version != QJSJIT_HELPER_ABI_VERSION) {
+@@ -20076,8 +20120,8 @@
+             frame.flags = b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0;
+             frame.rt = rt;
+             frame.ctx = ctx;
+-            frame.function_id = b->jit_function_id;
+-            frame.generation = b->jit_generation;
++            frame.function_id = entry_function_id;
++            frame.generation = entry_generation;
+             frame.arg_buf = (JSValueConst *)arg_buf;
+             frame.var_buf = var_buf;
+             frame.stack_base = stack_buf;
+@@ -20102,18 +20146,31 @@
+             rt->jit_active_stack_map_count = entry.stack_map_count;
+             rt->jit_active_helper_abi_version = entry.helper_abi_version;
+             if (jit_vtable->native_enter)
+-                jit_vtable->native_enter(jit_opaque, b->jit_function_id,
+-                                         b->jit_generation, entry_pc_offset);
++                jit_vtable->native_enter(jit_opaque, entry_function_id,
++                                         entry_generation, entry_pc_offset);
+             jit_exit = entry.entry(&frame);
+             if (jit_vtable->native_exit)
+-                jit_vtable->native_exit(jit_opaque, b->jit_function_id,
+-                                        b->jit_generation, entry_pc_offset,
++                jit_vtable->native_exit(jit_opaque, entry_function_id,
++                                        entry_generation, entry_pc_offset,
+                                         jit_exit.kind);
+             rt->jit_active_frame = previous_active_frame;
+             rt->jit_active_frame_cookie = previous_frame_cookie;
+             rt->jit_active_stack_map_count = previous_stack_map_count;
+             rt->jit_active_helper_abi_version = previous_helper_abi_version;
+-            jit_vtable->release_entry(jit_opaque, entry);
++            if (!rt->jit_entry_cache_suppressed &&
++                entry_pc_offset == 0 && entry_epoch != 0 &&
++                b->jit_function_id == entry_function_id &&
++                b->jit_generation == entry_generation &&
++                jit_exit.kind == JS_JIT_EXIT_DONE &&
++                jit_vtable->entry_cache_epoch(jit_opaque) == entry_epoch) {
++                qjsjit_discard_cached_entry(rt);
++                rt->jit_cached_entry = entry;
++                rt->jit_cached_entry_id = entry_function_id;
++                rt->jit_cached_entry_generation = entry_generation;
++                rt->jit_cached_entry_epoch = entry_epoch;
++            } else {
++                jit_vtable->release_entry(jit_opaque, entry);
++            }
+             rt->jit_backend_active_depth--;
+ 
+             if (!qjsjit_scratch_is_clear(stack_buf, b)) {
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 19u
++#define QJSJIT_ABI_MINOR 20u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -309,7 +309,8 @@
+  * A usable handle has non-NULL entry and pin fields. The pin must keep the
+  * entry and all of its metadata alive until the matching release_entry call.
+  * QuickJS releases it exactly once after the native call and before processing
+- * the returned exit.
++ * the returned exit, unless the backend opts into entry caching (see vtable).
++ * An idle cached handle retains only code/metadata, never frame pointers.
+  */
+ typedef struct JSJitEntryHandle {
+     uint32_t struct_size;
+@@ -423,6 +424,14 @@
+     void (*native_exit)(void *opaque, uint64_t id, uint64_t generation,
+                         uint32_t pc, uint32_t exit_kind);
+     void (*record_feedback)(void *opaque, const JSJitFeedbackEvent *event);
++    /* Optional pure query. Zero disables caching. Nonzero epochs must never
++     * repeat and must change before any previously acquired handle becomes
++     * inadmissible for another call (replacement, demotion, feedback changes).
++     * Opting in allows QuickJS to retain one idle pc=0 handle until eviction
++     * or detach. Each active call owns its handle exclusively, including during
++     * recursion. native_enter/native_exit still run once per execution.
++     * The handle and pin must be immutable between executions. */
++    uint64_t (*entry_cache_epoch)(void *opaque);
+ } JSJitBackendVTable;
+ 
+ enum {

@@ -1,0 +1,42 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -25578,6 +25578,8 @@
+         if (JS_IsException(resolving_funcs[i])) {
+             if (i == 1)
+                 JS_FreeValue(ctx, resolving_funcs[0]);
++            resolving_funcs[0] = JS_UNDEFINED;
++            resolving_funcs[1] = JS_UNDEFINED;
+             return -1;
+         }
+         p = JS_VALUE_GET_OBJ(resolving_funcs[i]);
+@@ -25817,6 +25819,8 @@
+         if (JS_IsException(func)) {
+             if (i == 1)
+                 JS_FreeValue(ctx, resolving_funcs[0]);
++            resolving_funcs[0] = JS_UNDEFINED;
++            resolving_funcs[1] = JS_UNDEFINED;
+             return -1;
+         }
+         resolving_funcs[i] = func;
+@@ -59426,6 +59430,8 @@
+     JSPromiseFunctionDataResolved *sr;
+     int i, ret;
+ 
++    resolving_funcs[0] = JS_UNDEFINED;
++    resolving_funcs[1] = JS_UNDEFINED;
+     sr = js_malloc(ctx, sizeof(*sr));
+     if (!sr)
+         return -1;
+@@ -59441,9 +59447,8 @@
+         if (!s) {
+             JS_FreeValue(ctx, obj);
+         fail:
+-
+-            if (i != 0)
+-                JS_FreeValue(ctx, resolving_funcs[0]);
++            JS_FreeValue(ctx, resolving_funcs[0]);
++            resolving_funcs[0] = JS_UNDEFINED;
+             ret = -1;
+             break;
+         }

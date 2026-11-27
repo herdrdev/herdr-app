@@ -1,0 +1,39 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2442,6 +2442,26 @@
+     out->float64_array_class_id = JS_CLASS_FLOAT64_ARRAY;
+ }
+ 
++/* Generated code increments and decrements the reference count of every
++ * JS_VALUE_HAS_REF_COUNT payload in place and calls JS_JitHelperFree only
++ * for the last reference. Every such payload must start with the C int count;
++ * the value-layout fingerprint pins its offset and width. */
++_Static_assert(offsetof(JSRefCountHeader, ref_count) == 0,
++               "JIT inline refcount offset");
++_Static_assert(sizeof(((JSRefCountHeader *)0)->ref_count) == sizeof(int32_t),
++               "JIT inline refcount width");
++_Static_assert(offsetof(JSGCObjectHeader, ref_count) == 0,
++               "JIT inline GC refcount offset");
++_Static_assert(offsetof(JSObject, header) == 0, "JIT inline object refcount");
++_Static_assert(offsetof(JSFunctionBytecode, header) == 0,
++               "JIT inline bytecode refcount");
++_Static_assert(offsetof(JSString, header) == 0, "JIT inline string refcount");
++_Static_assert(offsetof(JSStringRope, header) == 0, "JIT inline rope refcount");
++_Static_assert(offsetof(JSBigInt, header) == 0, "JIT inline BigInt refcount");
++_Static_assert(offsetof(JSModuleDef, header) == 0, "JIT inline module refcount");
++_Static_assert(JS_TAG_FIRST == JS_TAG_BIG_INT && JS_TAG_OBJECT == -1,
++               "JIT inline refcount tag interval");
++
+ static uint64_t qjsjit_value_layout(void)
+ {
+     uint64_t hash = qjsjit_layout_start(sizeof(JSValue), _Alignof(JSValue));
+@@ -2452,6 +2472,8 @@
+ #else
+     hash = qjsjit_hash_u64(hash, 0);
+ #endif
++    hash = qjsjit_hash_u64(hash, offsetof(JSRefCountHeader, ref_count));
++    hash = qjsjit_hash_u64(hash, sizeof(((JSRefCountHeader *)0)->ref_count));
+     return hash;
+ }
+ 
