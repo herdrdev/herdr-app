@@ -7,7 +7,7 @@
 // open it.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, TextView } from "gpui-base";
 import { hc, exec, home, readTextFile, theme, props, closeOverlay } from "herdr";
 
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
@@ -293,6 +293,7 @@ export default class MachineAdd extends View {
   render() {
     const t = theme();
     const hosts = this.hosts ?? [];
+    const availableHosts = hosts.filter(h => !this.isAdded(h.alias));
     return v_flex()
       .id("machine-add")
       .track_focus(this.handle)
@@ -314,16 +315,21 @@ export default class MachineAdd extends View {
       .child(div().pt(16).pb(6).text_size(11.5).font_medium().text_color(t.dim).child(hosts.length ? "From your ssh config" : "Your ssh config lists no hosts"))
       .child(
         v_flex()
-          .id("ma-hosts")
           .max_h(280)
           .min_h(0)
           .flex_shrink(1)
-          .overflow_y_scroll()
-          .children(
-            this.hosts === null
-              ? [div().px(10).py(8).text_size(12.5).text_color(t.dim).child("Reading ~/.ssh/config…")]
-              : hosts.filter(h => !this.isAdded(h.alias)).map((h) => this.row(t, h.alias, h.alias, [h.user, h.hostname].filter(Boolean).join("@") || (h.aliases.length ? `also ${h.aliases.join(", ")}` : ""))),
-          ),
+          .relative()
+          .child(
+            v_flex().id("ma-hosts").min_h(0).flex_shrink(1).overflow_y_scroll()
+              // Keep the Add buttons clear of the scrollbar's hit area.
+              .pr(8)
+              .children(
+                this.hosts === null
+                  ? [div().px(10).py(8).text_size(12.5).text_color(t.dim).child("Reading ~/.ssh/config…")]
+                  : availableHosts.map((h) => this.row(t, h.alias, h.alias, [h.user, h.hostname].filter(Boolean).join("@") || (h.aliases.length ? `also ${h.aliases.join(", ")}` : ""))),
+              ),
+          )
+          .when(availableHosts.length > 0, el => el.child(Scrollbar.vertical("ma-hosts").mode("always").absolute().inset_0())),
       )
       .when(this.added.length > 0, el => el.child(v_flex().id("ma-added").max_h(280).min_h(0).overflow_y_scroll()
         .children(this.added.map(m => this.row(t, m.target, m.name, m.target)))))
