@@ -10,18 +10,20 @@ Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see
 curl -fsSL https://releases.herdr.dev/app/install.sh | sh
 ```
 
-Linux needs a desktop session and a working Vulkan driver. macOS builds are available for Apple Silicon; Intel Mac users can [build from source](#build-from-source). Linux builds are x86-64 and ARM64.
+Linux needs a desktop session and a working Vulkan driver. macOS builds require macOS 13.0 or newer and a compatible Metal GPU, on Apple Silicon or Intel. Linux builds are x86-64 and ARM64.
 
 The installer adds Herdr to your apps and puts the command in `~/.local/bin`.
 Add that folder to your PATH if the installer asks.
 On macOS the app lives in `~/Applications/Herdr.app`.
-For drag-and-drop installation on Apple Silicon, download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag Herdr to Applications.
+For drag-and-drop installation, download the [Apple Silicon DMG](https://releases.herdr.dev/app/Herdr.dmg) or [Intel DMG](https://releases.herdr.dev/app/Herdr-macos-x86_64.dmg) and drag Herdr to Applications.
 
 On macOS (Apple Silicon), you can also install with [Homebrew](https://brew.sh/):
 
 ```sh
 brew install --cask herdr-app
 ```
+
+The [Homebrew cask](https://github.com/Homebrew/homebrew-cask/blob/master/Casks/h/herdr-app.rb) is maintained separately and currently admits Apple Silicon only. [Intel cask release coordination](distribution/macos/homebrew.md) follows the availability of both official DMGs.
 
 ### Windows
 
@@ -122,6 +124,24 @@ For bugs, mod API requests and code contributions, see [Contributing](CONTRIBUTI
 
 Clone this repo with its submodules. Use Rust 1.95.0 and Zig 0.16.0, the versions used in [CI](.github/workflows/ci.yml).
 Linux needs the development packages listed in that workflow.
+The pinned libghostty-vt dependency sets the macOS deployment floor to 13.0.
+On macOS, `scripts/package` defaults to the Rust compiler's host architecture;
+pass an explicit Rust target triple to package for the other architecture.
+Packaging requires Python 3. Each invocation builds in fresh private Cargo target
+and build directories, stages that build's executable and verifies its source package
+and version before signing or packing; configured shared outputs are not reused.
+Native binaries also answer `--version`. A cross-architecture macOS binary is not
+executed: its version comes from the matching Cargo package metadata and fresh build.
+A `dist/herdr-app-<target>.build.json` receipt records this check and the artifact hashes.
+Packaging the same target in the same output directory is exclusive: a concurrent
+invocation fails with the lock path and can be retried after the first exits. The
+archive and receipt are verified privately before replacing the existing pair;
+replacement failure restores the previous files. If recovery cannot be verified,
+the lock and backups remain for inspection. Wait for a successful command exit
+before consuming the pair; two regular filenames do not provide an atomic read.
+Release CI caches downloaded Cargo sources, not compiled outputs. Native Intel
+local Cargo-cold builds took about 16 minutes; hosted runners and all five targets'
+45-minute/disk budgets still require CI validation before an official release.
 
 ```sh
 git clone --recurse-submodules https://github.com/herdrdev/herdr-app.git

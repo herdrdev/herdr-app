@@ -9,6 +9,9 @@
 # otherwise ad hoc. The notarized DMG is a separate, non-blocking CI job.
 # Windows (Git Bash): a folder holding herdr-app.exe and the icon.
 # Windows has curl and tar too, so the app updates the same way.
+# Python 3 verifies Cargo's source/version and stages its isolated build result.
+# Native executables also answer --version; cross-architecture macOS builds
+# use the fresh Cargo artifact's package metadata without executing it.
 # No core inside: the installer and the app install the core's own release
 # (distribution/core-version is the oldest core this app works with).
 set -euo pipefail
@@ -17,6 +20,12 @@ cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 triple=${1:-}
+if [[ -z $triple && $(uname -s) == Darwin ]]; then
+  # A Rosetta shell can run a native ARM Rust toolchain (or the reverse).
+  # Pin Cargo's target rather than naming its output from the shell's uname.
+  triple=$("${RUSTC:-rustc}" -vV | sed -n 's/^host: //p')
+  [[ $triple == *-apple-darwin ]] || { echo "package: cannot determine macOS Rust compiler host" >&2; exit 1; }
+fi
 if [[ -n $triple ]]; then
   case "$triple" in
     *-linux-*) os=linux ;;
@@ -25,7 +34,6 @@ if [[ -n $triple ]]; then
     *) echo "package: unsupported target $triple" >&2; exit 1 ;;
   esac
   arch=${triple%%-*}
-  bin=target/$triple/release
 else
   case "$(uname -s)" in
     Linux) os=linux ;;
@@ -34,18 +42,20 @@ else
     *) echo "package: unsupported OS $(uname -s)" >&2; exit 1 ;;
   esac
   arch=$(uname -m)
-  bin=target/release
 fi
 case "$arch" in
   x86_64 | amd64) arch=x86_64 ;;
   arm64 | aarch64) arch=aarch64 ;;
   *) echo "package: unsupported CPU $arch" >&2; exit 1 ;;
 esac
-if [[ $os == macos && $arch != aarch64 ]]; then
-  echo "package: Intel Macs aren't supported; build from source instead." >&2
-  exit 1
-fi
 target="$os-$arch"
+
+if [[ $os == macos ]]; then
+  min_macos=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET = "\([0-9.]*\)"$/\1/p' .cargo/config.toml)
+  [[ $min_macos =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "package: missing macOS deployment target" >&2; exit 1; }
+  # All release artifacts use the dependency floor, even with a host override.
+  export MACOSX_DEPLOYMENT_TARGET=$min_macos
+fi
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
@@ -53,29 +63,133 @@ echo "package: herdr-app $version for $target"
 for notice in LICENSE THIRD-PARTY-NOTICES; do
   [[ -s $notice ]] || { echo "package: $notice is missing or empty" >&2; exit 1; }
 done
-# Only release builds update themselves (src/update.rs).
-HERDR_APP_RELEASE=1 cargo build --release --locked ${triple:+--target "$triple"}
-
+if command -v python3 >/dev/null; then python=python3; else python=python; fi
+command -v "$python" >/dev/null || { echo 'package: needs Python 3 to read Cargo artifacts' >&2; exit 1; }
 if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-mkdir -p dist
-out="dist/herdr-app-$target.tar.gz"
-if [[ $os == linux || $os == windows ]]; then
+lock=
+cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  rm -rf "$work"
+  if [[ -n $lock ]]; then
+    if [[ -e $lock/transaction.json ]]; then
+      echo "package: unfinished publication; inspect $lock/transaction.json and its backup directory before removing the lock or retrying" >&2
+      result=1
+    else
+      rmdir "$lock" || result=1
+    fi
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$PWD/dist"
+candidate_lock="dist/.herdr-app-$target.lock"
+mkdir "$candidate_lock" 2>/dev/null || { echo "package: target is locked at $candidate_lock; wait for its packager, or inspect an interrupted run before retrying" >&2; exit 1; }
+lock=$candidate_lock
+# Never let another worktree/build replace the executable between Cargo,
+# inspection and copying. This private target starts empty, independent of
+# CARGO_TARGET_DIR, build.target-dir and build.build-dir. The final payload is staged before
+# any inspection and is the same file subsequently signed and archived.
+if [[ $os == macos ]]; then
+  app="$work/Herdr.app"
+  binary="$app/Contents/MacOS/Herdr"
+else
   dir="$work/herdr-app"
-  mkdir -p "$dir"
-  if [[ $os == windows ]]; then cp "$bin/herdr-app.exe" "$dir/"; else cp "$bin/herdr-app" "$dir/"; fi
+  binary="$dir/herdr-app"
+  [[ $os != windows ]] || binary+=.exe
+fi
+mkdir -p "$(dirname "$binary")" "$work/target" "$work/build"
+# Cargo 1.95 separates intermediate outputs from target-dir. Override both,
+# including config/env values shared by worktrees. Python renders a native
+# path for Cargo on Windows rather than exporting a Git Bash /tmp path.
+build_dir=$("$python" -c 'import pathlib,sys; print((pathlib.Path(sys.argv[1])/"build").resolve())' "$work")
+export CARGO_BUILD_BUILD_DIR="$build_dir"
+cargo metadata --no-deps --locked --format-version=1 > "$work/metadata.json"
+# Only release builds update themselves (src/update.rs).
+HERDR_APP_RELEASE=1 cargo build --release --locked --bin herdr-app --target-dir "$work/target" --message-format=json-render-diagnostics ${triple:+--target "$triple"} > "$work/cargo.jsonl"
+"$python" - "$work" "$binary" "$version" <<'PY'
+import hashlib, json, pathlib, shutil, sys
+work, staged, version = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+manifest = pathlib.Path('Cargo.toml').resolve()
+metadata = json.loads((work / 'metadata.json').read_text())
+packages = [p for p in metadata['packages'] if pathlib.Path(p['manifest_path']).resolve() == manifest]
+if len(packages) != 1 or packages[0]['name'] != 'herdr-app' or packages[0]['version'] != version:
+    sys.exit('package: Cargo metadata does not match this source manifest and version')
+package = packages[0]
+artifacts = []
+for line in (work / 'cargo.jsonl').read_text().splitlines():
+    item = json.loads(line)
+    if (item.get("reason") == "compiler-artifact" and item["target"]["name"] == "herdr-app"
+            and "bin" in item["target"]["kind"] and not item["profile"]["test"] and item.get("executable")):
+        artifacts.append(item)
+if len(artifacts) != 1:
+    sys.exit("package: Cargo did not report exactly one herdr-app executable")
+artifact = artifacts[0]
+source = pathlib.Path(artifact['executable'])
+if (artifact.get('fresh') is not False or artifact.get('package_id') != package['id']
+        or pathlib.Path(artifact.get('manifest_path', '')).resolve() != manifest
+        or source.is_symlink() or not source.is_file()
+        or (work / 'target').resolve() not in source.resolve().parents):
+    sys.exit('package: expected a freshly compiled executable from this package in the private target directory')
+shutil.copy2(source, staged)
+(work / 'build.json').write_text(json.dumps({
+    'package_id': package['id'], 'source_manifest': str(manifest), 'version': version,
+    'source_manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    'cargo_executable': str(source), 'private_target': str(work / 'target'),
+    'private_build_dir': str((work / 'build').resolve()),
+    'staged_executable_sha256': hashlib.sha256(staged.read_bytes()).hexdigest(),
+    'fresh': True,
+}, indent=2) + '\n')
+PY
+
+verify_version=execute
+if [[ $os == macos ]]; then
+  expected_arch=$arch
+  [[ $arch != aarch64 ]] || expected_arch=arm64
+  actual_arch=$(lipo -archs "$binary")
+  [[ $actual_arch == "$expected_arch" ]] || { echo "package: expected $expected_arch Mach-O, found $actual_arch" >&2; exit 1; }
+  actual_min=$(otool -l "$binary" | awk '
+    $1 == "cmd" { build = ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") }
+    build && ($1 == "minos" || $1 == "version") && !minimum { minimum = $2 }
+    END { print minimum }')
+  [[ $actual_min == "$min_macos" ]] || { echo "package: expected macOS $min_macos deployment target, found ${actual_min:-unknown}" >&2; exit 1; }
+  # Do not probe emulation by trying to execute a foreign Mach-O. Physical
+  # hardware, not the Rosetta shell or Rust host, decides the native CPU.
+  native_arch=x86_64
+  [[ $(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true) != 1 ]] || native_arch=arm64
+  if [[ $actual_arch != "$native_arch" ]]; then
+    verify_version=isolated-cargo-metadata
+    echo "package: cross-architecture version/source verified by fresh isolated Cargo build; not executing $actual_arch on $native_arch"
+  fi
+fi
+if [[ $verify_version == execute ]]; then
+actual_version=$("$python" - "$binary" <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run([sys.argv[1], "--version"], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30, check=True)
+except (OSError, subprocess.SubprocessError):
+    sys.exit("package: cannot verify executable version; build on a host that can run this target")
+print(result.stdout.rstrip("\r\n"))
+PY
+)
+[[ $actual_version == "herdr-app $version" ]] || { echo "package: expected herdr-app $version, found $actual_version" >&2; exit 1; }
+fi
+out="$work/herdr-app-$target.tar.gz"
+if [[ $os == linux || $os == windows ]]; then
   cp assets/icons/herdr-ui-icon-clean.svg "$dir/herdr-app.svg"
   cp LICENSE THIRD-PARTY-NOTICES "$dir/"
   notices_path=herdr-app/THIRD-PARTY-NOTICES
+  archive_member="herdr-app/${binary##*/}"
   tar -czf "$out" -C "$work" herdr-app
 else
-  app="$work/Herdr.app"
-  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-  cp "$bin/herdr-app" "$app/Contents/MacOS/Herdr"
+  mkdir -p "$app/Contents/Resources"
   cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
   cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
   notices_path=Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES
+  archive_member=Herdr.app/Contents/MacOS/Herdr
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -88,6 +202,7 @@ else
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
+    <key>LSMinimumSystemVersion</key><string>$min_macos</string>
     <key>NSMicrophoneUsageDescription</key><string>Terminal programs running in Herdr can use the microphone, for example for voice input.</string>
     <key>NSCameraUsageDescription</key><string>Terminal programs running in Herdr can use the camera.</string>
     <key>NSAppleEventsUsageDescription</key><string>Terminal programs running in Herdr can use AppleScript to control other apps.</string>
@@ -101,4 +216,12 @@ fi
 tar -xOf "$out" "$notices_path" | cmp - THIRD-PARTY-NOTICES
 license_path="${notices_path%/*}/LICENSE"
 tar -xOf "$out" "$license_path" | cmp - LICENSE
-echo "package: $out ($(sha256 "$out"))"
+"$python" - "$work/build.json" "$binary" "$out" "$verify_version" "$archive_member" <<'PY'
+import hashlib, json, pathlib, sys
+receipt, binary, archive = map(pathlib.Path, sys.argv[1:4])
+data = json.loads(receipt.read_text())
+data.update(version_verification=sys.argv[4], archive_member=sys.argv[5], packaged_executable_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+archive.with_suffix('').with_suffix('.build.json').write_text(json.dumps(data, indent=2) + '\n')
+PY
+"$python" scripts/package_output.py "$out" "$work/herdr-app-$target.build.json" dist "$lock"
+echo "package: dist/herdr-app-$target.tar.gz ($(sha256 "dist/herdr-app-$target.tar.gz"))"
