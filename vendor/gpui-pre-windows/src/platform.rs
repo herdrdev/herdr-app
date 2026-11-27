@@ -1725,7 +1725,9 @@ fn handle_gpu_device_lost(
     Ok(())
 }
 
-const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+// HERDR: our own class name for the hidden message window, like
+// `WINDOW_CLASS_NAME`.
+const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Herdr::PlatformWindow");
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
