@@ -2,7 +2,7 @@ Herdr third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: 4feac2839121c2e88d4313e313de8ac1b55c240d43df86d8b0889970c52fcf8b Cargo.lock
+Input-SHA256: afb692221320dff196342e102a74ac810818757491a78bc7d84dfa53a31ffaa0 Cargo.lock
 Input-SHA256: 26d779ba9ae8b6dcd4a5ca62e3d66f7385711ac0b06777a124ccdda71aa5aa83 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
@@ -14130,7 +14130,7 @@ THIS SOFTWARE.
 
 ----------------------------------------------------------------------
 ISC License (ISC)
-  rustls-webpki 0.103.15 — https://github.com/rustls/webpki
+  rustls-webpki 0.103.16 — https://github.com/rustls/webpki
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
