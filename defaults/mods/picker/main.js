@@ -2,7 +2,8 @@
 // something that needs you come first, quiet spaces (no agent running)
 // fold into "earlier". Type to filter, ↑/↓ and Enter to go, ctrl+d to close
 // a tab, Esc to leave. Last rows: new work (a tab here, a space on this
-// computer or on each connected machine).
+// computer or on each connected machine). With a remote machine in play each
+// of those rows says which machine the work lands on.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -110,6 +111,18 @@ export default class Picker extends View {
     return out;
   }
 
+  // What a new-work row says. A new tab lands on the shown space's machine
+  // (tab.new takes none); a new space on the row's. With no remote machine
+  // around there is only one place for it to go, so the rows stay bare.
+  newLabel(r) {
+    const all = spaces();
+    const remote = this.machines.length > 0 || all.some((p) => p.machine);
+    const shown = all.find((p) => p.active);
+    const on = r.kind === "new" ? (shown ? shown.machine ?? null : undefined) : r.machine;
+    const what = r.kind === "new" ? "new tab" : "new space";
+    return remote && on !== undefined ? `${what} on ${on ?? "this computer"}` : what;
+  }
+
   go(r, cx) {
     if (!r) return;
     if (r.kind === "earlier") {
@@ -193,7 +206,7 @@ export default class Picker extends View {
       }
       const on = r === sel;
       if (r.kind === "new" || r.kind === "space") {
-        const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
+        const label = this.newLabel(r);
         return h_flex()
           .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
           .mx(4)

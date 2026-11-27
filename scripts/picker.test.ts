@@ -216,3 +216,40 @@ test("picker heads use the complete emoji in the colored avatar and keep the spa
   expect(plain.nodes[0].nodes).toEqual(["P"]);
   expect(plain.nodes[0].calls.bg).toBeDefined();
 });
+
+const labels = (view: any) => {
+  const tree = view.render();
+  const text = (id: string) => find(tree, id).nodes[1];
+  return [text("pk-new"), text("pk-space-here"), ...view.machines.map((m: string) => text(`pk-space-${m}`))];
+};
+
+test("picker new-work rows keep their plain labels with only this computer", () => {
+  const view = picker(0);
+  testSpaces = [{ id: "a", name: "a", active: true, machine: null, tabs: [{ id: "a-tab", name: "a tab", active: true }] }];
+  expect(labels(view)).toEqual(["new tab", "new space"]);
+});
+
+test("picker new-work rows name the machine once a remote machine is connected", () => {
+  const view = picker(0);
+  view.machines = ["build-box"];
+  testSpaces = [{ id: "a", name: "a", active: true, machine: null, tabs: [{ id: "a-tab", name: "a tab", active: true }] }];
+  expect(labels(view)).toEqual(["new tab on this computer", "new space on this computer", "new space on build-box"]);
+  testSpaces = [{ id: "r", name: "r", active: true, machine: "build-box", tabs: [{ id: "r-tab", name: "r tab", active: true }] }];
+  expect(labels(view)[0]).toBe("new tab on build-box");
+  view.machines = [];
+  testSpaces[0].machine = "build-box";
+  expect(labels(view)).toEqual(["new tab on build-box", "new space on this computer"]);
+});
+
+test("picker new-work rows run the same commands whatever they say", () => {
+  const view = picker(0);
+  view.machines = ["build-box"];
+  testSpaces = [{ id: "r", name: "r", active: true, machine: "build-box", tabs: [{ id: "r-tab", name: "r tab", active: true }] }];
+  commands.length = 0;
+  for (const r of view.rows().filter((r: any) => r.kind === "new" || r.kind === "space")) view.go(r);
+  expect(commands).toEqual([
+    ["tab.new"],
+    ["space.new", { machine: "" }],
+    ["space.new", { machine: "build-box" }],
+  ]);
+});
