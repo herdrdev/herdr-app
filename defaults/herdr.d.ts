@@ -78,7 +78,9 @@ export function playSound(sound: string): null;
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
  *   terminal.send_key {keys: string, terminal?} (one key in keys.json syntax, default: focused terminal, encoded in its current keyboard mode).
- *   terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *   terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *     With to, the view follows the exact moving end. Line mode with to covers whole screen rows,
+ *     including blank and soft-wrapped rows. Without to, word and line act like double and triple click.
  *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
  *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).

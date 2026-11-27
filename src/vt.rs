@@ -1091,7 +1091,7 @@ impl Vt {
         Some(SelectionPositions { start: self.cell_position(&selection.start)?, end: self.cell_position(&selection.end)? })
     }
 
-    pub fn select_at(&mut self, at: Option<CellPosition>, mode: &str) -> Result<(), String> {
+    pub fn select_at(&mut self, at: Option<CellPosition>, to: Option<CellPosition>, mode: &str) -> Result<(), String> {
         if !matches!(mode, "cell" | "word" | "line") {
             return Err("terminal.select mode is cell, word or line".into());
         }
@@ -1100,15 +1100,23 @@ impl Vt {
         let mut selection = GhosttySelection {
             size: std::mem::size_of::<GhosttySelection>(), start: reference, end: reference, ..Default::default()
         };
-        let result = unsafe {
+        let result = if let Some(to) = to {
+            selection.end = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, to.col, to.row)
+                .ok_or("terminal.select to is outside the screen and history")?;
+            if mode == "line" {
+                let last_col = self.cols.saturating_sub(1);
+                (selection.start.x, selection.end.x) = if at.row <= to.row { (0, last_col) } else { (last_col, 0) };
+            }
+            GHOSTTY_SUCCESS
+        } else {
             match mode {
                 "word" => {
                     let options = GhosttyTerminalSelectWordOptions { size: std::mem::size_of::<GhosttyTerminalSelectWordOptions>(), ref_: reference, ..Default::default() };
-                    ghostty_terminal_select_word(self.term, &options, &mut selection)
+                    unsafe { ghostty_terminal_select_word(self.term, &options, &mut selection) }
                 }
                 "line" => {
                     let options = GhosttyTerminalSelectLineOptions { size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(), ref_: reference, semantic_prompt_boundary: true, ..Default::default() };
-                    ghostty_terminal_select_line(self.term, &options, &mut selection)
+                    unsafe { ghostty_terminal_select_line(self.term, &options, &mut selection) }
                 }
                 _ => GHOSTTY_SUCCESS,
             }
@@ -1121,6 +1129,9 @@ impl Vt {
             return Err("terminal.select could not select that cell".into());
         }
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        if let Some(to) = to {
+            self.follow_selection_row(to.row);
+        }
         Ok(())
     }
 
@@ -1164,14 +1175,18 @@ impl Vt {
         // Convert before installing the snapshot: any mutating call invalidates its refs.
         let end = self.cell_position(&selection.end).ok_or("selection end is outside the screen")?;
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        self.follow_selection_row(end.row);
+        Ok(())
+    }
+
+    fn follow_selection_row(&mut self, row: u32) {
         let scrollbar = self.scrollbar();
-        let row = u64::from(end.row);
+        let row = u64::from(row);
         if row < scrollbar.offset {
             self.scroll_to_row(row as usize);
         } else if row >= scrollbar.offset.saturating_add(scrollbar.len) {
             self.scroll_to_row(row.saturating_sub(scrollbar.len.saturating_sub(1)) as usize);
         }
-        Ok(())
     }
 
     /// Select the active screen and its history without formatting or copying text.
@@ -2031,7 +2046,7 @@ mod tests {
             vt.write(format!("line {line:02}\r\n").as_bytes());
         }
         assert_eq!(vt.cursor_position(), CellPosition { row: 12, col: 0 });
-        vt.select_at(None, "cell").unwrap();
+        vt.select_at(None, None, "cell").unwrap();
         vt.adjust_selection("left").unwrap();
         assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
             start: CellPosition { row: 12, col: 0 }, end: CellPosition { row: 11, col: 6 },
@@ -2061,11 +2076,48 @@ mod tests {
     }
 
     #[test]
+    fn exact_selection_reaches_into_history_and_follows_the_moving_end() {
+        let mut vt = Vt::new(20, 2);
+        vt.write(b"first\r\nsecond\r\nthird\r\nfourth");
+        let at = CellPosition { row: 3, col: 2 };
+        let to = CellPosition { row: 0, col: 2 };
+        vt.select_at(Some(at), Some(to), "word").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions { start: at, end: to }));
+        assert_eq!(vt.selection_text().as_deref(), Some("rst\nsecond\nthird\nfou"));
+        assert_eq!(vt.scrollbar().offset, 0);
+        let invalid = CellPosition { row: 10, col: 0 };
+        assert!(vt.select_at(Some(at), Some(invalid), "cell").is_err());
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions { start: at, end: to }));
+    }
+
+    #[test]
+    fn exact_line_selection_covers_physical_rows_in_either_direction() {
+        let mut vt = Vt::new(5, 4);
+        vt.write(b"abcdef\r\n\r\nlast");
+        let wrapped = CellPosition { row: 1, col: 0 };
+        let blank = CellPosition { row: 2, col: 1 };
+        vt.select_at(Some(wrapped), None, "line").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("abcdef"));
+        vt.select_at(Some(wrapped), Some(blank), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: wrapped, end: CellPosition { row: 2, col: 4 },
+        }));
+        vt.select_at(Some(blank), Some(wrapped), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: CellPosition { row: 2, col: 4 }, end: wrapped,
+        }));
+        vt.select_at(Some(blank), Some(blank), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: CellPosition { row: 2, col: 0 }, end: CellPosition { row: 2, col: 4 },
+        }));
+    }
+
+    #[test]
     fn shift_click_extends_the_selection_from_its_start() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"first line\r\nsecond line\r\nthird");
         assert!(!vt.extend_selection(3, 1), "nothing to extend without a selection");
-        vt.select_at(Some(CellPosition { row: 0, col: 6 }), "cell").unwrap();
+        vt.select_at(Some(CellPosition { row: 0, col: 6 }), None, "cell").unwrap();
         assert!(vt.extend_selection(5, 1));
         assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
             start: CellPosition { row: 0, col: 6 }, end: CellPosition { row: 1, col: 5 },
@@ -2084,7 +2136,7 @@ mod tests {
         let mut vt = Vt::new(30, 3);
         vt.write("hello 日本語\r\nsecond line".as_bytes());
         let at = Some(CellPosition { row: 0, col: 1 });
-        vt.select_at(at, "word").unwrap();
+        vt.select_at(at, None, "word").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("hello"));
         let word = vt.selection_positions();
         for _ in 0..2 {
@@ -2092,13 +2144,13 @@ mod tests {
             vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
         }
         assert_eq!(vt.selection_positions(), word);
-        vt.select_at(at, "line").unwrap();
+        vt.select_at(at, None, "line").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("hello 日本語"));
         let line = vt.selection_positions();
         vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
         vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
         assert_eq!(vt.selection_positions(), line);
-        vt.select_at(Some(CellPosition { row: 1, col: 0 }), "cell").unwrap();
+        vt.select_at(Some(CellPosition { row: 1, col: 0 }), None, "cell").unwrap();
         vt.adjust_selection("right").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("se"));
         let frame = vt.frame();
@@ -2106,14 +2158,14 @@ mod tests {
         assert_eq!(frame.rows[1][1].bg, Some(theme().selection_bg));
         assert_ne!(frame.rows[1][2].bg, Some(theme().selection_bg));
         let selected = vt.selection_positions();
-        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), "cell").is_err());
-        assert!(vt.select_at(at, "invalid").is_err());
+        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), None, "cell").is_err());
+        assert!(vt.select_at(at, None, "invalid").is_err());
         assert!(vt.adjust_selection("word").is_err());
         assert_eq!(vt.selection_positions(), selected);
         vt.write(b"\x1b[?1049h\x1b[H");
         assert_eq!(vt.cursor_position().row, 0);
         assert_eq!(vt.selection_positions(), None);
-        vt.select_at(None, "cell").unwrap();
+        vt.select_at(None, None, "cell").unwrap();
         vt.adjust_selection("home").unwrap();
         assert_eq!(vt.selection_positions().unwrap().end.row, 0);
     }

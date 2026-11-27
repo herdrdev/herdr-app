@@ -676,8 +676,11 @@ The main ones:
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
   there is no history, so nothing moves),
-  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
-  (replaces the selection, at the program's cursor by default; word/line act like double/triple click),
+  `terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"}`
+  replaces the selection, starting at the program's cursor by default.
+  With `to`, the view follows the exact moving end. Line mode with `to` covers whole screen
+  rows, including blank and soft-wrapped rows. Without `to`, word and line still act like
+  double and triple click.
   `terminal.adjust_selection {terminal?, direction}` (left, right, up, down, page_up, page_down,
   home, end, line_start, line_end; moves the selection's end and follows it in the view;
   fails with no selection), `terminal.clear_selection {terminal?}`.

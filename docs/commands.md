@@ -314,12 +314,13 @@ Select a terminal's whole screen and scrollback (default: the focused one), read
 
 ## `terminal.select`
 
-Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). With to: {row, col}, the endpoints are exact and the view follows to. Line mode with to selects whole screen rows. Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
 
 | Argument | Required |
 |---|---|
 | `terminal` | no |
 | `at` | no |
+| `to` | no |
 | `mode` | no |
 
 ## `terminal.adjust_selection`

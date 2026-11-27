@@ -877,7 +877,11 @@ impl TerminalView {
                     None => "cell",
                     Some(value) => value.as_str().ok_or("terminal.select mode is cell, word or line")?,
                 };
-                grid.vt.select_at(at, mode)?;
+                let to = args.get("to").map(|value| {
+                    serde_json::from_value::<vt::CellPosition>(value.clone())
+                        .map_err(|_| "terminal.select to is {row, col} with nonnegative whole numbers")
+                }).transpose()?;
+                grid.vt.select_at(at, to, mode)?;
             }
             "terminal.adjust_selection" => {
                 let direction = args.get("direction").and_then(serde_json::Value::as_str).ok_or("terminal.adjust_selection needs a direction")?;
@@ -3315,6 +3319,21 @@ mod tests {
             let selection = terminal.selection().unwrap();
             assert_eq!(selection.start, crate::vt::CellPosition { row: 1, col: 11 });
             assert_eq!(selection.end, selection.start);
+
+            let at = serde_json::json!({"row": 0, "col": 6});
+            let to = serde_json::json!({"row": 1, "col": 5});
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": at, "to": to}), cx).unwrap();
+            let expected = crate::vt::SelectionPositions {
+                start: crate::vt::CellPosition { row: 0, col: 6 },
+                end: crate::vt::CellPosition { row: 1, col: 5 },
+            };
+            assert_eq!(terminal.selection(), Some(expected));
+            for to in [serde_json::json!({"row": -1, "col": 0}), serde_json::json!({"row": 0.5, "col": 0}), serde_json::json!("cursor")] {
+                assert!(terminal.selection_command("terminal.select", &serde_json::json!({"to": to}), cx).is_err());
+                assert_eq!(terminal.selection(), Some(expected));
+            }
+            assert!(terminal.copy(cx));
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("world\nsecond"));
         });
     }
 
@@ -4037,7 +4056,7 @@ mod tests {
                 let mut theme = vt::theme();
                 theme.selection_bg = vt::Rgb(255, 255, 0);
                 grid.vt.set_theme(theme);
-                grid.vt.select_at(Some(vt::CellPosition { row: 2, col: 2 }), "cell").unwrap();
+                grid.vt.select_at(Some(vt::CellPosition { row: 2, col: 2 }), None, "cell").unwrap();
             }
             cx.new(|_| KittyGrid(grid))
         }).unwrap();
