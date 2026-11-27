@@ -810,11 +810,12 @@ mod tests {
                 assert_eq!(size["cols"], expected);
             }
         }
+        core.automatic_input(leader.channel, b"done");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let received = std::fs::read(root.join("received")).unwrap_or_default();
-            if received.windows(3).filter(|w| *w == b";OK").count() == 6 {
-                eprintln!("program received six kitty replies (two per query): {:?}", String::from_utf8_lossy(&received));
+            if received.ends_with(b"done") {
+                assert_eq!(received.windows(3).filter(|w| *w == b";OK").count(), 3, "{received:?}");
                 break;
             }
             assert!(std::time::Instant::now() < deadline);
