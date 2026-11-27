@@ -2174,7 +2174,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    // The only paint of the terminal's background: below 1, the layout's
+    // background shows through (cells a program colors stay solid).
+    let s = crate::settings::get();
+    let opacity = if focused { s.active_terminal_opacity } else { s.terminal_opacity };
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(opacity)));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -2522,8 +2526,6 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .size_full()
             .relative()
-            // Below 1, the layout's background shows through (cells a program colors stay solid).
-            .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
             .on_action(cx.listener(|this, a: &herdr_shell::action::ShellAction, window, cx| {
                 if this.find_field_focused(window, cx) {
                     let action: Option<Box<dyn gpui::Action>> = match a.id() {
@@ -3041,6 +3043,39 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn each_pane_paints_its_background_once_at_its_own_opacity(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root {
+            first: Entity<super::TerminalView>,
+            second: Entity<super::TerminalView>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().flex().size_full()
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.first.clone()))
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.second.clone()))
+            }
+        }
+
+        cx.update(gpui_base::init);
+        crate::settings::set(crate::settings::Settings { terminal_opacity: 0.5, active_terminal_opacity: 0.9, ..Default::default() });
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            first: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx)),
+            second: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t2".into(), (32, 6), cx)),
+        });
+        cx.update(|window, app| root.update(app, |root, app| root.first.update(app, |terminal, cx| terminal.focus.focus(window, cx))));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bg = super::hsla(crate::vt::theme().bg);
+        let mut painted = |opacity: f32| cx.update(|window, _| {
+            let color: Background = bg.opacity(opacity).into();
+            window.painted_quads().iter().filter(|quad| quad.background == color).count()
+        });
+        assert_eq!((painted(0.9), painted(0.5)), (1, 1), "the active pane at 0.9, the other at 0.5, each painted once");
     }
 
     #[gpui::test]

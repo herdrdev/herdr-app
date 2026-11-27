@@ -594,6 +594,12 @@ Restart into the update Herdr downloaded (your terminals keep running).
 
 No arguments.
 
+## `app.toggle`
+
+Show or hide Herdr; the quick terminal (macOS, settings.json `quick_terminal`) drops down or goes up.
+
+No arguments.
+
 ## `app.quit`
 
 Quit (macOS).
@@ -633,6 +639,12 @@ No arguments.
 ## `window.maximize`
 
 Maximize the window, or back.
+
+No arguments.
+
+## `window.see_through`
+
+The quick terminal: switch between see-through (settings.json `quick_terminal.opacity`) and solid; see-through again at the next start.
 
 No arguments.
 

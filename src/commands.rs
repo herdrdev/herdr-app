@@ -104,6 +104,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.zoom_out", &[], "Make everything smaller."),
     cmd("app.zoom_reset", &[], "Back to normal size."),
     cmd("app.update", &[], "Restart into the update Herdr downloaded (your terminals keep running)."),
+    cmd("app.toggle", &[], "Show or hide Herdr; the quick terminal (macOS, settings.json `quick_terminal`) drops down or goes up."),
     cmd("app.quit", &[], "Quit (macOS)."),
     cmd("app.hide", &[], "Hide the app (macOS)."),
     cmd("app.hide_others", &[], "Hide other apps (macOS)."),
@@ -111,6 +112,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[], "Close the window (on Linux, quits)."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),
+    cmd("window.see_through", &[], "The quick terminal: switch between see-through (settings.json `quick_terminal.opacity`) and solid; see-through again at the next start."),
 ];
 
 pub fn find(name: &str) -> Option<&'static Command> {
