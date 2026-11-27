@@ -4641,7 +4641,7 @@ impl AppWindow {
                 let axis = n.axis().unwrap();
                 el = if axis == Axis::Row { el.flex_row() } else { el.flex_col() };
                 let shown: Vec<&Node> = children.iter().filter(|c| !c.hidden).collect();
-                let gap = pane_size::gap(n, frame);
+                let separator_width = pane_size::separator_width(n, pane_size::gap(n, frame)) * settings::zoom();
                 // Weights are shares of what the fixed-size siblings leave, so they always fill it.
                 let total: f32 = shown
                     .iter()
@@ -4649,13 +4649,16 @@ impl AppWindow {
                     .sum::<f32>()
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
-                    if i > 0 {
-                        el = el.child(self.separator(n, axis, gap, i - 1, rendered_dividers, cx));
-                    }
                     // No clipping here: a child's shadow may fall outside it (the child clips itself).
-                    let mut slot = div().relative().flex().min_w_0().min_h_0();
-                    slot = sized(slot, child, axis, total);
-                    el = el.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
+                    let mut slot = sized(div().relative().flex().min_w_0().min_h_0(), child, axis, total)
+                        .child(self.render_node(child, focused, frame, rendered_dividers, cx));
+                    if i > 0 {
+                        // Reserve the gap, but paint its handle after both neighbors so it
+                        // gets the press before a terminal underneath starts selecting.
+                        slot = if axis == Axis::Row { slot.ml(px(separator_width)) } else { slot.mt(px(separator_width)) };
+                        slot = slot.child(self.separator(n, axis, separator_width, i - 1, rendered_dividers, cx));
+                    }
+                    el = el.child(slot);
                 }
                 el
             }
@@ -4814,7 +4817,7 @@ impl AppWindow {
         row.into_any_element()
     }
 
-    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
+    fn separator(&self, n: &Node, axis: Axis, width: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
         let resizable = n.resizable();
@@ -4824,9 +4827,8 @@ impl AppWindow {
             && hover_key.as_ref().is_some_and(|key| self.divider_hover.contains(key));
         let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.axis == axis);
         let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
-        let width = pane_size::separator_width(n, gap) * zoom;
-        let mut sep = div().flex_none().relative().flex().items_center().justify_center();
-        sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
+        let mut sep = div().absolute().flex().items_center().justify_center();
+        sep = if row { sep.left(px(-width)).top_0().w(px(width)).h_full() } else { sep.top(px(-width)).left_0().h(px(width)).w_full() };
         if let Some((w, color)) = line {
             let top = traffic_light_divider_inset(n, axis, index, cfg!(target_os = "macos"), zoom) * zoom;
             if top > 0.0
