@@ -584,12 +584,18 @@ fn link_text(rows: &[Row]) -> (String, Vec<Spot>) {
 }
 
 impl Row {
-    /// Whether the row runs on into the next: the terminal wrapped it, or it
-    /// reaches the right edge, where a program breaks a line too long to fit.
-    fn full(&self, cols: u16) -> bool {
+    /// Whether the row runs on into `next`: the terminal wrapped it, or a
+    /// program broke it there. A program breaks a line where the next word
+    /// doesn't fit, so the row ends no further from the right edge than that
+    /// word is wide (Codex breaks after a `-` or `/` and leaves the rest of
+    /// the row blank), or within a few cells of it (Claude Code breaks
+    /// mid-word).
+    fn runs_into(&self, next: &Row, cols: u16) -> bool {
         // Cells a program may leave blank at the edge of its own width.
         const EDGE: u16 = 4;
-        self.wraps || self.spots.iter().rev().find(|s| !self.text[s.byte..].starts_with(' ')).is_some_and(|s| s.x + s.width + EDGE >= cols)
+        let blank = |row: &Row, s: &Spot| row.text[s.byte..].starts_with(char::is_whitespace);
+        let word: u16 = next.spots.iter().skip_while(|s| blank(next, s)).take_while(|s| !blank(next, s)).map(|s| s.width).sum();
+        self.wraps || self.spots.iter().rev().find(|s| !blank(self, s)).is_some_and(|s| cols.saturating_sub(s.x + s.width) <= EDGE.saturating_add(word))
     }
 }
 
@@ -1256,28 +1262,28 @@ impl Vt {
             return hit;
         }
 
-        // Lines a program broke itself, joined: only across rows that reach
-        // the right edge, and only where the hovered word runs into one.
+        // Lines a program broke itself, joined: only across rows that end
+        // where the next row's first word wouldn't have fit, and only where
+        // the hovered word runs into one.
         const BROKEN: u32 = 4;
         let word = word_range(&text, spots[at].byte);
-        let mut above = Vec::new();
+        let mut above: Vec<Row> = Vec::new();
         if text[..word.start].trim().is_empty() {
             for y in (first.saturating_sub(BROKEN)..first).rev() {
                 match self.link_row(y) {
-                    Some(row) if row.full(self.cols) => above.push(row),
+                    Some(row) if row.runs_into(above.last().unwrap_or(&rows[0]), self.cols) => above.push(row),
                     _ => break,
                 }
             }
         }
-        let mut below = Vec::new();
-        if text[word.end..].trim().is_empty() && rows.last().is_some_and(|row| row.full(self.cols)) {
+        let mut below: Vec<Row> = Vec::new();
+        if text[word.end..].trim().is_empty() {
             for y in last + 1..=last + BROKEN {
                 let Some(row) = self.link_row(y) else { break };
-                let full = row.full(self.cols);
-                below.push(row);
-                if !full {
+                if !below.last().or(rows.last()).is_some_and(|prev| prev.runs_into(&row, self.cols)) {
                     break;
                 }
+                below.push(row);
             }
         }
         let (group, up_most, down_most) = (rows.len(), above.len(), below.len());
@@ -2856,6 +2862,28 @@ mod tests {
     }
 
     #[test]
+    fn links_join_lines_a_program_wrapped_by_words() {
+        // Wrapped by words, as Codex does: broken after a hyphen, the row
+        // ends 11 cells short of the edge, where the next word didn't fit.
+        let mut vt = Vt::new(30, 4);
+        vt.write(b"- see (/tmp/report-\r\n  2026/data/final.xlsx).");
+        for (col, row) in [(8, 0), (3, 1)] {
+            let hit = vt.link_at(col, row, only("/tmp/report-2026/data/final.xlsx")).unwrap();
+            assert_eq!(hit.target, "/tmp/report-2026/data/final.xlsx");
+            assert_eq!(hit.spans, vec![(0, 7, 18), (1, 2, 21)]);
+        }
+        // No further from the edge than that word's cells and the margin: a
+        // word that would have fit starts a line of its own.
+        for (cols, next, joins) in [(24, "a.md", true), (25, "a.md", false), (34, "报告/最终版.md", true), (35, "报告/最终版.md", false)] {
+            let mut vt = Vt::new(cols, 4);
+            vt.write(format!("see /tmp/report-\r\n  {next} ok").as_bytes());
+            let target = format!("/tmp/report-{next}");
+            let hit = vt.link_at(6, 0, only(&target)).map(|hit| hit.target);
+            assert_eq!(hit, joins.then_some(target.clone()), "{cols} columns, then {next}");
+        }
+    }
+
+    #[test]
     fn joined_lines_prefer_the_longest_link() {
         // Broken next to slashes: the first rows name folders that exist.
         let mut vt = Vt::new(15, 4);
@@ -2923,6 +2951,14 @@ mod tests {
 
     fn found(text: &str, at: usize, _: LinkScan) -> Option<std::ops::Range<usize>> {
         crate::links::find(text, at)
+    }
+
+    /// A `find` for which only `target` exists.
+    fn only(target: &str) -> impl FnMut(&str, usize, LinkScan) -> Option<std::ops::Range<usize>> + '_ {
+        move |text, at, _| {
+            let range = crate::links::find(text, at)?;
+            (&text[range.clone()] == target).then_some(range)
+        }
     }
 
     #[test]
