@@ -1273,7 +1273,7 @@ All of it is in `herdr.d.ts`. In short:
 - App icon badge: `setBadge(text)` puts `text` on the app's Dock icon (macOS; other platforms
   ignore it), e.g. `setBadge(blocked ? String(blocked) : null)`. The last call wins; `null` or `""`
   clears it.
-- `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
+- `notify({ ..., action: { name, args } })`: the toast runs the command when clicked; its × closes it without running the command.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
