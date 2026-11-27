@@ -91,6 +91,16 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`pane.move {pane?, target, edge?}` moves a pane beside `target` (edge left, right,
+top or bottom; center or none trades places), also into another tab or space on
+the same machine. The terminal keeps running; an emptied tab closes. `pane.balance
+{tab?}` evens out every split in a tab:
+
+```sh
+herdr-app do pane.move '{"pane":"p20","target":"p12","edge":"right"}'
+herdr-app do pane.balance
+```
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;

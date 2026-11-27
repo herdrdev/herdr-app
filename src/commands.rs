@@ -62,6 +62,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
     cmd("pane.resize", &[req("direction"), opt("pane"), opt("px")], "Move the border of a pane (default: the focused one) \"left\", \"right\", \"up\" or \"down\" by px (default 40), like dragging the divider."),
     cmd("pane.swap", &[opt("direction"), opt("pane"), opt("target")], "Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target."),
+    cmd("pane.move", &[opt("pane"), req("target"), opt("edge")], "Move a pane (default: the focused one) beside another pane, in any tab of its machine: edge left, right, top or bottom; center or none trades places. A tab left empty closes."),
+    cmd("pane.balance", &[opt("tab")], "Give every split in a tab (default: the shown one) an equal share."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
     cmd("terminal.select_all", &[opt("terminal")], "Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen."),
