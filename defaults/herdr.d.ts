@@ -266,6 +266,16 @@ export function setAgentOrder(addresses: string[]): null;
  *  not on cursor motion or output. Start at the cursor with terminal.select and read selection.end. Live. */
 export function terminals(): (Record<string, any> & TerminalSelectionState)[];
 
+/** Reads up to 128 rows from an attached terminal view, or returns null without a view.
+ *  from and count are nonnegative whole numbers. Row numbers match TerminalCell.
+ *  total includes the active screen. wrapped means the row wraps onto the next.
+ *  Empty cells have text ""; wide graphemes occupy two columns. Wide-character spacer
+ *  cells are omitted. Reads do not subscribe to output. */
+export function terminalRows(terminal: string, from: number, count: number): {
+  total: number;
+  rows: { cells: { text: string; wide: boolean }[]; wrapped: boolean }[];
+} | null;
+
 /** Zero-based cells. Rows count from the oldest retained history through the active screen.
  *  Output preserves positions until history is pruned or the grid reflows. */
 export interface TerminalCell { row: number; col: number; }

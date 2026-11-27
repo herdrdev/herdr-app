@@ -1223,6 +1223,9 @@ All of it is in `herdr.d.ts`. In short:
   the keyboard is reported the same way; pane commands without a `pane` still act on
   the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
+  `terminalRows(terminal, from, count)` reads up to 128 terminal rows with their cell
+  text, widths and wraps for copy-mode motions and searches, or returns null without
+  an attached view. Reading rows does not subscribe to terminal output.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
 - Floating: `placement()` (null unless this copy floats).

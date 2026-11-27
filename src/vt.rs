@@ -21,6 +21,23 @@ pub struct SelectionPositions {
     pub end: CellPosition,
 }
 
+const MAX_TERMINAL_ROWS: u64 = 128;
+
+pub struct TextRows {
+    pub total: u64,
+    pub rows: Vec<TextRow>,
+}
+
+pub struct TextRow {
+    pub cells: Vec<TextCell>,
+    pub wrapped: bool,
+}
+
+pub struct TextCell {
+    pub text: String,
+    pub wide: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
@@ -1333,14 +1350,37 @@ impl Vt {
 
     /// Whether the terminal wrapped screen row `y` onto the next.
     fn wraps(&self, y: u32) -> bool {
-        unsafe {
-            let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
-            let mut line: GhosttyRow = Default::default();
-            let mut wrap = false;
-            ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
-                && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
-                && wrap
+        self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y).is_some_and(|r| row_wraps(&r))
+    }
+
+    pub fn text_rows(&self, from: u64, count: u64) -> TextRows {
+        let total = self.scrollbar().total;
+        let end = total.min(from.saturating_add(count.min(MAX_TERMINAL_ROWS)));
+        let rows = (from..end).map_while(|y| self.text_row(u32::try_from(y).ok()?)).collect();
+        TextRows { total, rows }
+    }
+
+    fn text_row(&self, y: u32) -> Option<TextRow> {
+        let mut reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
+        let wrapped = row_wraps(&reference);
+        let mut cells = Vec::with_capacity(self.cols as usize);
+        for x in 0..self.cols {
+            reference.x = x;
+            let mut cell: GhosttyCell = Default::default();
+            let mut width = GHOSTTY_CELL_WIDE_NARROW;
+            unsafe {
+                ghostty_grid_ref_cell(&reference, &mut cell);
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut width as *mut _ as *mut c_void);
+            }
+            if matches!(width, GHOSTTY_CELL_WIDE_SPACER_HEAD | GHOSTTY_CELL_WIDE_SPACER_TAIL) {
+                continue;
+            }
+            cells.push(TextCell {
+                text: cell_grapheme(&reference),
+                wide: width == GHOSTTY_CELL_WIDE_WIDE,
+            });
         }
+        Some(TextRow { cells, wrapped })
     }
 
     /// The text of screen row `y` and where each character shows.
@@ -2035,9 +2075,70 @@ impl Drop for Vt {
     }
 }
 
+fn row_wraps(reference: &GhosttyGridRef) -> bool {
+    let mut row: GhosttyRow = Default::default();
+    let mut wrapped = false;
+    unsafe {
+        ghostty_grid_ref_row(reference, &mut row) == GHOSTTY_SUCCESS
+            && ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP, &mut wrapped as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+            && wrapped
+    }
+}
+
+fn cell_grapheme(reference: &GhosttyGridRef) -> String {
+    let mut stack = [0; 16];
+    let mut len = 0;
+    let result = unsafe { ghostty_grid_ref_graphemes(reference, stack.as_mut_ptr(), stack.len(), &mut len) };
+    match result {
+        GHOSTTY_SUCCESS => stack[..len].iter().filter_map(|&cp| char::from_u32(cp)).collect(),
+        GHOSTTY_OUT_OF_SPACE => {
+            let mut buffer = vec![0; len];
+            let result = unsafe { ghostty_grid_ref_graphemes(reference, buffer.as_mut_ptr(), buffer.len(), &mut len) };
+            if result != GHOSTTY_SUCCESS {
+                return String::new();
+            }
+            buffer.into_iter().take(len).filter_map(char::from_u32).collect()
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_rows_read_history_graphemes_and_wrap_without_spacer_cells() {
+        let mut vt = Vt::new(5, 2);
+        vt.write("a\u{301}xyz界!\r\nlast".as_bytes());
+        let text = vt.text_rows(0, 2);
+        assert_eq!(text.total, 3);
+        let [head, tail] = text.rows.as_slice() else { panic!("expected two rows") };
+        assert!(head.wrapped);
+        assert!(!tail.wrapped);
+        let cells = |row: &TextRow| row.cells.iter().map(|c| (c.text.clone(), c.wide)).collect::<Vec<_>>();
+        assert_eq!(cells(head), [("a\u{301}".into(), false), ("x".into(), false), ("y".into(), false), ("z".into(), false)]);
+        assert_eq!(cells(tail), [("界".into(), true), ("!".into(), false), ("".into(), false), ("".into(), false)]);
+        assert!(vt.text_rows(3, 1).rows.is_empty());
+        assert!(vt.text_rows(0, 0).rows.is_empty());
+
+        vt.write(b"\x1b[?1049h\x1b[Halt");
+        let alt = vt.text_rows(0, 1);
+        assert_eq!(alt.total, 2);
+        assert_eq!(alt.rows[0].cells[0].text, "a");
+    }
+
+    #[test]
+    fn terminal_rows_cap_large_reads() {
+        let mut vt = Vt::new(10, 4);
+        for line in 0..200 {
+            vt.write(format!("{line:03}\r\n").as_bytes());
+        }
+        let result = vt.text_rows(20, u64::MAX);
+        assert_eq!(result.total, 201);
+        assert_eq!(result.rows.len(), MAX_TERMINAL_ROWS as usize);
+        assert_eq!(result.rows[0].cells[1].text, "2");
+    }
 
     #[test]
     fn keyboard_selection_tracks_history_while_output_arrives() {

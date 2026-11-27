@@ -560,6 +560,11 @@ impl TerminalView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn ingest_test_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        assert!(self.ingest([Stream::Data(bytes.to_vec())], cx));
+    }
+
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
@@ -1106,6 +1111,10 @@ impl TerminalView {
         drop(g);
         self.publish_scroll_if_changed(cx);
         cx.notify();
+    }
+
+    pub fn text_rows(&self, from: u64, count: u64) -> vt::TextRows {
+        self.grid.borrow().vt.text_rows(from, count)
     }
 
     /// History scroll metrics for mods (`panes().scroll`). None on the alternate screen.

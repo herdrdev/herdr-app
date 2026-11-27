@@ -113,6 +113,9 @@ These add no default keys or built-in copy mode. Mods read the inclusive selecti
 endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update
 when the selection changes, without refreshing readers on ordinary terminal output.
+A copy-mode mod can read an attached view with `terminalRows(terminal, from, count)`.
+It returns up to 128 rows at a time in the same coordinate space as the selection,
+with cell text, wide-character flags, and soft-wrap boundaries.
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
