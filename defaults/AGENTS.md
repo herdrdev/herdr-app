@@ -659,7 +659,7 @@ The main ones:
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
   find bar state stays with that terminal), `terminal.select_all {terminal?}` (selects the whole
   screen and scrollback for copying; only the alternate screen in vim and similar apps;
-  Cmd+A on macOS, no default on Linux/Windows), `terminal.copy`, `terminal.paste` (copied
+  Cmd+A on macOS, no default on Linux/Windows), `terminal.copy {terminal?}`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
   alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
   image, into a terminal on another machine: copied there, its path pasted; on
@@ -679,7 +679,7 @@ The main ones:
   home, end, line_start, line_end; moves the selection's end and follows it in the view;
   fails with no selection), `terminal.clear_selection {terminal?}`.
   These default to the focused terminal, like scroll, and add no default keys or copy mode.
-  `terminal.copy` copies the focused terminal's selection. `terminals()` and `focused()` expose
+  `terminal.copy` copies that terminal's selection. `terminals()` and `focused()` expose
   `selection: {start: {row, col}, end: {row, col}} | null` when the selection changes.
   Start at the cursor with `terminal.select`; use `selection.end` as a copy-mode cursor.
   Cells are zero-based; rows count from the oldest retained history through the active screen,

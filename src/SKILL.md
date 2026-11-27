@@ -102,7 +102,7 @@ count from the oldest retained history through the active screen. Word and line
 match double/triple click. `terminal.adjust_selection {terminal?, direction}` moves
 the inclusive moving end and follows it in the view: left, right, up, down, page_up,
 page_down, home, end, line_start, line_end. It fails without a selection.
-`terminal.clear_selection {terminal?}` clears it; `terminal.copy` copies the focused terminal's selection.
+`terminal.clear_selection {terminal?}` clears it; `terminal.copy {terminal?}` copies it.
 These add no default keys or built-in copy mode. Mods read the inclusive selection
 endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update

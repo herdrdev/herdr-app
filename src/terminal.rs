@@ -529,6 +529,11 @@ impl TerminalView {
         (grid.vt.cols, grid.vt.rows)
     }
 
+    #[cfg(test)]
+    pub(crate) fn write_output(&self, bytes: &[u8]) {
+        self.grid.borrow_mut().vt.write(bytes);
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
