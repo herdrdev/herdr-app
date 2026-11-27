@@ -118,6 +118,39 @@ function textOf(node: any): string {
   return typeof node === "string" ? node : (node?.children ?? []).map(textOf).join(" ");
 }
 
+test("the sidebar toggle folds main to its rail and the expand button restores the previous width", async () => {
+  const chromeSource = (await readFile(new URL("../defaults/mods/workspace-chrome/main.js", import.meta.url), "utf8"))
+    .replace(/^import .*;\n/gm, "").replace("export default class WorkspaceChrome", "class WorkspaceChrome");
+  const button = (node: any, id: string): any => node?.id === id ? node : node?.children?.map((c: any) => button(c, id)).find(Boolean);
+  for (const [name, platform, rail] of [["main", "macos", 44], [null, "macos", 44], ["personal", "macos", 76], ["main", "linux", 44]] as const) {
+    let width = 312;
+    const state = new Map<string, unknown>([["layout", name]]);
+    const globals = {
+      layout: () => ({ id: "sidebar", size: { px: width }, min: 44 }), window: () => ({ platform }),
+      shared: (key: string) => state.get(key), setShared: (key: string, v: unknown) => state.set(key, v),
+      theme: () => ({}), div: element, v_flex: element, h_flex: element, svg: element, image: element,
+    };
+    const resize = (command: string, args: { id: string; px: number }) => {
+      expect([command, args.id]).toEqual(["layout.resize", "sidebar"]); width = args.px;
+    };
+    const Chrome = new Function("View", "props", "run", ...Object.keys(globals), `${chromeSource}; return WorkspaceChrome;`)(class {}, () => ({}), resize, ...Object.values(globals));
+    const chrome = new Chrome();
+    button(chrome.render().node, "sidebar-toggle").click();
+    expect(width).toBe(rail);
+    expect(state.get("sidebar.collapsed")).toBe(true);
+    expect(state.get("sidebar.width")).toBe(312);
+    if (platform === "macos") {
+      const { agents, writes } = harness([], { ...globals, agents: () => [], terminals: () => [], panes: () => [], spaces: () => [], focused: () => null, setAgentOrder() {} });
+      button(agents.render({}).node, "collapse").click();
+      expect(writes).toEqual([["layout.resize", { id: "sidebar", px: 312 }]]);
+    } else {
+      button(chrome.render().node, "sidebar-toggle").click();
+      expect(width).toBe(312);
+    }
+    expect(state.get("sidebar.collapsed")).toBe(false);
+  }
+});
+
 test("a failed agent check keeps cached launchable agents and shows an error instead of missing agents", async () => {
   const menuSource = (await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8"))
     .replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "class NewMenu");

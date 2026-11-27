@@ -14,13 +14,17 @@ function find(node, id) {
 // The sidebar's rail goes by its width, not a flag: dragging its edge narrows it too.
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 
-// To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
 function toggleSidebar() {
-  const width = find(layout(), "sidebar")?.size?.px;
-  if (!narrow()) setShared("sidebar.width", width);
+  const sidebar = find(layout(), "sidebar");
+  const width = sidebar?.size?.px;
+  const collapsed = (width ?? Infinity) < 160;
+  if (!collapsed) setShared("sidebar.width", width);
   // Mods edited before the rail went by width still read the flag.
-  setShared("sidebar.collapsed", !narrow());
-  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
+  setShared("sidebar.collapsed", !collapsed);
+  // Main folds to the same minimum as a divider drag; leave personal layouts alone.
+  const main = (shared("layout") ?? "main") === "main";
+  const rail = main ? (sidebar?.min ?? 44) : window()?.platform === "macos" ? 76 : 44;
+  run("layout.resize", { id: "sidebar", px: collapsed ? (shared("sidebar.width") ?? 268) : rail });
 }
 
 export default class WorkspaceChrome extends View {
