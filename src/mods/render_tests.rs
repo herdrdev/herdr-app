@@ -1716,3 +1716,55 @@ fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppConte
     assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
     assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
 }
+
+fn render_agent_tree(cx: &mut TestAppContext, parent: &str, child: &str) -> String {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.get_mut("agents").unwrap()[0]["status"] = json!(parent);
+    values.get_mut("agents").unwrap()[0]["space_name"] = json!("Parent space");
+    values.get_mut("agents").unwrap()[1]["space_name"] = json!("Independent space");
+    values.get_mut("terminals").unwrap().as_array_mut().unwrap().extend([
+        json!({"address":"t3","parent":"t1","state":"live","status":"idle","title":"Middle task"}),
+        json!({"address":"t4","parent":"t3","state":"live","status":child,"title":"Nested task"}),
+    ]);
+    describe_with_values(cx, &staged, "mods/agents", values, None).unwrap()
+}
+
+#[gpui::test]
+fn agents_keep_unseen_parents_in_working_while_descendants_run(cx: &mut TestAppContext) {
+    let tree = render_agent_tree(cx, "done", "working");
+    let failure = "the live descendant must keep the parent in Working";
+    let independent = tree.find("Independent space").expect(failure);
+    let working = tree.find("Working").unwrap_or_else(|| panic!("{failure}: {tree}"));
+    let parent = tree.find("Parent space").expect(failure);
+    assert!(independent < working && working < parent, "{failure}: {tree}");
+
+    let row = |tree: String| {
+        let (_, row) = tree.split_once("ag-t1").unwrap();
+        let (row, _) = row.split_once("sub-t3").unwrap();
+        row.to_owned()
+    };
+    let unseen = row(tree);
+    let seen_tree = render_agent_tree(cx, "idle", "working");
+    assert!(seen_tree.find("Working").unwrap() < seen_tree.find("Parent space").unwrap(), "{seen_tree}");
+    let seen = row(seen_tree);
+    assert!(unseen.contains(".border[Number(1.5)]"), "parent should have an idle ring: {unseen}");
+    assert!(seen.contains(".border[Number(1.5)]"), "seen parent keeps its idle ring: {seen}");
+}
+
+#[gpui::test]
+fn agents_restore_unseen_parent_done_after_descendants_finish(cx: &mut TestAppContext) {
+    let tree = render_agent_tree(cx, "done", "done");
+    assert!(!tree.contains("Working"), "{tree}");
+    assert!(tree.find("Done").unwrap() < tree.find("Parent space").unwrap(), "{tree}");
+}
+
+#[gpui::test]
+fn agents_keep_blocked_descendants_above_unrelated_done_agents(cx: &mut TestAppContext) {
+    let tree = render_agent_tree(cx, "done", "blocked");
+    let blocked = tree.find("Needs you").unwrap();
+    let parent = tree.find("Parent space").unwrap();
+    let independent = tree.find("Independent space").unwrap();
+    assert!(blocked < parent && parent < independent, "{tree}");
+}
