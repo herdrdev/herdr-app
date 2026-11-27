@@ -6,6 +6,9 @@ type Handler = (event: unknown) => void;
 class Element {
   nodes: Element[] = [];
   calls: Record<string, unknown[]> = {};
+  // `calls` keeps the last registration per method; listeners keeps every one,
+  // so a button handler can be picked out of several on_mouse_down calls.
+  listeners: Record<string, unknown[][]> = {};
   findById(id: string): Element | undefined {
     if (this.calls.id?.[0] === id) return this;
     for (const child of this.nodes) {
@@ -19,7 +22,7 @@ class Element {
         if (key === "child") target.nodes.push(args[0] as Element);
         else if (key === "children") target.nodes.push(...(args[0] as Element[]));
         else if (key === "when") { if (args[0]) (args[1] as (el: Element) => void)(proxy); }
-        else target.calls[key] = args;
+        else { (target.listeners[key] ??= []).push(args); target.calls[key] = args; }
         return proxy;
       },
     });
@@ -29,12 +32,13 @@ class Element {
 const source = await readFile(new URL("../defaults/mods/tabs/main.js", import.meta.url), "utf8");
 const element = () => new Element();
 const commands: string[] = [];
+const runs: { command: string; args?: unknown }[] = [];
 const store: Record<string, string> = {};
 const values: Record<string, unknown> = {
   View: class {}, div: element, svg: element, image: element, h_flex: element,
   ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
   spaces: () => [{ id: "s1", active: true, tabs: [{ id: "t1", name: "a" }, { id: "t2", name: "b", active: true }, { id: "t3", name: "c" }] }],
-  panes: () => [], run(command: string) { commands.push(command); }, openOverlay() {}, theme: () => ({}),
+  panes: () => [], run(command: string, args?: unknown) { commands.push(command); runs.push({ command, args }); }, openOverlay() {}, theme: () => ({}),
   window: () => null, shared: () => null, layout: () => null, settings: () => ({ zoom: 1 }),
   localStorage: { getItem: (key: string) => store[key] ?? null, setItem(key: string, value: string) { store[key] = value; } },
 };
@@ -52,7 +56,7 @@ function wheel() {
     handler({ delta: { x: 0, y }, delta_lines: lines === undefined ? undefined : { x: 0, y: lines }, touch_phase });
   };
 }
-beforeEach(() => { commands.length = 0; });
+beforeEach(() => { commands.length = 0; runs.length = 0; });
 // Bun runs every test file in one process: give the later ones the real clock.
 afterAll(() => setSystemTime());
 
@@ -174,4 +178,17 @@ test("a shell's title never replaces its tab's name", () => {
   expect(label({ name: "", named: false }, shell)).toBe("zsh");
   expect(label({ name: "notes", named: true }, shell)).toBe("notes");
   expect(label({ name: "", named: false }, undefined)).toBe("Terminal");
+});
+
+test("a middle click closes the tab it hit, not the one on screen", () => {
+  const view = new Tabs();
+  view.init();
+  const element = (view.render() as Element).findById("tab-t1");
+  expect(element).toBeDefined();
+  const middle = element!.listeners.on_mouse_down?.find(([button]) => button === "middle");
+  expect(middle).toBeDefined();
+  let stopped = false;
+  (middle![1] as (event: unknown, cx: { stop_propagation(): void }) => void)({}, { stop_propagation() { stopped = true; } });
+  expect(stopped).toBe(true);
+  expect(runs).toEqual([{ command: "tab.close", args: { id: "t1" } }]);
 });

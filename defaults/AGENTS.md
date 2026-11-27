@@ -128,6 +128,7 @@ the highlighted line shows where it will land.
   `recent`).
   The + menu opens agents in unnamed tabs. The tab bar follows the
   agent and shows the shell again after exit. Double-click a tab to set its name.
+  Middle-click a tab to close it, as the × does.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
