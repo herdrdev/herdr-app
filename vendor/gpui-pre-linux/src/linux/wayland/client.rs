@@ -393,6 +393,7 @@ pub(crate) struct WaylandClientState {
     horizontal_modifier: f32,
     scroll_event_received: bool,
     enter_token: Option<()>,
+    // Distinct evdev buttons can map to the same GPUI button.
     pressed_buttons: SmallVec<[u32; 3]>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
@@ -788,6 +789,7 @@ impl WaylandClientStatePtr {
     }
 
     fn cancel_touches(client: &RefCell<WaylandClientState>) {
+        // Release the client borrow before calling back into GPUI.
         let cancelled = client.borrow_mut().touch.cancel().collect::<SmallVec<[_; 8]>>();
         for (surface, event) in cancelled {
             let window = client.borrow().windows.get(&surface).cloned();
@@ -1205,8 +1207,8 @@ impl WaylandConnection {
                 let mut client = pointer;
                 move |_, queue, _| {
                     let dispatched = queue.dispatch_pending(&mut client)?;
-                    // Mutter and Weston can omit the frame after an up. Finish
-                    // those releases after queued frames and cancels have run.
+                    // Mutter and Weston can omit the frame after a release.
+                    // Wait until the queue is drained so a queued cancel wins.
                     if let Some(state) = client.try_get_client() {
                         let releases = state.borrow_mut().touch.take_unframed_releases();
                         WaylandClientStatePtr::dispatch_touch_updates(&state, releases);
@@ -1954,8 +1956,8 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
             let added = capabilities - state.seat_capabilities;
             state.seat_capabilities = capabilities;
 
-            // Seat announcements describe all capabilities. Adding or removing
-            // touch must not interrupt an existing pointer or keyboard grab.
+            // Seat announcements list every available device. Keep existing
+            // pointer grabs and IME composition intact on touch-only changes.
             if added.contains(wl_seat::Capability::Keyboard) {
                 let keyboard = seat.get_keyboard(qh, ());
 

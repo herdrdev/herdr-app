@@ -548,9 +548,9 @@ struct WaylandTouchGestures;
 #[cfg(feature = "wayland")]
 impl gpui::PlatformGestures for WaylandTouchGestures {
     fn tuning(&self) -> gpui::GestureTuning {
-        // GPUI's fling targets a window position. After a tab or pane switch,
-        // momentum at that position could scroll a different terminal. A
-        // follow-up tap anywhere in the window also catches the fling.
+        // GPUI flings target a window position, which can end up over a
+        // different terminal after a tab switch. A fling also consumes the
+        // next tap anywhere in the window.
         gpui::GestureTuning {
             min_fling_velocity: f32::INFINITY,
             ..gpui::GestureTuning::default()

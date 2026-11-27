@@ -21,6 +21,7 @@ pub(super) enum TouchUpdate<Surface> {
 
 pub(super) struct TouchState<Surface> {
     pending: SmallVec<[TouchUpdate<Surface>; 8]>,
+    // Each Wayland ID retains its original surface and last delivered position.
     active: HashMap<i32, (Surface, TouchEvent)>,
     next_id: u64,
 }
@@ -42,13 +43,14 @@ impl<Surface: Clone + Eq> TouchState<Surface> {
         mem::take(&mut self.pending)
     }
 
+    /// Drains through the last release of a live contact. Any later updates
+    /// stay queued for their frame.
     pub(super) fn take_unframed_releases(&mut self) -> SmallVec<[TouchUpdate<Surface>; 8]> {
-        // A late or duplicate up must not flush updates from an unrelated
-        // contact that is still waiting for its frame.
         let Some(release) = (0..self.pending.len()).rev().find(|&index| {
             let TouchUpdate::Up { id } = self.pending[index] else {
                 return false;
             };
+            // The latest queued down or up overrides the state GPUI has seen.
             self.pending[..index]
                 .iter()
                 .rev()
@@ -102,8 +104,8 @@ impl<Surface: Clone + Eq> TouchState<Surface> {
     }
 
     pub(super) fn cancel(&mut self) -> impl Iterator<Item = (Surface, TouchEvent)> + '_ {
-        // Cancel has no frame terminator. Uncommitted updates, including an
-        // undecided release, must not turn into recognized taps or pans.
+        // A cancel can arrive without a frame. Discard queued updates so a
+        // pending release cannot turn into a tap.
         self.pending.clear();
         self.active.drain().map(|(_, (surface, mut event))| {
             event.phase = TouchPhase::Cancelled;
