@@ -10,6 +10,16 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Content {
+    /// A terminal parked behind a mod in the same pane. The terminal keeps
+    /// running; the pane shows the mod until `pane.restore`. This comes before
+    /// Terminal: untagged matching must not read its extra fields as one.
+    Presented {
+        terminal: String,
+        #[serde(rename = "mod")]
+        name: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        props: Value,
+    },
     Terminal { terminal: String },
     Mod {
         #[serde(rename = "mod")]
@@ -518,9 +528,27 @@ impl Node {
         }
     }
 
+    /// The terminal parked behind a presented mod pane.
+    pub fn presented_terminal(&self) -> Option<&str> {
+        match self.content() {
+            Some(Content::Presented { terminal, .. }) => Some(terminal),
+            _ => None,
+        }
+    }
+
+    /// The mod a block shows, whether it owns the pane or is presented over a
+    /// parked terminal.
+    pub fn mod_parts(&self) -> Option<(&str, &Value)> {
+        match self.content() {
+            Some(Content::Mod { name, props } | Content::Presented { name, props, .. }) => Some((name, props)),
+            _ => None,
+        }
+    }
+
     /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
+    /// A presented mod is a pane whose terminal is parked.
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. } | Content::Presented { .. }))
     }
 
     pub fn closable(&self) -> bool {
@@ -794,6 +822,21 @@ mod tests {
         assert_eq!(snap(600.0, 5.0, 1200.0, 800.0), (Edge::Top, Align::Center));
         assert_eq!(snap(1000.0, 790.0, 1200.0, 800.0), (Edge::Bottom, Align::End));
         assert_eq!(snap(-50.0, 900.0, 1200.0, 800.0).1, Align::End);
+    }
+
+    #[test]
+    fn presented_panes_keep_the_parked_terminal_and_mod() {
+        let n = Node::block("p", Content::Presented {
+            terminal: "t1".into(),
+            name: "viewer".into(),
+            props: serde_json::json!({ "file": "README.md" }),
+        });
+        assert!(n.is_pane());
+        assert_eq!(n.terminal(), None);
+        assert_eq!(n.presented_terminal(), Some("t1"));
+        assert_eq!(n.mod_parts().map(|(name, _)| name), Some("viewer"));
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]

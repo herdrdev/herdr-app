@@ -113,6 +113,24 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `mod` | no |
 | `props` | no |
 
+## `pane.present`
+
+Show a mod in a terminal's pane (default: the focused one), in place; the terminal keeps running, parked, and comes back with pane.restore or when the pane closes.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `mod` | yes |
+| `props` | no |
+
+## `pane.restore`
+
+Restore the terminal parked behind a presented mod pane.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `pane.close`
 
 Close a pane and end its terminal.

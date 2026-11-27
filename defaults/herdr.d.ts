@@ -68,7 +68,8 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.present {pane?, mod, props?},
+ *   pane.restore {pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
@@ -216,8 +217,9 @@ export interface PaneScroll {
 
 export interface PaneInfo {
   pane: string;
-  /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, name, focused and zoomed are set. */
+  /** null for a mod pane (`pane.split {mod}` or `pane.present`): then `mod`
+   *  names it, and only pane, mod, tab, title, name, focused and zoomed are set.
+   *  A presented mod keeps a parked terminal that `pane.restore` brings back. */
   terminal: string | null;
   mod?: string;
   tab: string;

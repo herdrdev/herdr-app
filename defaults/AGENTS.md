@@ -136,7 +136,13 @@ the highlighted line shows where it will land.
   viewer, a board, a git panel): `pane.split {direction, mod, props}`. A
   mod pane splits, zooms, closes and gets a header like any pane, keeps
   the keyboard when clicked, and is saved with its tab; its `props` tell
-  it what to show (a file, a folder). Closing a terminal pane ends its
+  it what to show (a file, a folder). `pane.present {pane, mod, props}`
+  shows a mod in a terminal's existing pane: the pane id, tab and slot stay
+  the same, the terminal keeps running parked (its scrollback included), and
+  `pane.restore` or closing the pane brings the terminal back. A presented
+  pane reports `terminal: null` and its mod name, like a mod pane. Its mod
+  receives `pane` and `terminal` in `props`, alongside the caller's props,
+  so it can identify the terminal it is presenting. Closing a terminal pane ends its
   terminal, and a program exiting closes its pane, even if Herdr was closed.
   Terminal panes are kept by their machine's core (`keep: true`). A lost
   terminal (core crash, reboot, logout) gets a shell in its last folder,
@@ -623,7 +629,10 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.present {pane?, mod, props?}` (show a mod in the pane a terminal already
+  uses, in place; the terminal keeps running parked), `pane.restore {pane?}`
+  (bring that terminal back in the same pane and slot; closing the presented
+  pane restores it too), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
