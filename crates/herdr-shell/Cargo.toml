@@ -71,12 +71,16 @@ semver = "1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
-# HERDR: pure-Rust syntax engine (workspace uses regex-fancy, including Windows).
+# HERDR: pure-Rust syntax engine (regex-fancy, including Windows). Grammars come
+# from two-face, which already embeds syntect's defaults, so default-syntaxes
+# is left off to avoid linking that blob a second time.
 syntect = { version = "5.3.0", default-features = false, features = [
     "parsing",
-    "default-syntaxes",
     "regex-fancy",
 ] }
+# bat's extra syntaxes (TypeScript, TSX). Default features pull Oniguruma;
+# syntect-fancy matches the regex backend above.
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 smol = "2"
 # Only to find the files an SVG image references; GPUI's version, which renders it.
 usvg = { version = "0.46", default-features = false }

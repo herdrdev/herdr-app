@@ -3731,6 +3731,7 @@ dependencies = [
  "tempfile",
  "tracing",
  "tungstenite",
+ "two-face",
  "usvg",
  "wait-timeout",
  "windows 0.58.0",
@@ -8506,6 +8507,17 @@ dependencies = [
  "thiserror 2.0.20",
  "url",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "two-face"
+version = "0.5.2+bat-0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "915be7adc2ff6f4338acbf71f3eda0a146f46003b992a1669c674308610efdac"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "syntect",
 ]
 
 [[package]]
