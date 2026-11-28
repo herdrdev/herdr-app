@@ -1,6 +1,8 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
+    #[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+    println!("cargo:rerun-if-changed=build.rs");
     #[cfg(target_os = "windows")]
     {
         // Compile HLSL shaders
@@ -31,10 +33,11 @@ mod shader_compilation {
         // Define all modules
         let modules = [
             "quad",
+            // HERDR: tiny 2-instruction shader for translucent plain quads on WARP.
             "plain_quad",
+            "opaque_quad",
             "shadow",
-            "path_rasterization",
-            "path_sprite",
+            "path_tile",
             "underline",
             "monochrome_sprite",
             "subpixel_sprite",
@@ -49,18 +52,6 @@ mod shader_compilation {
         for module in modules {
             compile_shader_for_module(
                 module,
-                &out_dir,
-                &fxc_path,
-                shader_path.to_str().unwrap(),
-                &rust_binding_path,
-            );
-        }
-
-        {
-            let shader_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-                .join("src/color_text_raster.hlsl");
-            compile_shader_for_module(
-                "emoji_rasterization",
                 &out_dir,
                 &fxc_path,
                 shader_path.to_str().unwrap(),

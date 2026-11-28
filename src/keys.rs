@@ -165,12 +165,12 @@ fn valid_action(action: &str) -> bool {
 }
 
 /// Reads keys.json, installing or updating untouched defaults, or says what's wrong.
-pub fn load() -> Result<Vec<KeyBinding>, String> {
+pub fn load(cx: &App) -> Result<Vec<KeyBinding>, String> {
     #[cfg(not(target_os = "macos"))]
     let originals = SHIPPED_KEYS;
     #[cfg(target_os = "macos")]
     let originals = SHIPPED_MACOS_KEYS;
-    parse(&load_text(&path(), DEFAULTS, originals)?)
+    parse(&load_text(&path(), DEFAULTS, originals)?, cx)
 }
 
 fn load_text(path: &std::path::Path, defaults: &str, originals: &[&str]) -> Result<String, String> {
@@ -189,7 +189,7 @@ fn load_text(path: &std::path::Path, defaults: &str, originals: &[&str]) -> Resu
     Ok(text)
 }
 
-pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
+pub fn parse(text: &str, cx: &App) -> Result<Vec<KeyBinding>, String> {
     let sections: Sections = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut problems = Vec::new();
@@ -235,7 +235,7 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                 let native: Option<Box<dyn gpui::Action>> = None;
                 native.unwrap_or_else(|| Box::new(ShellAction::new(action.clone())))
             };
-            let binding = KeyBinding::load(keys, action, predicate.clone(), false, None, &gpui::DummyKeyboardMapper);
+            let binding = KeyBinding::load_with_dummy_mapper(keys, action, predicate.clone(), false, None, cx.platform_info().os);
             match binding {
                 Ok(b) => out.push(b),
                 Err(e) => problems.push(format!("{section}.{keys}: {e}")),
@@ -310,14 +310,14 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn mac_shifted_punctuation_matches_existing_keys_files() {
-        use gpui::{KeybindingKeystroke, Keystroke};
-        let bindings = super::parse(include_str!("../defaults/keys.macos.json")).unwrap();
+    #[gpui::test]
+    fn mac_shifted_punctuation_matches_existing_keys_files(cx: &mut gpui::TestAppContext) {
+        use gpui::{KeybindingKeystroke, Keystroke, OperatingSystem};
+        let bindings = cx.read(|cx| super::parse(include_str!("../defaults/keys.macos.json"), cx)).unwrap();
         for (base, shifted) in [("]", "}"), ("[", "{")] {
             let event = Keystroke {
                 unshifted_key: Some(base.into()),
-                ..Keystroke::parse(&format!("cmd-{shifted}")).unwrap()
+                ..Keystroke::parse_with_os(&format!("cmd-{shifted}"), OperatingSystem::Mac).unwrap()
             };
             assert!(bindings.iter().any(|binding| binding.match_keystrokes(&[event.clone()]) == Some(false)));
         }
@@ -325,10 +325,10 @@ mod tests {
         for (base, shifted) in [("=", "+"), ("-", "_"), ("ö", "Ö"), ("č", "Č"), ("7", "/")] {
             let event = Keystroke {
                 unshifted_key: Some(base.into()),
-                ..Keystroke::parse(&format!("cmd-{shifted}")).unwrap()
+                ..Keystroke::parse_with_os(&format!("cmd-{shifted}"), OperatingSystem::Mac).unwrap()
             };
             for keys in [format!("cmd-shift-{base}"), format!("cmd-{shifted}")] {
-                let target = KeybindingKeystroke::from_keystroke(Keystroke::parse(&keys).unwrap());
+                let target = KeybindingKeystroke::from_keystroke(Keystroke::parse_with_os(&keys, OperatingSystem::Mac).unwrap());
                 assert!(event.should_match(&target), "{keys}");
             }
         }
@@ -337,8 +337,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_help_binding_matches_shifted_slash() {
+    #[gpui::test]
+    fn linux_help_binding_matches_shifted_slash(cx: &mut gpui::TestAppContext) {
         // Linux reports Ctrl+Shift+/ as Ctrl+? without the Shift modifier.
         let event = gpui::Keystroke::parse("ctrl-?").unwrap();
         let defaults: serde_json::Value = serde_json::from_str(super::DEFAULTS).unwrap();
@@ -346,34 +346,34 @@ mod tests {
             .filter(|(_, action)| action.as_str() == Some("app.help"))
             .map(|(keys, action)| (keys.clone(), action.clone()))
             .collect::<serde_json::Map<_, _>>();
-        let bindings = super::parse(&serde_json::json!({ "global": help }).to_string()).unwrap();
+        let bindings = cx.read(|cx| super::parse(&serde_json::json!({ "global": help }).to_string(), cx)).unwrap();
         assert!(bindings.iter().any(|binding| binding.match_keystrokes(&[event.clone()]) == Some(false)));
     }
 
-    #[test]
-    fn object_bindings_pass_named_typed_arguments() {
+    #[gpui::test]
+    fn object_bindings_pass_named_typed_arguments(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
         for (name, args) in [
             ("layout.resize", json!({"id":"sidebar", "px":240})),
             ("tab.new", json!({"mod":"editor", "props":{"enabled":true, "items":[1,null,"a:b"]}})),
             ("app.help", json!({})),
         ] {
-            let bindings = super::parse(&json!({"global":{"f6":{"command":name,"args":args}}}).to_string()).unwrap();
+            let bindings = cx.read(|cx| super::parse(&json!({"global":{"f6":{"command":name,"args":args}}}).to_string(), cx)).unwrap();
             assert_eq!(bindings.len(), 1);
             let action = bindings[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
             assert_eq!(action.command().unwrap(), (name.into(), args));
         }
-        let bindings = super::parse(r#"{"global":{"f6":{"command":"app.help"}}}"#).unwrap();
+        let bindings = cx.read(|cx| super::parse(r#"{"global":{"f6":{"command":"app.help"}}}"#, cx)).unwrap();
         let action = bindings[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
         assert_eq!(action.command().unwrap(), ("app.help".into(), json!({})));
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn object_bindings_resolve_native_app_actions_after_validation() {
+    #[gpui::test]
+    fn object_bindings_resolve_native_app_actions_after_validation(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
         for name in ["app.quit", "app.hide", "app.hide_others", "app.show_all", "app.settings"] {
-            let bindings = super::parse(&json!({"global":{"f6":{"command":name}}}).to_string()).unwrap();
+            let bindings = cx.read(|cx| super::parse(&json!({"global":{"f6":{"command":name}}}).to_string(), cx)).unwrap();
             let action = bindings[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
             let (command, args) = action.command().unwrap();
             assert_eq!(args, json!({}));
@@ -385,8 +385,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bad_object_bindings_stay_bound_for_error_toasts() {
+    #[gpui::test]
+    fn bad_object_bindings_stay_bound_for_error_toasts(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
         for value in [
             json!({}), json!({"command":3}), json!({"command":"unknown"}),
@@ -398,7 +398,7 @@ mod tests {
             json!({"command":"layout.resize","args":{"typo":240}}),
             json!({"command":"layout.resize","args":{"id":123,"px":240}}),
         ] {
-            let bindings = super::parse(&json!({"terminal":{"f6":value}}).to_string()).unwrap();
+            let bindings = cx.read(|cx| super::parse(&json!({"terminal":{"f6":value}}).to_string(), cx)).unwrap();
             assert_eq!(bindings.len(), 1, "{value}");
             assert_eq!(bindings[0].match_keystrokes(&[gpui::Keystroke::parse("f6").unwrap()]), Some(false));
             let action = bindings[0].action().as_any().downcast_ref::<super::CommandBinding>().unwrap();
@@ -406,14 +406,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn colon_payloads_stay_literal_including_valid_and_invalid_json() {
+    #[gpui::test]
+    fn colon_payloads_stay_literal_including_valid_and_invalid_json(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
         for value in ["{work}", "{}", "{", "  {bad}", r#"{"name":"work"}"#,
             r#"{"name":"work",}"#, r#"{"name":"work"} trailing"#,
             "hello:world", "", "3", "-1", "true", "null", "[]", "[broken", r#""name""#] {
             let action = format!("space.new:{value}");
-            let bindings = super::parse(&json!({"global":{"f6":action}}).to_string()).unwrap();
+            let bindings = cx.read(|cx| super::parse(&json!({"global":{"f6":action}}).to_string(), cx)).unwrap();
             let bound = bindings[0].action().as_any().downcast_ref::<herdr_shell::action::ShellAction>().unwrap();
             assert_eq!(bound.id(), action);
             let (name, payload) = bound.id().split_once(':').unwrap();
@@ -422,10 +422,46 @@ mod tests {
         assert_eq!(crate::commands::shorthand(crate::commands::find("tab.select").unwrap(), "3"), json!({"index":3}));
     }
 
-    #[test]
-    fn shipped_keys_load() {
+    #[gpui::test]
+    fn shipped_keys_load(cx: &mut gpui::TestAppContext) {
         for keys in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
-            assert_eq!(super::parse(keys).err(), None);
+            assert_eq!(cx.read(|cx| super::parse(keys, cx)).err(), None);
         }
+    }
+
+    #[gpui::test]
+    fn keys_parse_uses_dummy_mapper_even_when_platform_mapper_rewrites_shifted_keys(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Simulates WindowsKeyboardMapper rewriting `ctrl-shift-/` -> `ctrl-?`.
+        let bindings = cx.update(|cx| {
+            cx.set_key_equivalent_mapper(|mut keystroke, _use_key_equivalents| {
+                if keystroke.modifiers.shift && keystroke.key == "/" {
+                    keystroke.modifiers.shift = false;
+                    keystroke.key = "?".into();
+                }
+                gpui::KeybindingKeystroke::from_keystroke(keystroke)
+            });
+            // Sanity check: KeyBinding::load WOULD rewrite ctrl-shift-/ under this mapper.
+            let mapped = gpui::KeyBinding::load(
+                "ctrl-shift-/",
+                Box::new(gpui::NoAction),
+                None,
+                false,
+                None,
+                cx,
+            )
+            .unwrap();
+            assert_eq!(mapped.keystrokes()[0].inner().key, "?");
+            assert!(!mapped.keystrokes()[0].inner().modifiers.shift);
+
+            // Real caller under test: keys::parse must bypass the rewriting mapper.
+            super::parse(r#"{"global":{"ctrl-shift-/":"app.help"}}"#, cx).unwrap()
+        });
+        assert_eq!(bindings.len(), 1);
+        let stroke = bindings[0].keystrokes()[0].inner();
+        assert_eq!(stroke.key, "/");
+        assert!(stroke.modifiers.control);
+        assert!(stroke.modifiers.shift);
     }
 }

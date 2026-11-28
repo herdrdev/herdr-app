@@ -13,6 +13,7 @@ pub struct XimHandler {
     pub im_id: u16,
     pub ic_id: u16,
     pub connected: bool,
+    // HERDR: defer set_focus until handle_create_ic completes.
     pub focused: bool,
     pub window: xproto::Window,
     pub last_callback_event: Option<XimCallbackEvent>,

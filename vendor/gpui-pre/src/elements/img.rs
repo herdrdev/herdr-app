@@ -1,23 +1,19 @@
 use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
-    decode_static_image_from_decoder, px,
+    Interactivity, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource, SharedString,
+    SharedUri, StyleRefinement, Styled, Task, Window, decode_gif_first_frame, decode_static_image,
+    decode_webp_first_frame, px,
 };
 use anyhow::Result;
 
 use futures::Future;
 use gpui_util::ResultExt;
-use image::{
-    AnimationDecoder, ImageError, ImageFormat, Rgba,
-    codecs::{gif::GifDecoder, webp::WebPDecoder},
-};
+use image::{ImageError, ImageFormat};
 use scheduler::Instant;
-use smallvec::SmallVec;
 use std::{
     fs,
-    io::{self, Cursor},
+    io::{self},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     str::FromStr,
@@ -36,6 +32,7 @@ pub const LOADING_DELAY: Duration = Duration::from_millis(200);
 /// Note: that this is only for Resources, like URLs or file paths.
 /// Custom loaders, or external images will not use this asset loader
 pub type ImgResourceLoader = AssetLogger<ImageAssetLoader>;
+// HERDR: cached image load handle tracked per window.
 pub(crate) type ImageLoad = crate::asset_cache::CachedLoad<Result<Arc<RenderImage>, ImageCacheError>>;
 
 /// A source of image content.
@@ -316,8 +313,16 @@ impl Element for Img {
                         cx,
                     ) {
                         Some(Ok(mut data)) => {
-                            if global_id.is_some() && data.has_animation() && !cx.reduce_motion()
-                                && let Some(Ok(animation)) = window.image_asset::<ImageAnimationLoader>(&AnimationSource(data.clone()), true, cx)
+                            // HERDR: decode animated frames lazily only when displayed and motion is enabled.
+                            if global_id.is_some()
+                                && data.has_animation()
+                                && !cx.reduce_motion()
+                                && let Some(Ok(animation)) = window
+                                    .image_asset::<ImageAnimationLoader>(
+                                        &AnimationSource(data.clone()),
+                                        true,
+                                        cx,
+                                    )
                             {
                                 data = animation;
                             }
@@ -524,14 +529,6 @@ impl InteractiveElement for Img {
     }
 }
 
-impl IntoElement for Img {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl StatefulInteractiveElement for Img {}
 
 impl ImageSource {
@@ -598,6 +595,7 @@ impl ImageSource {
     }
 }
 
+// HERDR: lazy animation frame decoder keyed by the still RenderImage id.
 #[derive(Clone)]
 pub(crate) struct AnimationSource(pub(crate) Arc<RenderImage>);
 
@@ -613,7 +611,10 @@ impl Asset for ImageAnimationLoader {
     type Source = AnimationSource;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
 
-    fn load(source: Self::Source, _cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
+    fn load(
+        source: Self::Source,
+        _cx: &mut App,
+    ) -> impl Future<Output = Self::Output> + Send + 'static {
         async move { Ok(Arc::new(source.0.prepare_animation())) }
     }
 }
@@ -695,72 +696,11 @@ impl Asset for ImageAssetLoader {
             if let Ok(format) = image::guess_format(&bytes) {
                 let mut animated = format == ImageFormat::Gif;
                 let data = match format {
-                    ImageFormat::Gif => {
-                        let decoder = GifDecoder::new(Cursor::new(&bytes))?;
-                        let mut frames = SmallVec::new();
-
-                        for frame in decoder.into_frames() {
-                            match frame {
-                                Ok(mut frame) => {
-                                    // Convert from RGBA to BGRA.
-                                    for pixel in frame.buffer_mut().chunks_exact_mut(4) {
-                                        pixel.swap(0, 2);
-                                    }
-                                    frames.push(frame);
-                                    break;
-                                }
-                                Err(err) => {
-                                    log::debug!(
-                                        "Skipping GIF frame in {source:?} due to decode error: {err}"
-                                    );
-                                }
-                            }
-                        }
-
-                        if frames.is_empty() {
-                            return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                "GIF could not be decoded: all frames failed ({source:?})"
-                            ))));
-                        }
-
-                        frames
-                    }
+                    ImageFormat::Gif => decode_gif_first_frame(&bytes)?,
                     ImageFormat::WebP => {
-                        let mut decoder = WebPDecoder::new(Cursor::new(&bytes))?;
-
-                        animated = decoder.has_animation();
-                        if animated {
-                            let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
-                            let mut frames = SmallVec::new();
-
-                            for frame in decoder.into_frames() {
-                                match frame {
-                                    Ok(mut frame) => {
-                                        // Convert from RGBA to BGRA.
-                                        for pixel in frame.buffer_mut().chunks_exact_mut(4) {
-                                            pixel.swap(0, 2);
-                                        }
-                                        frames.push(frame);
-                                        break;
-                                    }
-                                    Err(err) => {
-                                        log::debug!(
-                                            "Skipping WebP frame in {source:?} due to decode error: {err}"
-                                        );
-                                    }
-                                }
-                            }
-
-                            if frames.is_empty() {
-                                return Err(ImageCacheError::Other(Arc::new(anyhow::anyhow!(
-                                    "WebP could not be decoded: all frames failed ({source:?})"
-                                ))));
-                            }
-
-                            frames
-                        } else {
-                            decode_static_image_from_decoder(decoder)?
-                        }
+                        let (frames, has_animation) = decode_webp_first_frame(&bytes)?;
+                        animated = has_animation;
+                        frames
                     }
                     _ => decode_static_image(&bytes, format)?,
                 };
@@ -768,7 +708,9 @@ impl Asset for ImageAssetLoader {
                 let image = RenderImage::new(data);
                 let image = if animated {
                     image.with_animation(bytes, format)
-                } else { image };
+                } else {
+                    image
+                };
                 Ok(Arc::new(image))
             } else {
                 svg_renderer
@@ -836,8 +778,9 @@ impl From<image::ImageError> for ImageCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
+    use crate::{IntoElement, ParentElement as _, TestAppContext, canvas, div, point, px, size};
     use image::{Frame, ImageBuffer, Rgba};
+    use smallvec::SmallVec;
 
     const TEST_IMG_ID: &str = "test-img";
 

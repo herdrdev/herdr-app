@@ -67,6 +67,10 @@ pub trait InputHighlighter {
 
     fn fold_ranges(&self, text: &Rope) -> Vec<FoldRange>;
 
+    /// Return the fold ranges that touch the lines of `range`, a byte range
+    /// of `text` just edited. The editor drops every candidate on those lines
+    /// before merging these in, so a range ending on them belongs here even
+    /// when its bytes lie outside `range`.
     fn fold_ranges_for_edit(&self, range: Range<usize>, text: &Rope) -> Vec<FoldRange> {
         let _ = range;
         self.fold_ranges(text)
@@ -76,6 +80,7 @@ pub trait InputHighlighter {
 pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighlighter>>>;
 pub type SharedHighlightStyleResolver = Arc<dyn HighlightStyleResolver>;
 pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
+pub type FoldPlaceholderRenderer = Rc<dyn Fn(usize) -> AnyElement>;
 
 /// Where in the syntax tree an offset sits, for editing decisions.
 ///
@@ -140,9 +145,9 @@ impl InputEditorStyle {
         let or = |value: Hsla, fallback: Hsla| if unset(value) { fallback } else { value };
 
         let foreground = or(self.foreground, colors.foreground);
-        // The palette's own selection colour, so an input's highlight matches
-        // the terminal's and a text view's. The text paints after it, so the
-        // highlight cannot hide the glyphs it selects.
+        // HERDR: use the palette's own selection colour, so an input's
+        // highlight matches the terminal's and a text view's. The text paints
+        // after it, so the highlight cannot hide the glyphs it selects.
         let selection = or(self.selection, colors.selection);
 
         Self {
@@ -221,8 +226,8 @@ mod tests {
     fn a_selection_takes_the_palette_selection_token() {
         let tokens = dark();
         let resolved = InputEditorStyle::default().resolved(&tokens);
-        // Not the accent: in a real palette that is a hover wash, often the
-        // same value as the surface, so a selected range looked unselected.
+        // HERDR: not the accent — in a real palette that is a hover wash, often
+        // the same value as the surface, so a selected range looked unselected.
         assert_eq!(resolved.selection, tokens.colors.selection);
         assert_ne!(resolved.selection, tokens.colors.accent);
         assert_eq!(resolved.selection.a, tokens.colors.selection.a);

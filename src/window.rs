@@ -987,7 +987,7 @@ impl AppWindow {
         }
         let k_time = mtime(&crate::keys::path());
         if k_time.is_none() || k_time != self.watched.keys {
-            match crate::keys::load() {
+            match crate::keys::load(cx) {
                 Ok(bindings) => {
                     crate::keys::install(bindings, cx);
                     let _ = std::fs::remove_file(file("keys.error"));
@@ -4991,7 +4991,7 @@ impl AppWindow {
                 .when(!fit_toast, |d| d.flex())
                 .occlude()
                 // The dialog may sit between a card and the stack's scroll area.
-                .when(o.kind == OverlayKind::Toast, |d| d.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                .when(o.kind == OverlayKind::Toast, |d| d.on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                     let delta = event.delta.pixel_delta(window.line_height());
                     let dy = if delta.y.is_zero() { delta.x } else { delta.y };
                     let scroll = &this.toast_scroll;
@@ -5072,7 +5072,7 @@ impl AppWindow {
                 .when(!toasts.is_empty(), |layer| layer.child(
                     div().id(TOAST_STACK_ID).p(shadow).m(-shadow)
                         .min_h_0().overflow_y_scroll().track_scroll(&self.toast_scroll)
-                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
                         .flex().flex_col().items_end().gap(gap)
                         .children(toasts.into_iter().rev()),
                 ))
@@ -5132,11 +5132,6 @@ impl OverlaySlot {
             None => draw(window),
         });
     }
-}
-
-impl IntoElement for OverlaySlot {
-    type Element = Self;
-    fn into_element(self) -> Self { self }
 }
 
 impl Element for OverlaySlot {
@@ -8005,7 +8000,7 @@ export default class Fixture extends View {
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position,
             delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-120.0))),
             ..Default::default()
@@ -8248,7 +8243,7 @@ export default class Probe extends View { render() { return div().child("probe")
             assert_eq!(mounted.len(), 3, "block, float and popup: {mounted:?}");
         });
         for (section, kind, value) in [("mod:zz-probe.off", "mod", name), ("layout:my.copy", "layout", "my.copy")] {
-            let bindings = crate::keys::parse(&json!({ (section): { "f6": "app.help" }, "global": { "f7": "app.help" } }).to_string()).unwrap();
+            let bindings = cx.read(|app| crate::keys::parse(&json!({ (section): { "f6": "app.help" }, "global": { "f7": "app.help" } }).to_string(), app)).unwrap();
             assert_eq!(bindings.len(), 2);
             let predicate = gpui::KeyBindingContextPredicate::Equal(kind.into(), value.into());
             assert!(bindings.iter().any(|binding| binding.predicate().as_deref() == Some(&predicate)));

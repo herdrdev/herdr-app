@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Run vendored gpui-base unit tests against Herdr's patched vendored GPUI crates
+# without dirtying vendor/gpui-kit/ with a nested Cargo.lock or target/.
+# Supported on Linux (where CI runs gpui-base and herdr-shell tests).
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+ws="$root/target/gpui-base-test-ws"
+target_dir="$root/target/gpui-base-test"
+
+extra=()
+if [ "${1:-}" = "--no-opt" ]; then
+  extra+=(--config 'profile.dev.package."*".opt-level=0')
+  shift
+fi
+
+mkdir -p "$ws"
+ln -sfn "$root/vendor/gpui-kit/crates" "$ws/crates"
+
+manifest="$ws/Cargo.toml"
+manifest_tmp="$ws/Cargo.toml.new"
+cat "$root/vendor/gpui-kit/Cargo.toml" > "$manifest_tmp"
+cat >> "$manifest_tmp" << EOF
+
+[patch.crates-io]
+gpui-pre = { path = "$root/vendor/gpui-pre" }
+gpui-pre-wgpu = { path = "$root/vendor/gpui-pre-wgpu" }
+gpui-pre-linux = { path = "$root/vendor/gpui-pre-linux" }
+gpui-pre-apple = { path = "$root/vendor/gpui-pre-apple" }
+gpui-pre-macos = { path = "$root/vendor/gpui-pre-macos" }
+gpui-pre-windows = { path = "$root/vendor/gpui-pre-windows" }
+zed-xim = { path = "$root/vendor/zed-xim" }
+xim-ctext = { path = "$root/vendor/xim-ctext" }
+EOF
+
+if [ ! -f "$manifest" ] || ! cmp -s "$manifest_tmp" "$manifest"; then
+  mv "$manifest_tmp" "$manifest"
+else
+  rm -f "$manifest_tmp"
+fi
+
+# Seed Cargo.lock from the repo root Cargo.lock whenever the root lockfile changes,
+# so shared crates stay pinned to Herdr's exact resolved versions.
+lock_stamp="$ws/.root-cargo-lock"
+if [ ! -f "$ws/Cargo.lock" ] || [ ! -f "$lock_stamp" ] || ! cmp -s "$root/Cargo.lock" "$lock_stamp"; then
+  cp "$root/Cargo.lock" "$ws/Cargo.lock"
+  cp "$root/Cargo.lock" "$lock_stamp"
+fi
+
+exec cargo test \
+  --manifest-path "$manifest" \
+  --target-dir "$target_dir" \
+  "${extra[@]}" \
+  -p gpui-base --lib "$@"

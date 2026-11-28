@@ -2,8 +2,8 @@ Herdr third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: 4feac2839121c2e88d4313e313de8ac1b55c240d43df86d8b0889970c52fcf8b Cargo.lock
-Input-SHA256: 26d779ba9ae8b6dcd4a5ca62e3d66f7385711ac0b06777a124ccdda71aa5aa83 Cargo.toml
+Input-SHA256: ecedf5d93b0c8584fbd8479f39c547a331beac987c23ddcccae9da88b2e925e6 Cargo.lock
+Input-SHA256: 9bd7aff03974b3b74eba715d9690856275cec037a14c24417a700078bd2dfbbd Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
 Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 assets/fonts/LICENSE-SymbolsNerdFont.txt
@@ -11,7 +11,7 @@ Input-SHA256: 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad a
 Input-SHA256: e5e56b793839774266243b8dd89c618f2962f098a2076757a5f2839c27eaaabd assets/fonts/OFL.txt
 Input-SHA256: 9ccb6b1a96db08162bbeea238747fcf1e6d08537260f92529ae2eebe74d0f1b3 crates/ghostty-sys/Cargo.toml
 Input-SHA256: fbc6bf4ca768aadc8a6fed045721777034e8d4e2679af7cac7facac54dbce432 crates/ghostty-sys/build.rs
-Input-SHA256: 366190a5c42d31ed1e26df653d2c5f1b0abfa793eeb0fe53cf39461a50ec68fd crates/herdr-shell/Cargo.toml
+Input-SHA256: 70e4a1252cbf8d3cd3ac0cc79b42ac6f9f3ae1fb15c41ec765d3ee6d25b5c416 crates/herdr-shell/Cargo.toml
 Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 crates/herdr-shell/LICENSE-APACHE
 Input-SHA256: cd6a0e1b53913eb4f2559b79aae3b7877b41e9c559c56a0231501cbd0fe2ad3a crates/herdr-shell/rquickjs-compat/Cargo.toml
 Input-SHA256: add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a defaults/icons/LICENSE-LobeHub.txt
@@ -25,6 +25,7 @@ Input-SHA256: a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499 l
 Input-SHA256: 22c1bd99806822d9b184c4e5079ff3845b1e9fcaaabfd3a6e48dd9f443fd4cff licenses/QuickJS-source.txt
 Input-SHA256: 96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171 licenses/QuickJS.txt
 Input-SHA256: a754355f3b49ef0cd20e2a65f29a45b3164693d1c929474fa90b4e635d9b90a4 licenses/README.md
+Input-SHA256: f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a licenses/Taffy-LICENSE.txt
 Input-SHA256: e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96 licenses/Unicode.txt
 Input-SHA256: 0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594 licenses/Wuffs-LICENSE-APACHE.txt
 Input-SHA256: bb811a4b485eac3caeb8bdc58bbafb355fbcb6116010a7ea9179e5c70b0bc878 licenses/Wuffs-LICENSE-MIT.txt
@@ -32,7 +33,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 5cc983eea257055ae04183e9f066b25b2e8c54293d56cb677debe84ac3d7188c licenses/inventory.json
+Input-SHA256: e8196a18ca8dc6f0422026f525e24cf9ba37c4e1943f9dfc9c6a6f614678db30 licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -50,29 +51,25 @@ Input-SHA256: e9a4a14099a87ae063a84f7d903535dc4d9977d2554775f561db4320436fce69 v
 Input-SHA256: fc90571cbef7acefb618bfef0cf9e301d8609ecfd229f17cfce8a935be6efa28 vendor/ghostty/pkg/wuffs/build.zig.zon
 Input-SHA256: cfaa8ecc23407128fab02c87ef67d9d36ec4c0e43274b359600014a38eb8c89f vendor/ghostty/src/build/GhosttyLibVt.zig
 Input-SHA256: 447c5e414458a29d38e260621e584118e77e02e692e05ffab08107e5ab4f03da vendor/ghostty/src/build/GhosttyZig.zig
-Input-SHA256: c129de2215f9c31cd14df22479a96e9621b1db8c90771b4f1590f122021cc21c vendor/gpui-kit/Cargo.toml
+Input-SHA256: f98869ec6c93ba8130aea60c860302377f20dbf530f2d306111aa5d61537d15f vendor/gpui-kit/Cargo.toml
 Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 vendor/gpui-kit/LICENSE-APACHE
-Input-SHA256: 61bcae330899900cb50eb30be894b46e85d1bcbad8ec119c99fa533f710fd18d vendor/gpui-kit/crates/base/Cargo.toml
+Input-SHA256: 3e1539ae3870dd5f792baf21e904b726635c2ecab9ba82195a56187f38e4a36b vendor/gpui-kit/crates/base/Cargo.toml
 Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 vendor/gpui-kit/crates/base/LICENSE-APACHE
-Input-SHA256: f2eefb822738db27e4ce4b28601c4491f258c51ae52e57d11c98ae03a6100081 vendor/gpui-kit/crates/base/examples/native/Cargo.toml
-Input-SHA256: 81001a9f6c3d868140e0c7c66abcbff8deb4dc00e0fbb68d4a2506d2e2385ea8 vendor/gpui-kit/crates/base/examples/wasm/Cargo.toml
-Input-SHA256: 2ca4d3969f5a62ea841f25868efe6a4c38866f244caffc0affa4af1b25400dad vendor/gpui-kit/crates/fps/Cargo.toml
-Input-SHA256: f00df50e0e437e56cd8475bc78289f57ef00e5d0af0a1a056bf215438bfe5529 vendor/gpui-pre-apple/Cargo.toml
+Input-SHA256: 505ef2dd3cdc534e9e4297ff816c925035fdcae6dbd3152bf5a8faa78d14bb42 vendor/gpui-kit/crates/fps/Cargo.toml
+Input-SHA256: 890ed466279be81fd9ea332f926d367558fdae27027921a5cac8ba9d7129812a vendor/gpui-pre-apple/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-apple/LICENSE-APACHE
-Input-SHA256: 0d4ca250457a2343879236779f72d4a2dbc1dbdb5fc9fec23d59152cce63caf1 vendor/gpui-pre-linux/Cargo.toml
+Input-SHA256: f67695a48ef64dc0004eb066e66e4104042baafb15ce0dbb1bca1f048cc65499 vendor/gpui-pre-linux/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-linux/LICENSE-APACHE
-Input-SHA256: 79043cc6fc3d6533e0264b468916537eb8db3e2d9961dce745517335a6d3f3fd vendor/gpui-pre-macos/Cargo.toml
+Input-SHA256: 36b1147b52f29bb0f2e1783e52b54903802e0a32e43450b54fa2a0babb1d0072 vendor/gpui-pre-macos/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-macos/LICENSE-APACHE
-Input-SHA256: 4a374d428ae871cf9651c79098a9a7a69eee5858a0916e3915130d8f77469816 vendor/gpui-pre-wgpu/Cargo.toml
+Input-SHA256: b2215d5c02b7ceed263cb19a7fc87e25a4ea904b27e9570bab64888b0b9cf78e vendor/gpui-pre-wgpu/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-wgpu/LICENSE-APACHE
-Input-SHA256: 729c498e73ac5cfdd158f04d1781dda3dbc6acf85f72910be64c12639a19a4b4 vendor/gpui-pre-windows/Cargo.toml
+Input-SHA256: a1bd3a6c26cfb927cf58bc26b193bc68ffdbd48c11f52989b755b8a8aa0b28c2 vendor/gpui-pre-windows/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-windows/LICENSE-APACHE
-Input-SHA256: 2c32d9cb11e942a607b3a98ae918ef6a1bbfdefd111f3a99a71711622d7bf972 vendor/gpui-pre/Cargo.toml
+Input-SHA256: fd0385cf550b5c8048651d2e3ffb0ac7fac307df86cdda0dfc2f81f222575e9f vendor/gpui-pre/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre/LICENSE-APACHE
 Input-SHA256: d98d4bb75c6a1f9fcd3d8db8febb95eaa15dbddf1e5ce02c06fd1bf41d33b751 vendor/quickjs-jit-runtime/Cargo.toml
 Input-SHA256: 976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70 vendor/quickjs-jit-runtime/LICENSE
-Input-SHA256: b5f726d2bd6269550f37f6c87697958ed7f43d18c104350211a7b3a6cedcf5d7 vendor/taffy/Cargo.toml
-Input-SHA256: f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a vendor/taffy/LICENSE
 
 Cargo dependencies
 ==================
@@ -7350,7 +7347,6 @@ Apache License 2.0 (Apache-2.0)
   arbitrary 1.4.2 — https://github.com/rust-fuzz/arbitrary/
   arrayvec 0.7.8 — https://github.com/bluss/arrayvec
   async-channel 2.5.0 — https://github.com/smol-rs/async-channel
-  async-compression 0.4.44 — https://github.com/Nullus157/async-compression
   async-executor 1.14.0 — https://github.com/smol-rs/async-executor
   async-fs 2.2.0 — https://github.com/smol-rs/async-fs
   async-io 2.6.0 — https://github.com/smol-rs/async-io
@@ -7368,17 +7364,11 @@ Apache License 2.0 (Apache-2.0)
   bitflags 2.13.1 — https://github.com/bitflags/bitflags
   blocking 1.7.0 — https://github.com/smol-rs/blocking
   bumpalo 3.20.3 — https://github.com/fitzgen/bumpalo
-  bzip2 0.6.1 — https://github.com/trifectatechfoundation/bzip2-rs
   cap-primitives 4.0.3 — https://github.com/bytecodealliance/cap-std
   cap-std 4.0.3 — https://github.com/bytecodealliance/cap-std
   cc 1.2.67 — https://github.com/rust-lang/cc-rs
   cexpr 0.6.0 — https://github.com/jethrogb/rust-cexpr
   cfg-if 1.0.4 — https://github.com/rust-lang/cfg-if
-  cgl 0.3.2 — https://github.com/servo/cgl-rs
-  cocoa-foundation 0.2.1 — https://github.com/servo/core-foundation-rs
-  cocoa 0.26.0 — https://github.com/servo/core-foundation-rs
-  compression-codecs 0.4.39 — https://github.com/Nullus157/async-compression
-  compression-core 0.4.33 — https://github.com/Nullus157/async-compression
   concurrent-queue 2.5.0 — https://github.com/smol-rs/concurrent-queue
   const-random-macro 0.1.16 — https://github.com/tkaitchuck/constrandom
   const-random 0.1.18 — https://github.com/tkaitchuck/constrandom
@@ -7386,10 +7376,8 @@ Apache License 2.0 (Apache-2.0)
   core-foundation 0.10.1 — https://github.com/servo/core-foundation-rs
   core-foundation 0.9.4 — https://github.com/servo/core-foundation-rs
   core-graphics-types 0.2.0 — https://github.com/servo/core-foundation-rs
-  core-graphics2 0.5.2 — https://github.com/rust-media/apple-media-rs
   core-graphics 0.24.0 — https://github.com/servo/core-foundation-rs
   core-text 21.0.0 — https://github.com/servo/core-foundation-rs
-  core-video 0.5.2 — https://github.com/rust-media/apple-media-rs
   crossbeam-deque 0.8.7 — https://github.com/crossbeam-rs/crossbeam
   crossbeam-epoch 0.9.20 — https://github.com/crossbeam-rs/crossbeam
   crossbeam-queue 0.3.13 — https://github.com/crossbeam-rs/crossbeam
@@ -7438,11 +7426,10 @@ Apache License 2.0 (Apache-2.0)
   io-extras 0.19.0 — https://github.com/sunfishcode/io-extras
   io-lifetimes 2.0.4 — https://github.com/sunfishcode/io-lifetimes
   io-lifetimes 3.0.1 — https://github.com/sunfishcode/io-lifetimes
-  io-surface 0.16.1 — https://github.com/servo/core-foundation-rs
   itertools 0.13.0 — https://github.com/rust-itertools/itertools
   itertools 0.14.0 — https://github.com/rust-itertools/itertools
   jobserver 0.1.35 — https://github.com/rust-lang/jobserver-rs
-  js-sys 0.3.98 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
+  js-sys 0.3.107 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
   khronos-egl 6.0.0 — https://github.com/timothee-haudebourg/khronos-egl
   lazy_static 1.5.0 — https://github.com/rust-lang-nursery/lazy-static.rs
   linux-raw-sys 0.12.1 — https://github.com/sunfishcode/linux-raw-sys
@@ -7450,7 +7437,6 @@ Apache License 2.0 (Apache-2.0)
   log 0.4.34 — https://github.com/rust-lang/log
   markup5ever 0.12.1 — https://github.com/servo/html5ever
   markup5ever_rcdom 0.3.0 — https://github.com/servo/html5ever
-  metal 0.33.0 — https://github.com/gfx-rs/metal-rs
   mime 0.3.17 — https://github.com/hyperium/mime
   num-bigint-dig 0.9.1 — https://github.com/dignifiedquire/num-bigint
   num-bigint 0.4.8 — https://github.com/rust-num/num-bigint
@@ -7503,7 +7489,6 @@ Apache License 2.0 (Apache-2.0)
   scopeguard 1.2.0 — https://github.com/bluss/scopeguard
   security-framework-sys 2.17.0 — https://github.com/kornelski/rust-security-framework
   security-framework 3.7.0 — https://github.com/kornelski/rust-security-framework
-  serde_fmt 1.1.0 — https://github.com/KodrAus/serde_fmt.git
   signal-hook-registry 1.4.8 — https://github.com/vorner/signal-hook
   simplecss 0.2.2 — https://github.com/linebender/simplecss
   smallvec 1.15.2 — https://github.com/servo/rust-smallvec
@@ -7531,23 +7516,20 @@ Apache License 2.0 (Apache-2.0)
   unicode-segmentation 1.13.3 — https://github.com/unicode-rs/unicode-segmentation
   unicode-vo 0.1.0 — https://github.com/RazrFalcon/unicode-vo
   unicode-width 0.2.2 — https://github.com/unicode-rs/unicode-width
-  unicode-xid 0.2.6 — https://github.com/unicode-rs/unicode-xid
   url 2.5.8 — https://github.com/servo/rust-url
   uuid 1.26.0 — https://github.com/uuid-rs/uuid
-  value-bag-serde1 1.14.1
-  value-bag 1.14.1 — https://github.com/sval-rs/value-bag
   version_check 0.9.5 — https://github.com/SergioBenitez/version_check
   wait-timeout 0.2.1 — https://github.com/alexcrichton/wait-timeout
   waker-fn 1.2.0 — https://github.com/smol-rs/waker-fn
   wasi 0.11.1+wasi-snapshot-preview1 — https://github.com/bytecodealliance/wasi
   wasip2 1.0.4+wasi-0.2.12 — https://github.com/bytecodealliance/wasi-rs
-  wasm-bindgen-futures 0.4.71 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
-  wasm-bindgen-macro-support 0.2.121 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro-support
-  wasm-bindgen-macro 0.2.121 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
-  wasm-bindgen-shared 0.2.121 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
-  wasm-bindgen 0.2.121 — https://github.com/wasm-bindgen/wasm-bindgen
+  wasm-bindgen-futures 0.4.80 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures
+  wasm-bindgen-macro-support 0.2.130 — https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support
+  wasm-bindgen-macro 0.2.130 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro
+  wasm-bindgen-shared 0.2.130 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared
+  wasm-bindgen 0.2.130 — https://github.com/wasm-bindgen/wasm-bindgen
   wasm_thread 0.3.3 — https://github.com/chemicstry/wasm_thread
-  web-sys 0.3.98 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
+  web-sys 0.3.107 — https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys
   wit-bindgen 0.57.1 — https://github.com/bytecodealliance/wit-bindgen
   xml5ever 0.18.1 — https://github.com/servo/html5ever
   zed-font-kit 0.14.1-zed — https://github.com/servo/font-kit
@@ -7965,9 +7947,9 @@ limitations under the License.
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
+  bit-set 0.10.0 — https://github.com/contain-rs/bit-set
   bit-set 0.11.1 — https://github.com/contain-rs/bit-vec
   bit-set 0.8.0 — https://github.com/contain-rs/bit-set
-  bit-set 0.9.1 — https://github.com/contain-rs/bit-set
   bit-vec 0.10.1 — https://github.com/contain-rs/bit-vec
   bit-vec 0.8.0 — https://github.com/contain-rs/bit-vec
   bit-vec 0.9.1 — https://github.com/contain-rs/bit-vec
@@ -11795,7 +11777,7 @@ Apache License 2.0 (Apache-2.0)
   llrt_utils 0.9.0-beta — https://github.com/awslabs/llrt
   llrt_zlib 0.9.0-beta — https://github.com/awslabs/llrt
   ghostty-sys 0.0.0
-  gpui-fps 0.7.1 — https://github.com/longbridge/gpui-kit/tree/main/crates/fps
+  gpui-fps 0.11.0 — https://github.com/longbridge/gpui-kit/tree/main/crates/fps
   accesskit 0.24.1 — https://github.com/AccessKit/accesskit
   accesskit_atspi_common 0.19.1 — https://github.com/AccessKit/accesskit
   accesskit_consumer 0.38.0 — https://github.com/AccessKit/accesskit
@@ -11816,13 +11798,10 @@ Apache License 2.0 (Apache-2.0)
   dunce 1.0.5 — https://gitlab.com/kornelski/dunce
   dyn-clone 1.0.20 — https://github.com/dtolnay/dyn-clone
   enumn 0.1.14 — https://github.com/dtolnay/enumn
-  erased-serde 0.4.10 — https://github.com/dtolnay/erased-serde
   etagere 0.2.15 — https://github.com/nical/etagere
   fdeflate 0.3.7 — https://github.com/image-rs/fdeflate
   fiat-crypto 0.3.0 — https://github.com/mit-plv/fiat-crypto
   gl_generator 0.14.0 — https://github.com/brendanzab/gl-rs/
-  gpu-descriptor-types 0.2.0 — https://github.com/zakarumych/gpu-descriptor
-  gpu-descriptor 0.3.2 — https://github.com/zakarumych/gpu-descriptor
   half 2.7.1 — https://github.com/VoidStarKat/half-rs
   ident_case 1.0.1 — https://github.com/TedDriggs/ident_case
   image-webp 0.2.4 — https://github.com/image-rs/image-webp
@@ -11831,22 +11810,18 @@ Apache License 2.0 (Apache-2.0)
   itoa 1.0.18 — https://github.com/dtolnay/itoa
   jni-sys-macros 0.4.1 — https://github.com/jni-rs/jni-sys
   khronos_api 3.1.0 — https://github.com/brendanzab/gl-rs/
-  leak 0.1.2 — https://github.com/jmesmon/leak.git
-  leaky-cow 0.1.1 — https://github.com/notriddle/rust-leaky-cow
   libc 0.2.189 — https://github.com/rust-lang/libc
   linebender_resource_handle 0.1.1 — https://github.com/linebender/raw_resource_handle
   litrs 1.0.0 — https://github.com/LukasKalbertodt/litrs
-  lyon 1.0.19 — https://github.com/nical/lyon
-  lyon_algorithms 1.0.21 — https://github.com/nical/lyon
   lyon_geom 1.0.19 — https://github.com/nical/lyon
   lyon_path 1.0.19 — https://github.com/nical/lyon
-  lyon_tessellation 1.0.21 — https://github.com/nical/lyon
   mac-notification-sys 0.6.15 — https://github.com/h4llow3En/mac-notification-sys
   mac 0.1.1 — https://github.com/reem/rust-mac.git
-  mach2 0.5.0 — https://github.com/JohnTitor/mach2
+  mach2 0.6.0 — https://github.com/JohnTitor/mach2
   miniz_oxide 0.8.9 — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
   miniz_oxide 0.9.1 — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
-  naga 29.0.4 — https://github.com/gfx-rs/wgpu
+  naga-types 30.0.2 — https://github.com/gfx-rs/wgpu
+  naga 30.0.2 — https://github.com/gfx-rs/wgpu
   ndk-sys 0.6.0+11769913 — https://github.com/rust-mobile/ndk
   num-conv 0.2.2 — https://github.com/jhpratt/num-conv
   objc2-app-kit 0.3.2 — https://github.com/madsmtm/objc2
@@ -11855,14 +11830,14 @@ Apache License 2.0 (Apache-2.0)
   objc2-core-foundation 0.3.2 — https://github.com/madsmtm/objc2
   objc2-core-graphics 0.3.2 — https://github.com/madsmtm/objc2
   objc2-core-image 0.3.2 — https://github.com/madsmtm/objc2
-  objc2-core-location 0.3.2 — https://github.com/madsmtm/objc2
-  objc2-core-media 0.3.2 — https://github.com/madsmtm/objc2
   objc2-core-text 0.3.2 — https://github.com/madsmtm/objc2
   objc2-core-video 0.3.2 — https://github.com/madsmtm/objc2
   objc2-io-kit 0.3.2 — https://github.com/madsmtm/objc2
   objc2-metal 0.3.2 — https://github.com/madsmtm/objc2
   objc2-quartz-core 0.3.2 — https://github.com/madsmtm/objc2
-  objc2-screen-capture-kit 0.3.2 — https://github.com/madsmtm/objc2
+  objc2-security 0.3.2 — https://github.com/madsmtm/objc2
+  objc2-ui-kit 0.3.2 — https://github.com/madsmtm/objc2
+  objc2-uniform-type-identifiers 0.3.2 — https://github.com/madsmtm/objc2
   objc2-user-notifications 0.3.2 — https://github.com/madsmtm/objc2
   paste 1.0.15 — https://github.com/dtolnay/paste
   pathfinder_geometry 0.5.1 — https://github.com/servo/pathfinder
@@ -11918,20 +11893,19 @@ Apache License 2.0 (Apache-2.0)
   thiserror 2.0.20 — https://github.com/dtolnay/thiserror
   time-core 0.1.9 — https://github.com/time-rs/time
   time 0.3.55 — https://github.com/time-rs/time
-  typeid 1.0.3 — https://github.com/dtolnay/typeid
   unicode-ident 1.0.24 — https://github.com/dtolnay/unicode-ident
   usvg 0.46.0 — https://github.com/linebender/resvg
   utf-8 0.7.6 — https://github.com/SimonSapin/rust-utf8
   wasm-streams 0.4.2 — https://github.com/MattiasBuelens/wasm-streams/
-  wgpu-core-deps-apple 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-core-deps-emscripten 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-core-deps-wasm 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-core-deps-windows-linux-android 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-core 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-hal 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-naga-bridge 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu-types 29.0.4 — https://github.com/gfx-rs/wgpu
-  wgpu 29.0.4 — https://github.com/gfx-rs/wgpu
+  wgpu-core-deps-apple 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-core-deps-emscripten 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-core-deps-wasm 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-core-deps-windows-linux-android 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-core 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-hal 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-naga-bridge 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu-types 30.0.2 — https://github.com/gfx-rs/wgpu
+  wgpu 30.0.2 — https://github.com/gfx-rs/wgpu
   winapi-i686-pc-windows-gnu 0.4.0 — https://github.com/retep998/winapi-rs
   winapi-x86_64-pc-windows-gnu 0.4.0 — https://github.com/retep998/winapi-rs
   zstd-safe 7.2.4 — https://github.com/gyscos/zstd-rs
@@ -12021,28 +11995,26 @@ Apache License 2.0 (Apache-2.0)
   herdr-app 0.1.18
   herdr-app 0.1.18
   herdr-app 0.1.18
-  gpui-pre 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-apple 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-linux 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-macos 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-wgpu 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-windows 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-collections 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-derive-refineable 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-http-client 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-macros 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-perf 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-platform 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-refineable 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-scheduler 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-shared-string 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-sum-tree 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-util-macros 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-util 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-web 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-zlog 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-ztracing-macro 0.3.8 — https://github.com/zed-industries/zed
-  gpui-pre-ztracing 0.3.8 — https://github.com/zed-industries/zed
+  gpui-pre 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-apple 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-linux 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-macos 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-wgpu 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-windows 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-collections 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-derive-refineable 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-http-client 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-ios 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-macros 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-platform 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-refineable 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-scheduler 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-shared-string 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-sum-tree 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-util 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-web 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-ztracing-macro 0.3.14 — https://github.com/zed-industries/zed
+  gpui-pre-ztracing 0.3.14 — https://github.com/zed-industries/zed
 
 Copyright 2022 - 2025 Zed Industries, Inc.
 
@@ -12274,7 +12246,7 @@ Apache License 2.0 (Apache-2.0)
   herdr-app 0.1.18
   herdr-app 0.1.18
   herdr-shell 0.7.1
-  gpui-base 0.7.1 — https://github.com/longbridge/gpui-kit
+  gpui-base 0.11.0 — https://github.com/longbridge/gpui-kit
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
 
@@ -13201,7 +13173,6 @@ For these and/or other purposes and motivations, and without any expectation of 
 
 ----------------------------------------------------------------------
 Creative Commons Zero v1.0 Universal (CC0-1.0)
-  hexf-parse 0.2.1 — https://github.com/lifthrasiir/hexf
   tiny-keccak 2.0.2
 
 Creative Commons Legal Code
@@ -15687,6 +15658,7 @@ DEALINGS IN THE SOFTWARE.
 ----------------------------------------------------------------------
 MIT License (MIT)
   synstructure 0.13.2 — https://github.com/mystor/synstructure
+  synstructure 0.14.0 — https://github.com/mystor/synstructure
 
 Copyright 2016 Nika Layzell
 
@@ -15810,34 +15782,6 @@ MIT License (MIT)
 MIT License
 
 Copyright (c) 2018 PistonDevelopers
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-----------------------------------------------------------------------
-MIT License (MIT)
-  taffy 0.13.0 — https://github.com/DioxusLabs/taffy
-
-MIT License
-
-Copyright (c) 2018 Visly Inc.
-Copyright (c) 2026 Taffy Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -16151,35 +16095,6 @@ SOFTWARE.
 
 ----------------------------------------------------------------------
 MIT License (MIT)
-  float_next_after 1.0.0 — https://gitlab.com/bronsonbdevost/next_afterf
-
-MIT License
-
-Copyright (c) 2020 Scripta Qumranica Electronica
-
-Created by Bronson Brown-deVost
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-----------------------------------------------------------------------
-MIT License (MIT)
   pulp 0.22.3 — https://github.com/sarah-quinones/pulp/
 
 MIT License
@@ -16428,12 +16343,10 @@ MIT License (MIT)
   rquickjs 0.12.9
   base64-simd 0.8.0 — https://github.com/Nugine/simd
   block2 0.6.2 — https://github.com/madsmtm/objc2
-  block 0.1.6 — http://github.com/SSheldon/rust-block
   brotli-decompressor 5.0.3 — https://github.com/dropbox/rust-brotli-decompressor
   harfrust 0.5.2 — https://github.com/harfbuzz/harfrust
   hex-simd 0.8.0 — https://github.com/Nugine/simd
   libm 0.2.16 — https://github.com/rust-lang/compiler-builtins
-  malloc_buf 0.0.6 — https://github.com/SSheldon/malloc_buf
   objc-sys 0.3.5 — https://github.com/madsmtm/objc2
   objc2-app-kit 0.2.2 — https://github.com/madsmtm/objc2
   objc2-encode 4.1.0 — https://github.com/madsmtm/objc2
@@ -16443,6 +16356,7 @@ MIT License (MIT)
   objc2 0.6.4 — https://github.com/madsmtm/objc2
   pulp-wasm-simd-flag 0.1.1 — https://github.com/sarah-quinones/pulp/
   seahash 4.1.0 — https://gitlab.redox-os.org/redox-os/seahash
+  taffy 0.15.1 — https://github.com/DioxusLabs/taffy
   vsimd 0.8.0 — https://github.com/Nugine/simd
   xim-parser 0.2.2 — https://github.com/Riey/xim-rs
 
@@ -16464,33 +16378,6 @@ LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE A
 EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-----------------------------------------------------------------------
-MIT License (MIT)
-  objc 0.2.7 — http://github.com/SSheldon/rust-objc
-
-MIT License
-
-Copyright (c) Steven Sheldon
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 
 ----------------------------------------------------------------------
@@ -16891,6 +16778,10 @@ MIT License (MIT)
   aho-corasick 1.1.5 — https://github.com/BurntSushi/aho-corasick
   byteorder-lite 0.1.0 — https://github.com/image-rs/byteorder-lite
   byteorder 1.5.0 — https://github.com/BurntSushi/byteorder
+  jiff-core 1.0.2 — https://github.com/BurntSushi/jiff
+  jiff-tzdb-platform 1.0.0 — https://github.com/BurntSushi/jiff
+  jiff-tzdb 1.0.0 — https://github.com/BurntSushi/jiff
+  jiff 1.0.3 — https://github.com/BurntSushi/jiff
   memchr 2.8.3 — https://github.com/BurntSushi/memchr
   walkdir 2.5.0 — https://github.com/BurntSushi/walkdir
 
@@ -18382,24 +18273,28 @@ authorization of the copyright holder.
 
 ----------------------------------------------------------------------
 Unicode License v3 (Unicode-3.0)
-  icu_collections 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_locale_core 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_normalizer 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_normalizer_data 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_properties 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_properties_data 2.3.0 — https://github.com/unicode-org/icu4x
-  icu_provider 2.3.1 — https://github.com/unicode-org/icu4x
+  icu_collections 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_locale_core 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_locale_fallback 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_locale_fallback_data 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_normalizer 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_normalizer_data 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_properties 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_properties_data 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_provider 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_segmenter 2.4.0 — https://github.com/unicode-org/icu4x
+  icu_segmenter_data 2.4.0 — https://github.com/unicode-org/icu4x
   litemap 0.8.3 — https://github.com/unicode-org/icu4x
   potential_utf 0.1.6 — https://github.com/unicode-org/icu4x
-  tinystr 0.8.4 — https://github.com/unicode-org/icu4x
+  tinystr 0.8.5 — https://github.com/unicode-org/icu4x
   writeable 0.6.4 — https://github.com/unicode-org/icu4x
-  yoke-derive 0.8.2 — https://github.com/unicode-org/icu4x
-  yoke 0.8.3 — https://github.com/unicode-org/icu4x
+  yoke-derive 0.8.4 — https://github.com/unicode-org/icu4x
+  yoke 0.8.4 — https://github.com/unicode-org/icu4x
   zerofrom-derive 0.1.7 — https://github.com/unicode-org/icu4x
   zerofrom 0.1.8 — https://github.com/unicode-org/icu4x
   zerotrie 0.2.5 — https://github.com/unicode-org/icu4x
-  zerovec-derive 0.11.6 — https://github.com/unicode-org/icu4x
-  zerovec 0.11.8 — https://github.com/unicode-org/icu4x
+  zerovec-derive 0.11.7 — https://github.com/unicode-org/icu4x
+  zerovec 0.11.9 — https://github.com/unicode-org/icu4x
 
 UNICODE LICENSE V3
 
@@ -18498,60 +18393,6 @@ the following restrictions:
     misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
-
-----------------------------------------------------------------------
-bzip2 and libbzip2 License v1.0.6 (bzip2-1.0.6)
-  libbz2-rs-sys 0.2.5 — https://github.com/trifectatechfoundation/libbzip2-rs
-
-
---------------------------------------------------------------------------
-
-The original program, "bzip2", the associated library "libbzip2", and all
-documentation, are
-
-Copyright (C) 1996-2021 Julian R Seward.
-Copyright (C) 2019-2020 Federico Mena Quintero
-Copyright (C) 2021 Micah Snyder
-
-This Rust translation, "libbzip2-rs" is a derived work based on "bzip2" and
-"libbzip2", and is Copyright (C) 2024-2025 Trifecta Tech Foundation and contributors
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-
-1. Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-2. The origin of this software must not be misrepresented; you must
-   not claim that you wrote the original software.  If you use this
-   software in a product, an acknowledgment in the product
-   documentation would be appreciated but is not required.
-
-3. Altered source versions must be plainly marked as such, and must
-   not be misrepresented as being the original software.
-
-4. The name of the author may not be used to endorse or promote
-   products derived from this software without specific prior written
-   permission.
-
-THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
-OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE
-GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
-WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-Julian Seward, jseward@acm.org
-bzip2/libbzip2 version 1.1.0 of 6 September 2010
-
---------------------------------------------------------------------------
-
 
 
 
@@ -19272,9 +19113,9 @@ SOFTWARE.
 
 ----------------------------------------------------------------------
 Taffy
-https://github.com/DioxusLabs/taffy/tree/v0.13.0
+https://github.com/DioxusLabs/taffy/tree/v0.15.1
 
---- vendor/taffy/LICENSE ---
+--- licenses/Taffy-LICENSE.txt ---
 MIT License
 
 Copyright (c) 2018 Visly Inc.

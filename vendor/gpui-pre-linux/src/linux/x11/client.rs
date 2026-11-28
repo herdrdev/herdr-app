@@ -201,6 +201,7 @@ pub struct X11ClientState {
 
     pub(crate) scale_factor: f32,
 
+    // HERDR: dynamically loaded libxkbcommon-x11 symbols.
     xkb_x11: XkbX11,
     xkb_context: xkbc::Context,
     pub(crate) xcb_connection: Rc<XCBConnection>,
@@ -811,6 +812,7 @@ impl X11Client {
 
     pub fn enable_ime(&self) {
         let mut state = self.0.borrow_mut();
+        // HERDR: reuse existing XIM IC once connected instead of leaking new ICs per FocusIn.
         if !state.has_xim()
             || !state.xim_handler.as_ref().is_some_and(|handler| handler.connected)
         {
@@ -1074,6 +1076,7 @@ impl X11Client {
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.keyboard_focused_window = None;
+                // HERDR: unset XIM focus on FocusOut while keeping the IC alive.
                 if state.has_xim()
                     && let Some((mut ximc, mut handler)) = state.take_xim()
                 {
@@ -1215,7 +1218,7 @@ impl X11Client {
                 };
                 drop(state);
                 if let Some(text) = composed_text {
-                    // Commit through IME so the marked accent is replaced and cleared.
+                    // HERDR: Commit through IME so the marked accent is replaced and cleared.
                     window.handle_ime_commit(text);
                 } else {
                     window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
@@ -1314,9 +1317,11 @@ impl X11Client {
                                 ScrollDirection::Left => Point::new(SCROLL_LINES, 0.0),
                                 ScrollDirection::Right => Point::new(-SCROLL_LINES, 0.0),
                             };
-                            window.handle_input(PlatformInput::ScrollWheel(
-                                make_scroll_wheel_event(position, scroll_delta, modifiers),
-                            ));
+                            window.handle_input(PlatformInput::Scroll(make_scroll_wheel_event(
+                                position,
+                                scroll_delta,
+                                modifiers,
+                            )));
                         }
                     }
                     None => {
@@ -1402,7 +1407,7 @@ impl X11Client {
                     let scroll_delta = get_scroll_delta_and_update_state(pointer, &event);
                     drop(state);
                     if let Some(scroll_delta) = scroll_delta {
-                        window.handle_input(PlatformInput::ScrollWheel(make_scroll_wheel_event(
+                        window.handle_input(PlatformInput::Scroll(make_scroll_wheel_event(
                             position,
                             scroll_delta,
                             modifiers,
@@ -2591,7 +2596,7 @@ fn make_scroll_wheel_event(
     position: Point<Pixels>,
     scroll_delta: Point<f32>,
     modifiers: Modifiers,
-) -> gpui::ScrollWheelEvent {
+) -> gpui::ScrollEvent {
     // When shift is held down, vertical scrolling turns into horizontal scrolling.
     let delta = if modifiers.shift {
         Point {
@@ -2601,11 +2606,12 @@ fn make_scroll_wheel_event(
     } else {
         scroll_delta
     };
-    gpui::ScrollWheelEvent {
+    gpui::ScrollEvent {
         position,
         delta: ScrollDelta::Lines(delta),
         modifiers,
         touch_phase: TouchPhase::default(),
+        source: gpui::ScrollSource::Pointer,
     }
 }
 

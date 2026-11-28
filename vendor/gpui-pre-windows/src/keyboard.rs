@@ -22,7 +22,7 @@ thread_local! {
     static NATIVE_CHARACTER_INPUT: RefCell<Option<Keystroke>> = const { RefCell::new(None) };
 }
 
-/// Whether this native keydown will commit text through Windows messages.
+/// HERDR: Whether this native keydown will commit text through Windows messages.
 /// GPUI also marks replayed shortcut prefixes as preferring character input.
 pub fn is_native_character_input(event: &KeyDownEvent) -> bool {
     NATIVE_CHARACTER_INPUT.with_borrow(|native| native.as_ref() == Some(&event.keystroke))
@@ -67,7 +67,9 @@ mod native_character_input_tests {
         prefix.keystroke = Keystroke::parse("ctrl-k").unwrap();
         assert!(!is_native_character_input(&event));
         with_native_character_input(PlatformInput::KeyDown(event), |input| {
-            let PlatformInput::KeyDown(event) = input else { unreachable!() };
+            let PlatformInput::KeyDown(event) = input else {
+                unreachable!()
+            };
             assert!(is_native_character_input(&event));
             assert!(!is_native_character_input(&prefix));
             assert!(is_native_character_input(&event.clone()));

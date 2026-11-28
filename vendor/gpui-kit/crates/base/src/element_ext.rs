@@ -1,4 +1,6 @@
-use gpui::{App, Bounds, IntoElement, ParentElement, Pixels, Styled as _, Window, canvas};
+use gpui::{
+    App, Bounds, ElementId, IntoElement, ParentElement, Pixels, Styled as _, Window, canvas,
+};
 
 use crate::TextSelectionScopeId;
 
@@ -12,6 +14,18 @@ pub trait ElementExt: ParentElement + Sized {
         crate::text_selection::text_selection_scope(scope, self)
     }
 
+    /// Keeps the window's text selection when this element is pressed, for
+    /// one that acts on the selection, such as a button beside it: pressing
+    /// anywhere on it neither clears the selection nor starts a new one, so
+    /// its click still finds the selection. `id` must be unique among this
+    /// element's children. Works inside a cached view.
+    ///
+    /// The window remembers each element marked this way until it closes, so
+    /// mark the row of buttons, not each row of a long list.
+    fn keep_text_selection(self, id: impl Into<ElementId>) -> Self {
+        self.child(crate::text_selection::keep_text_selection(id.into()))
+    }
+
     /// Invokes `callback` during prepaint with this element's resolved bounds.
     fn on_prepaint<F>(self, callback: F) -> Self
     where
@@ -22,10 +36,8 @@ pub trait ElementExt: ParentElement + Sized {
                 move |bounds, window, cx| callback(bounds, window, cx),
                 |_, _, _, _| {},
             )
-            // HERDR: pinned to the corner. Without an inset an absolute child
-            // starts after the padding but is still as wide as the element, so
-            // the reported box hung past the right and bottom edges by the
-            // padding (a hover exit there looked stale and was dropped).
+            // Without an inset, an absolute child starts after the padding but
+            // is still sized to the padding box, overhanging the far edges.
             .absolute()
             .top_0()
             .left_0()

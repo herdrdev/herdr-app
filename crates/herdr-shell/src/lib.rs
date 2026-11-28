@@ -276,6 +276,11 @@ pub fn set_development_mode(enabled: bool) {
 /// installed too.
 pub fn init(cx: &mut App) {
     gpui_base::init(cx);
+    // HERDR (H1): pin global layout direction to LTR regardless of system
+    // locale so sliders, input arrow keys/selection, and rich-text alignment
+    // match master. Paragraph BiDi alignment (unicode_bidi::get_base_direction)
+    // still derives from each paragraph's own text independently.
+    gpui_base::LayoutDirection::Ltr.set_global(cx);
     style::init();
 }
 
@@ -337,6 +342,72 @@ mod init_tests {
         cx.update(|cx| crate::init_with_components(cx, &components));
 
         cx.read(|cx| assert!(cx.has_global::<gpui_base::Theme>()));
+    }
+
+    #[gpui::test]
+    fn shell_init_pins_layout_direction_to_ltr_for_sliders_and_inputs(cx: &mut TestAppContext) {
+        use gpui::{
+            AppContext as _, Axis, Bounds, Context, Entity, Focusable as _, IntoElement,
+            ParentElement as _, Render, Window, div, point, px, size,
+        };
+        use gpui_base::{
+            LayoutDirection,
+            input::{Input, InputState},
+            slider::{SliderState, SliderValue},
+        };
+
+        struct InputHost {
+            input: Entity<InputState>,
+        }
+        impl Render for InputHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().child(Input::new(&self.input))
+            }
+        }
+
+        // Simulate a system locale that resolved to RTL before shell init runs.
+        cx.update(|cx| {
+            LayoutDirection::Rtl.set_global(cx);
+            assert_eq!(LayoutDirection::global(cx), LayoutDirection::Rtl);
+            super::init(cx);
+            assert_eq!(LayoutDirection::global(cx), LayoutDirection::Ltr);
+        });
+
+        let (host, vcx) = cx.add_window_view(|window, cx| InputHost {
+            input: cx.new(|cx| InputState::new(window, cx).default_value("abcd")),
+        });
+
+        // Slider drag at x=0 must match master (5.0 / 0.0), not mirrored RTL (105.0 / 1.0).
+        let (value, percentage) = vcx.update(|window, cx| {
+            let slider = cx.new(|_| SliderState::new().min(3.).max(103.).step(5.));
+            slider.update(cx, |state, cx| {
+                state.set_bounds(Bounds::new(point(px(0.), px(0.)), size(px(100.), px(10.))));
+                state.update_value_by_position(
+                    Axis::Horizontal,
+                    point(px(0.), px(0.)),
+                    false,
+                    window,
+                    cx,
+                );
+            });
+            let state = slider.read(cx);
+            (state.value(), state.percentage())
+        });
+        assert_eq!(value, SliderValue::Single(5.));
+        assert_eq!(percentage, 0.0..0.0);
+
+        // Left arrow in "abcd" at byte 2 must move to byte 1, not mirrored RTL byte 3.
+        let input = vcx.update(|window, cx| {
+            let input = host.read(cx).input.clone();
+            let focus = input.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+            input.update(cx, |state, cx| state.set_selected_range(2..2, cx));
+            window.draw(cx).clear(cx);
+            input
+        });
+        vcx.simulate_keystrokes("left");
+        let cursor = vcx.update(|_, cx| input.read(cx).cursor());
+        assert_eq!(cursor, 1);
     }
 }
 

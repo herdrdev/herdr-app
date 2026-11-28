@@ -210,7 +210,7 @@ export default class extends View {
         assert_eq!(*notes.borrow(), vec![4, 2, 0], "{overflow}: the first child must be visible again");
         let delta = if horizontal { gpui::point(gpui::px(-80.), gpui::px(0.)) } else { gpui::point(gpui::px(0.), gpui::px(-80.)) };
         visual.simulate_mouse_move(position(20.), None, Default::default());
-        visual.simulate_event(gpui::ScrollWheelEvent {
+        visual.simulate_event(gpui::ScrollEvent {
             position: position(20.),
             delta: gpui::ScrollDelta::Pixels(delta),
             ..Default::default()

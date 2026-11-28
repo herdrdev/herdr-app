@@ -40,14 +40,6 @@ struct PolicyTextView {
     policy: Rc<Policy>,
 }
 
-impl IntoElement for PolicyTextView {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for PolicyTextView {
     type RequestLayoutState = <TextView as Element>::RequestLayoutState;
     type PrepaintState = <TextView as Element>::PrepaintState;

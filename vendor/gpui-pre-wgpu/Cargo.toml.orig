@@ -1,16 +1,16 @@
 [package]
 name = "gpui-pre-wgpu"
-version = "0.3.8"
+version = "0.3.14"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@f126950)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.gpui-pre]
 zed-crate = "gpui_wgpu"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [lib]
 path = "src/gpui_wgpu.rs"
@@ -26,7 +26,7 @@ test-support = ["gpui/test-support", "dep:image"]
 [dependencies]
 gpui = { workspace = true }
 anyhow = { workspace = true }
-bytemuck = "1"
+bytemuck = { workspace = true }
 collections = { workspace = true }
 cosmic-text = "0.19.0"
 etagere = { workspace = true }
@@ -41,11 +41,17 @@ swash = { workspace = true }
 unicode-bidi = { workspace = true }
 unicode-segmentation = { workspace = true }
 gpui_util = { workspace = true }
-wgpu = { workspace = true }
-font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", optional = true }
+font-kit = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+wgpu = { workspace = true, features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
+wgpu = { workspace = true, default-features = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
 wgpu = { workspace = true, features = ["webgl"] }
 
 [lints]

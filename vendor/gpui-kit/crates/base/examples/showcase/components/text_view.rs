@@ -24,6 +24,37 @@ impl BaseShowcase {
     pub(in super::super) fn text_view(&self, window: &Window) -> impl IntoElement {
         let palette = ExamplePalette::from_window(window);
         let style = text_view_style(palette);
+        gpui_base::v_flex()
+            .w_full()
+            .gap_4()
+            .child(self.text_view_links(style.clone()))
+            .child(self.text_view_document(palette, style))
+    }
+
+    /// `TextView::link` rewrites or drops links before they are drawn: here
+    /// `record://` links to deleted records become plain text and the rest
+    /// point at their web page.
+    fn text_view_links(&self, style: TextViewStyle) -> impl IntoElement {
+        const LINKS: &str = "Open [record 42](record://42), [record 7](record://7) \
+            (deleted) or the [docs][docs].\n\n[docs]: https://github.com/longbridge/gpui-kit";
+        const DELETED: &[&str] = &["7"];
+        TextView::markdown("text-view-links", LINKS)
+            .style(style)
+            .link(|link, _| match link.url.strip_prefix("record://") {
+                Some(id) if DELETED.contains(&id) => None,
+                Some(id) => Some(
+                    link.clone()
+                        .url(format!("https://example.com/records/{id}")),
+                ),
+                None => Some(link.clone()),
+            })
+    }
+
+    fn text_view_document(
+        &self,
+        palette: ExamplePalette,
+        style: TextViewStyle,
+    ) -> impl IntoElement {
         div()
             .id("text-view-example")
             .debug_selector(|| "text-view-example".into())
@@ -53,8 +84,8 @@ mod tests {
     use std::time::Duration;
 
     use gpui::{
-        Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
-        point, px,
+        Modifiers, MouseButton, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
+        px,
     };
     use gpui_base::{TextSelection, TextViewStyle};
 
@@ -134,7 +165,7 @@ mod tests {
             let offset = view.text_view.read(cx).list_state().logical_scroll_top();
             (offset.item_ix, offset.offset_in_item)
         });
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: example.center(),
             delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
             ..Default::default()

@@ -16,11 +16,72 @@ use crate::text::{
     },
 };
 
+/// Run the `markdown` parser, catching a panic inside it.
+///
+/// `markdown` 1.0.0 panics on some inputs (wooorm/markdown-rs#275), and the
+/// text being parsed often comes from outside the app, so the panic must not
+/// take the app down. Nothing the parser holds outlives the call. Returns
+/// `None` when the parser panicked.
+fn to_mdast(source: &str, options: &ParseOptions) -> Option<Result<Node, SharedString>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        markdown::to_mdast(source, options)
+    }))
+    .ok()
+    .map(|result| result.map_err(|e| SharedString::from(e.to_string())))
+}
+
+/// A tree that shows `source` as plain text, one paragraph keeping its line
+/// breaks, for a source the parser can't handle.
+fn plain_text_root(source: &str) -> Node {
+    let mut children = Vec::new();
+    let mut offset = 0;
+    for (index, line) in source.split('\n').enumerate() {
+        let row = index + 1;
+        if index > 0 {
+            children.push(Node::Break(mdast::Break {
+                position: Some(markdown::unist::Position::new(
+                    row - 1,
+                    0,
+                    offset - 1,
+                    row,
+                    1,
+                    offset,
+                )),
+            }));
+        }
+        let end = offset + line.len();
+        if !line.is_empty() {
+            children.push(Node::Text(mdast::Text {
+                value: line.to_string(),
+                position: Some(markdown::unist::Position::new(
+                    row,
+                    1,
+                    offset,
+                    row,
+                    line.chars().count() + 1,
+                    end,
+                )),
+            }));
+        }
+        offset = end + 1;
+    }
+    let position = markdown::unist::Position::new(1, 1, 0, 1, 1, source.len());
+    Node::Root(mdast::Root {
+        children: vec![Node::Paragraph(mdast::Paragraph {
+            children,
+            position: Some(position.clone()),
+        })],
+        position: Some(position),
+    })
+}
+
 /// Parse Markdown into a tree of nodes.
 pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let options = cx.markdown_extensions.parse_options();
-    let mut root =
-        markdown::to_mdast(source, &options).map_err(|e| SharedString::from(e.to_string()))?;
+    let mut root = match to_mdast(source, &options) {
+        Some(result) => result?,
+        None => return Ok(ast_to_document(source, plain_text_root(source), cx)),
+    };
     let mut prose = options;
     prose.constructs.math_text = false;
     prose.constructs.math_flow = false;
@@ -75,7 +136,7 @@ fn reparse_as_prose(node: &Node, source: &str, options: &ParseOptions) -> Option
     if !may_hold_inline_markup(literal) {
         return None;
     }
-    let Ok(Node::Root(mut root)) = markdown::to_mdast(literal, options) else {
+    let Some(Ok(Node::Root(mut root))) = to_mdast(literal, options) else {
         return None;
     };
     let [Node::Paragraph(paragraph)] = root.children.as_mut_slice() else {
@@ -140,6 +201,7 @@ fn inline_groups(children: &[Node], render_html: bool) -> Vec<InlineGroup<'_>> {
     let mut groups = Vec::with_capacity(children.len());
     let mut ix = 0;
     while ix < children.len() {
+        // HERDR: do not pair inline HTML tags when raw HTML rendering is disabled.
         if render_html
             && let Some((false, name, attrs)) = inline_html_tag(&children[ix])
             && let Some(mark) = inline_html_mark(&name, attrs)
@@ -255,6 +317,8 @@ fn parse_inline_children(
     children: &[Node],
     cx: &mut NodeContext,
 ) -> String {
+    // HERDR: keep markdown whitespace unfolded (matching 1ccf011) instead of
+    // running upstream #3949/#3962 inline-boundary whitespace trimming.
     let mut text = String::new();
     for group in inline_groups(children, cx.markdown_extensions.renders_raw_html()) {
         match group {
@@ -271,6 +335,128 @@ fn parse_inline_children(
     text
 }
 
+/// Drops a text node's leading white space when the previous rendered
+/// character is white space or a line break, so a run folded inside its node
+/// stays one space across a dropped HTML comment, and nothing follows a
+/// `<br>` or a hard break indented by the space the line ending became
+/// (#3710). Returns the paragraph's rendered text.
+///
+/// The source mapping shifts with the trim: the removed white space's
+/// segments and marks drop or shrink with it, so selection and copy still
+/// land on the source the surviving characters were drawn from.
+#[allow(dead_code)]
+fn normalize_inline_boundaries(paragraph: &mut Paragraph) -> String {
+    let mut at_line_start = true;
+    let mut previous_white_space = false;
+    let mut text = String::new();
+
+    for node in &mut paragraph.children {
+        if node.custom.is_some() || node.image.is_some() {
+            // Unknown rendered width: keep the white space around it.
+            at_line_start = false;
+            previous_white_space = false;
+            continue;
+        }
+        if node.text == "\n" && node.marks.is_empty() {
+            // A rendered line break, from `<br>` or a hard break. White
+            // space held before it is trailing and goes with the line.
+            at_line_start = true;
+            previous_white_space = false;
+            text.push('\n');
+            continue;
+        }
+        let leading = node.text.len() - node.text.trim_start_matches([' ', '\t']).len();
+        // Inline code keeps its white space, so the fold stops where a code
+        // mark begins: `` x `  y` `` keeps the span's leading spaces even
+        // though the run before it ends with one (#3710 review).
+        let code_start = node
+            .marks
+            .iter()
+            .filter(|(range, mark)| mark.code && range.end > 0)
+            .map(|(range, _)| range.start)
+            .min();
+        let leading = leading.min(code_start.unwrap_or(leading));
+        if leading > 0 && (at_line_start || previous_white_space) {
+            trim_leading_white_space(node, leading);
+        }
+        if node.text.is_empty() {
+            continue;
+        }
+        at_line_start = false;
+        previous_white_space = node.text.ends_with([' ', '\t']);
+        text.push_str(&node.text);
+    }
+
+    paragraph
+        .children
+        .retain(|node| node.custom.is_some() || node.image.is_some() || !node.text.is_empty());
+    text
+}
+
+/// Removes the first `count` bytes of white space from the node's text,
+/// shifting its marks and source segments over the removed range.
+#[allow(dead_code)]
+fn trim_leading_white_space(node: &mut InlineNode, count: usize) {
+    let old_text = std::mem::take(&mut node.text);
+    node.text = old_text[count..].into();
+
+    for (range, _) in &mut node.marks {
+        let start = range.start.saturating_sub(count).min(node.text.len());
+        let end = range.end.saturating_sub(count).min(node.text.len());
+        *range = start..end.max(start);
+    }
+    node.marks.retain(|(range, _)| range.start < range.end);
+
+    for segment in &mut node.source_segments {
+        if segment.rendered.end <= count {
+            // Wholly inside the dropped white space.
+            segment.rendered = 0..0;
+            continue;
+        }
+        let rendered_end = segment.rendered.end - count;
+        if segment.rendered.start >= count {
+            // Wholly after it: the source stays, the bytes shift.
+            segment.rendered = (segment.rendered.start - count)..rendered_end;
+        } else if segment.linear {
+            // Straddling the cut. Linear segments map byte for byte, so the
+            // dropped bytes also drop from the source; a merged run keeps
+            // drawing the survivors from the bytes they came from.
+            segment.source.start += count;
+            segment.rendered = 0..rendered_end;
+        } else {
+            // A non-linear segment straddling the cut has no exact mapping
+            // for its survivors; drop it rather than guess.
+            segment.rendered = 0..0;
+        }
+    }
+    node.source_segments.retain(|segment| {
+        segment.rendered.start < segment.rendered.end && segment.source.start < segment.source.end
+    });
+}
+
+/// Folds each run of spaces and tabs in drawn text to a single space, the
+/// way `white-space: normal` renders it (#3710). Line endings have already
+/// become spaces here; white space inside inline code never reaches this
+/// path, and runs at a line break are dropped by
+/// `normalize_inline_boundaries`.
+#[allow(dead_code)]
+fn collapse_white_space(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    let mut in_white_space = false;
+    for ch in text.chars() {
+        if matches!(ch, ' ' | '\t') {
+            if !in_white_space {
+                collapsed.push(' ');
+                in_white_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            in_white_space = false;
+        }
+    }
+    collapsed
+}
+
 fn parse_table_row(source: &str, table: &mut Table, node: &mdast::TableRow, cx: &mut NodeContext) {
     let mut row = TableRow::default();
     node.children.iter().for_each(|c| {
@@ -281,10 +467,9 @@ fn parse_table_row(source: &str, table: &mut Table, node: &mdast::TableRow, cx: 
             _ => {}
         };
     });
-    // GFM fixes the column count with the header/delimiter, not each body row.
-    // Padding/truncation keeps every row on the same measured column grid.
-    row.children
-        .resize_with(table.column_aligns.len(), Default::default);
+    // GFM fixes the column count with the header/delimiter. Leave missing
+    // cells implicit; the renderer places them on the shared column grid.
+    row.children.truncate(table.column_aligns.len());
     table.children.push(row);
 }
 
@@ -441,6 +626,7 @@ fn source_segments(
         return Vec::new();
     };
 
+    // HERDR: literal HTML nodes are not entity- or escape-decoded.
     let decode_markdown = !matches!(node, Node::Html(_));
     let mut segments =
         aligned_source_segments(raw, rendered, span.start, decode_markdown, decode_markdown);
@@ -784,6 +970,10 @@ fn parse_paragraph(
             // so a CRLF document still carries its carriage return here. Take
             // the CR with the newline: dropping only the newline would strand
             // the CR in the middle of the reflowed line.
+            //
+            // HERDR (B16): preserve repeated spaces and tabs in Markdown text
+            // (matching 1ccf011) instead of collapsing runs or stripping spaces
+            // after breaks/comments.
             text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
             paragraph.push(mapped_inline(source, text.clone(), node, cx))
         }
@@ -856,6 +1046,17 @@ fn parse_paragraph(
                 ..Default::default()
             });
         }
+        Node::ImageReference(raw) => {
+            if let Some(definition) = cx.link_refs.get(raw.identifier.as_str()) {
+                paragraph.push_image(ImageNode {
+                    url: definition.url.clone().into(),
+                    title: definition.title.clone(),
+                    alt: Some(raw.alt.clone().into()),
+                    span,
+                    ..Default::default()
+                });
+            }
+        }
         Node::Break(_) => {
             // Hard line break (trailing two spaces / backslash). Mirror the
             // inline-HTML <br> path: emit a newline inline node so the break
@@ -888,6 +1089,7 @@ fn parse_paragraph(
                     .marks(vec![(0..text.len(), TextMark::default())]),
             );
         }
+        // HERDR: render inline HTML tags as literal text when raw_html is false.
         Node::Html(val) if !cx.markdown_extensions.renders_raw_html() => {
             text = val.value.clone();
             paragraph.push(mapped_inline(source, text.clone(), node, cx));
@@ -950,21 +1152,147 @@ fn parse_paragraph(
     text
 }
 
+/// Definitions may follow their references or live inside a container. The
+/// parser normalizes identifiers; CommonMark uses the first definition.
+fn collect_definitions(node: &Node, definitions: &mut BTreeMap<String, LinkMark>) {
+    if let Node::Definition(def) = node {
+        definitions
+            .entry(def.identifier.clone())
+            .or_insert_with(|| LinkMark {
+                url: def.url.clone().into(),
+                identifier: Some(def.identifier.clone().into()),
+                title: def.title.clone().map(Into::into),
+            });
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_definitions(child, definitions);
+        }
+    }
+}
+
 fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> ParsedDocument {
+    let mut definitions = BTreeMap::new();
+    collect_definitions(&root, &mut definitions);
+    for (identifier, definition) in definitions {
+        cx.add_ref(identifier.into(), definition);
+    }
+
     let root = match root {
         Node::Root(r) => r,
         _ => panic!("expected root node"),
     };
 
+    let has_surfaces = cx.markdown_extensions.has_block_surfaces();
     let blocks = root
         .children
         .into_iter()
-        .map(|c| ast_to_node(source, c, cx))
+        .map(|node| match node {
+            Node::Blockquote(quote) if has_surfaces => blockquote_to_node(source, quote, cx),
+            node => ast_to_node(source, node, cx),
+        })
         .collect();
     ParsedDocument {
         source: source.to_string().into(),
         blocks: Arc::new(blocks),
     }
+}
+
+/// A top-level blockquote, which is a block surface when it opens with the
+/// marker of a registered one.
+fn blockquote_to_node(
+    source: &str,
+    mut quote: mdast::Blockquote,
+    cx: &mut NodeContext,
+) -> BlockNode {
+    let Some(name) = take_surface_marker(source, &mut quote, cx) else {
+        return ast_to_node(source, Node::Blockquote(quote), cx);
+    };
+    let children = quote
+        .children
+        .into_iter()
+        .map(|child| ast_to_node(source, child, cx))
+        .collect();
+    BlockNode::Surface {
+        name,
+        children,
+        span: new_span(quote.position, cx),
+    }
+}
+
+/// Removes the marker line that names a registered block surface from the
+/// start of `quote`, and returns that name.
+///
+/// As in a GitHub alert, the marker `[!name]` is alone on the first line of
+/// the first paragraph, and the lines after it are that paragraph's text. The
+/// name matches ASCII-case-insensitively.
+fn take_surface_marker(
+    source: &str,
+    quote: &mut mdast::Blockquote,
+    cx: &NodeContext,
+) -> Option<SharedString> {
+    let Some(Node::Paragraph(paragraph)) = quote.children.first_mut() else {
+        return None;
+    };
+    let Some(Node::Text(text)) = paragraph.children.first_mut() else {
+        return None;
+    };
+    let (line, rest) = match text.value.split_once('\n') {
+        Some((line, rest)) => (line.strip_suffix('\r').unwrap_or(line), Some(rest)),
+        None => (text.value.as_str(), None),
+    };
+    // An escaped `\[` or a character reference reads as the same text, but
+    // writes a literal, so the marker must appear as is in the source. The
+    // text of an escape starts after its backslash.
+    let start = text.position.as_ref()?.start.offset;
+    if source.get(..start)?.ends_with('\\') || !source.get(start..)?.starts_with(line) {
+        return None;
+    }
+    let name = line.strip_prefix("[!")?.strip_suffix(']')?;
+    let name = cx.markdown_extensions.block_surface_name(name)?;
+    match rest {
+        // The next line goes on in this text, which starts after the line's
+        // blockquote marker in the source.
+        Some(rest) => {
+            let rest = rest.to_string();
+            let position = text.position.as_mut()?;
+            let line_start =
+                source[position.start.offset..].find('\n')? + position.start.offset + 1;
+            let content = source[line_start..].trim_start_matches([' ', '\t']);
+            let content = content.strip_prefix('>').unwrap_or(content);
+            let content = content.trim_start_matches([' ', '\t']);
+            let offset = source.len() - content.len();
+            position.start = Point::new(position.start.line + 1, offset - line_start + 1, offset);
+            text.value = rest;
+            if text.value.is_empty() {
+                paragraph.children.remove(0);
+            }
+        }
+        // The marker ends the paragraph or a hard break ends its line.
+        None => match paragraph.children.get(1) {
+            None => {
+                paragraph.children.clear();
+            }
+            Some(Node::Break(_)) => {
+                paragraph.children.drain(..2);
+            }
+            Some(_) => return None,
+        },
+    }
+    // The paragraph starts where its first remaining child does.
+    match paragraph.children.first() {
+        Some(first) => {
+            if let Some(start) = first.position().map(|first| first.start.clone())
+                && let Some(position) = paragraph.position.as_mut()
+            {
+                position.start = start;
+            }
+        }
+        None => {
+            quote.children.remove(0);
+        }
+    }
+    Some(name)
 }
 
 fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<Span> {
@@ -973,6 +1301,30 @@ fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<
     Some(Span {
         start: cx.offset + pos.start.offset,
         end: cx.offset + pos.end.offset,
+    })
+}
+
+/// The `[ ]` / `[x]` marker of a task list item, which mdast does not keep.
+///
+/// The marker opens the item's first paragraph. Before it in the item come
+/// only the list marker, whitespace, line prefixes and link reference
+/// definitions, so it is the first `[` after the definitions.
+fn task_marker_span(source: &str, item: &mdast::ListItem, cx: &NodeContext) -> Option<Span> {
+    item.checked?;
+    let mut from = item.position.as_ref()?.start.offset;
+    for definition in item
+        .children
+        .iter()
+        .take_while(|child| !matches!(child, Node::Paragraph(_)))
+    {
+        from = definition.position()?.end.offset;
+    }
+    let bytes = source.as_bytes();
+    let open = from + bytes.get(from..)?.iter().position(|&byte| byte == b'[')?;
+    let close = open + bytes[open..].iter().position(|&byte| byte == b']')?;
+    Some(Span {
+        start: cx.offset + open,
+        end: cx.offset + close + 1,
     })
 }
 
@@ -1020,6 +1372,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             }
         }
         Node::ListItem(val) => {
+            let task_marker = task_marker_span(source, &val, cx);
             let children = val
                 .children
                 .into_iter()
@@ -1029,6 +1382,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
                 children,
                 spread: val.spread,
                 checked: val.checked,
+                task_marker,
                 span: new_span(val.position, cx),
             }
         }
@@ -1041,6 +1395,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             let segments = code_source_segments(source, &raw.value, span, cx.offset);
             BlockNode::CodeBlock(
                 CodeBlock::new(raw.value.into(), raw.lang.map(Into::into), span)
+                    .with_meta(raw.meta.map(Into::into))
                     .source_segments(segments),
             )
         }
@@ -1061,7 +1416,9 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
                 CodeBlock::new(val.value.into(), None, span).source_segments(segments),
             )
         }
+        // HERDR: render HTML blocks as literal text when raw_html is false.
         Node::Html(ref val) if !cx.markdown_extensions.renders_raw_html() => {
+            let span = new_span(val.position.clone(), cx);
             let mut paragraph = Paragraph::default();
             paragraph.push(mapped_inline(source, val.value.as_str(), &value, cx));
             paragraph.span = span;
@@ -1145,23 +1502,12 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             paragraph.span = new_span(def.position, cx);
             BlockNode::Paragraph(paragraph)
         }
-        Node::Definition(def) => {
-            cx.add_ref(
-                def.identifier.clone().into(),
-                LinkMark {
-                    url: def.url.clone().into(),
-                    identifier: Some(def.identifier.clone().into()),
-                    title: def.title.clone().map(Into::into),
-                },
-            );
-
-            BlockNode::Definition {
-                identifier: def.identifier.clone().into(),
-                url: def.url.clone().into(),
-                title: def.title.clone().map(|s| s.into()),
-                span: new_span(def.position, cx),
-            }
-        }
+        Node::Definition(def) => BlockNode::Definition {
+            identifier: def.identifier.clone().into(),
+            url: def.url.clone().into(),
+            title: def.title.clone().map(|s| s.into()),
+            span: new_span(def.position, cx),
+        },
         _ => {
             if cfg!(debug_assertions) {
                 tracing::warn!("unsupported node: {:#?}", value);
@@ -1175,6 +1521,19 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
 mod tests {
     use super::*;
     use gpui::ParentElement;
+
+    #[test]
+    fn parser_panic_falls_back_to_plain_text() {
+        // markdown 1.0.0 panics on this input (wooorm/markdown-rs#275).
+        let source = "a\n===\n---\nb\n===";
+        let document = parse(source, &mut NodeContext::default()).expect("parse");
+        assert_eq!(document.source.as_ref(), source);
+        let [BlockNode::Paragraph(paragraph)] = document.blocks.as_slice() else {
+            panic!("expected one paragraph, got {:?}", document.blocks);
+        };
+        let text: String = paragraph.children.iter().map(|c| c.text.as_ref()).collect();
+        assert_eq!(text, "a\n===\n---\nb\n===");
+    }
 
     use crate::text::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
 
@@ -1273,10 +1632,10 @@ mod tests {
     }
 
     #[test]
-    fn table_rows_use_header_column_count() {
+    fn table_rows_keep_missing_cells_implicit() {
         let mut cx = NodeContext::default();
         let document = parse(
-            "| A | B | C |\n| --- | --- | --- |\n| one |\n| two | three | four | ignored |\n",
+            "| A | B | C |\n| --- | --- | --- |\n| one |\n| two | three | four | ignored |\n| five | | six |\n",
             &mut cx,
         )
         .unwrap();
@@ -1284,10 +1643,51 @@ mod tests {
             panic!("expected table");
         };
         assert_eq!(table.column_aligns.len(), 3);
-        assert!(table.children.iter().all(|row| row.children.len() == 3));
+        assert_eq!(
+            table
+                .children
+                .iter()
+                .map(|row| row.children.len())
+                .collect::<Vec<_>>(),
+            [3, 1, 3, 3]
+        );
         assert_eq!(table.children[1].children[0].children.text(), "one");
-        assert!(table.children[1].children[1].children.text().is_empty());
         assert_eq!(table.children[2].children[2].children.text(), "four");
+        assert!(table.children[3].children[1].children.text().is_empty());
+        assert_eq!(table.children[3].children[2].children.text(), "six");
+    }
+
+    #[test]
+    fn sparse_table_cell_count_tracks_source_cells() {
+        for (columns, rows) in [(32, 64), (64, 128)] {
+            let source = format!(
+                "{}|\n{}|\n{}",
+                "|h".repeat(columns),
+                "|---".repeat(columns),
+                "|x|\n".repeat(rows),
+            );
+            let mut cx = NodeContext::default();
+            let document = parse(&source, &mut cx).unwrap();
+            let BlockNode::Table(table) = &document.blocks[0] else {
+                panic!("expected table");
+            };
+            assert_eq!(table.column_aligns.len(), columns);
+            assert_eq!(table.children.len(), rows + 1);
+            assert_eq!(table.children[0].children.len(), columns);
+            assert!(
+                table.children[1..]
+                    .iter()
+                    .all(|row| row.children.len() == 1)
+            );
+            assert_eq!(
+                table
+                    .children
+                    .iter()
+                    .map(|row| row.children.len())
+                    .sum::<usize>(),
+                columns + rows
+            );
+        }
     }
 
     #[test]
@@ -1708,6 +2108,49 @@ mod tests {
         }
     }
 
+    fn task_markers(block: &BlockNode, markers: &mut Vec<Range<usize>>) {
+        match block {
+            BlockNode::ListItem {
+                children,
+                task_marker,
+                ..
+            } => {
+                markers.extend(task_marker.map(|span| span.start..span.end));
+                children
+                    .iter()
+                    .for_each(|child| task_markers(child, markers));
+            }
+            BlockNode::Root { children, .. }
+            | BlockNode::Blockquote { children, .. }
+            | BlockNode::List { children, .. } => children
+                .iter()
+                .for_each(|child| task_markers(child, markers)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn task_marker_is_the_bracketed_check_wherever_the_item_text_starts() {
+        for (source, marker) in [
+            // The item text opens with a `[` of its own.
+            ("- [ ] [link](https://example.com)", "[ ]"),
+            ("> - [x] quoted", "[x]"),
+            ("- [X]\n  on the next line", "[X]"),
+            (
+                "- [a]: https://example.com\n  [ ] after a definition",
+                "[ ]",
+            ),
+        ] {
+            let document = parse(source, &mut NodeContext::default()).unwrap();
+            let mut markers = Vec::new();
+            for block in document.blocks.iter() {
+                task_markers(block, &mut markers);
+            }
+            let start = source.rfind(marker).unwrap();
+            assert_eq!(markers, vec![start..start + marker.len()], "{source:?}");
+        }
+    }
+
     #[test]
     fn selected_source_range_maps_fenced_code_nested_in_a_blockquote() {
         let source = "> ```\n> one\n> two\n> ```";
@@ -1764,6 +2207,90 @@ mod tests {
         let source = "a\\\\  \nb";
         assert_eq!(select_rendered_range(source, 2..3), 3..6);
         assert_eq!(select_rendered_range(source, 1..3), 1..6);
+    }
+
+    /// HERDR (B16): Markdown text keeps repeated spaces, tabs, spaces across a
+    /// dropped HTML comment, and the space produced by a line ending after `<br>`
+    /// (matching 1ccf011).
+    #[test]
+    fn markdown_preserves_whitespace_across_runs_comments_and_breaks() {
+        let mut cx = NodeContext::default();
+        let document = parse(
+            "left    right\n\na\t\tb\n\ntwo  spaces\n\nText <!-- note --> after.\n\nline one<br>\nline two",
+            &mut cx,
+        )
+        .unwrap();
+        let paragraphs: Vec<String> = document
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                BlockNode::Paragraph(paragraph) => Some(
+                    paragraph
+                        .children
+                        .iter()
+                        .map(|node| node.text.as_ref())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            paragraphs,
+            [
+                "left    right",
+                "a\t\tb",
+                "two  spaces",
+                "Text  after.",
+                "line one\n line two",
+            ]
+        );
+    }
+
+    /// A code span keeps its white space alongside unfolded surrounding text.
+    #[test]
+    fn white_space_in_code_spans_stays_intact() {
+        for (source, expected) in [
+            ("x `  y`", "x   y"),
+            ("`  y` x", "  y x"),
+            ("x *`  y`*", "x   y"),
+        ] {
+            let mut cx = NodeContext::default();
+            let document = parse(source, &mut cx).unwrap();
+            let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let text: String = paragraph
+                .children
+                .iter()
+                .map(|node| node.text.as_ref())
+                .collect();
+            assert_eq!(text, expected, "source {source:?}");
+        }
+    }
+
+    #[test]
+    fn selected_source_range_maps_unfolded_space_runs() {
+        let source = "two  spaces";
+        // Rendered "two  spaces" maps 1:1 with source bytes.
+        assert_eq!(select_rendered_range(source, 0..5), 0..5);
+        assert_eq!(select_rendered_range(source, 3..5), 3..5);
+        assert_eq!(select_rendered_range(source, 5..11), 5..11);
+    }
+
+    #[test]
+    fn selected_source_range_maps_across_a_dropped_comment() {
+        let source = "Text <!-- note --> after.";
+        // Rendered "Text  after." keeps both spaces around the dropped comment.
+        assert_eq!(select_rendered_range(source, 0..4), 0..4);
+        assert_eq!(select_rendered_range(source, 6..12), 19..25);
+    }
+
+    #[test]
+    fn selected_source_range_maps_after_a_br_newline() {
+        let source = "line one<br>\nline two";
+        // Rendered "line one\n line two" (18 bytes): "line two" starts at 10,
+        // mapping to source bytes 13..21 ("line one<br>\n" is 13 bytes).
+        assert_eq!(selected_rendered_range(source, 10..18), Some(13..21));
     }
 
     #[test]
@@ -1952,6 +2479,89 @@ mod tests {
                 .iter()
                 .any(|(_, mark)| mark.bold && mark.italic),
             "nested emphasis should produce a bold and italic mark"
+        );
+    }
+
+    #[test]
+    fn test_reference_images() {
+        for (reference, alt) in [
+            ("![Alt &amp; text][PiCtUrE]", "Alt & text"),
+            ("![picture][]", "picture"),
+            ("![picture]", "picture"),
+        ] {
+            for destination in [
+                "https://example.com/image.png",
+                "./image.png",
+                "file:///image.png",
+                "data:image/png;base64,iVBORw0KGgo=",
+            ] {
+                let source =
+                    format!("Before {reference} after.\n\n[picture]: {destination} \"Title\"\n");
+                let mut cx = NodeContext {
+                    offset: 17,
+                    ..Default::default()
+                };
+                let document = parse(&source, &mut cx).unwrap();
+                let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+                assert_eq!(paragraph.children.len(), 3, "{source}");
+                assert_eq!(paragraph.children[0].text.as_ref(), "Before ");
+                assert_eq!(paragraph.children[2].text.as_ref(), " after.");
+                let image = paragraph.children[1].as_image().expect("reference image");
+                assert_eq!(image.url.as_ref(), destination);
+                assert_eq!(image.alt.as_deref(), Some(alt));
+                assert_eq!(image.title.as_deref(), Some("Title"));
+                assert_eq!(
+                    image.span,
+                    Some(Span {
+                        start: 24,
+                        end: 24 + reference.len()
+                    })
+                );
+                assert_eq!(image.width, None);
+                assert_eq!(image.height, None);
+                match image.source() {
+                    gpui::ImageSource::Image(_) => assert!(destination.starts_with("data:")),
+                    gpui::ImageSource::Resource(gpui::Resource::Uri(uri)) => {
+                        assert!(!destination.starts_with("data:"));
+                        assert_eq!(uri.as_ref(), destination);
+                    }
+                    _ => panic!("unexpected image source"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_reference_image_definition_lookup() {
+        let source = "![alt][Some   LABEL]\n\n> [some label]: first.png\n\n[some label]: second.png \"Ignored\"\n";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        let image = paragraph.children[0].as_image().expect("reference image");
+        assert_eq!(image.url.as_ref(), "first.png");
+        assert_eq!(image.title, None);
+        assert_eq!(image.alt.as_deref(), Some("alt"));
+
+        let source = "[picture]: image.png\n\n[![alt][picture]](https://example.com)";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        let image = paragraph.children[0]
+            .as_image()
+            .expect("linked reference image");
+        assert_eq!(image.url.as_ref(), "image.png");
+        assert_eq!(
+            image.link.as_ref().unwrap().url.as_ref(),
+            "https://example.com"
+        );
+
+        let source = "![missing][unknown] ![collapsed][] ![shortcut]";
+        let document = parse(source, &mut NodeContext::default()).unwrap();
+        let paragraph = document.blocks.iter().find_map(first_paragraph).unwrap();
+        assert_eq!(paragraph.text(), source);
+        assert!(
+            paragraph
+                .children
+                .iter()
+                .all(|child| child.as_image().is_none())
         );
     }
 
@@ -2325,6 +2935,8 @@ mod tests {
 
     #[test]
     fn raw_html_off_keeps_html_as_text() {
+        // HERDR: content inside raw HTML blocks and tag attributes stays literal
+        // rather than being parsed as Markdown emphasis, entities, or images.
         let block = "<div>\n*literal* &amp;\n![image](https://example.com/x.png)\n</div>";
         let source = format!(
             "a <b>bold</b> <img src=\"https://example.com/x.png\" alt=\"*literal* &amp;\"> <https://example.com>\n\n{block}"
@@ -2378,6 +2990,7 @@ mod tests {
         let source = "a <strong>b *c* <em>d</em></strong> e <b>f</b> <i>g</i> <del>h</del> <br> <strong>unclosed";
         let mut cx = NodeContext::default();
         let document = parse(source, &mut cx).unwrap();
+        // HERDR (B16): whitespace after <br> stays unfolded.
         assert_eq!(document.text(), "a b c d e f g h \n unclosed\n");
         let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
             panic!()

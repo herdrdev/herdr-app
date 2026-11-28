@@ -1,16 +1,17 @@
 use crate::TestSupportExt as _;
 use std::rc::Rc;
 
-use chrono::{NaiveTime, Timelike as _};
 use gpui::{
     AnyElement, App, Context, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
     ParentElement, Render, RenderOnce, Role, SharedString, StatefulInteractiveElement,
     StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
 };
+use jiff::civil::Time;
 
 use crate::{
     Decrement, Increment, StyledExt as _,
+    a11y_disabled::A11yDisabledExt as _,
     actions::{SelectLeft, SelectNextColumn, SelectPrevColumn, SelectRight},
     input::Delete,
 };
@@ -41,7 +42,7 @@ pub enum TimePrecision {
 }
 
 impl TimePrecision {
-    /// The `chrono` format that displays a time at this precision and cycle.
+    /// The `strftime` format that displays a time at this precision and cycle.
     pub fn format(self, hour_cycle: HourCycle) -> &'static str {
         match (self, hour_cycle) {
             (Self::Minute, HourCycle::H23) => "%H:%M",
@@ -52,12 +53,12 @@ impl TimePrecision {
     }
 
     /// Drop the components finer than this precision.
-    pub fn truncate(self, time: NaiveTime) -> NaiveTime {
+    pub fn truncate(self, time: Time) -> Time {
         let second = match self {
             Self::Minute => 0,
             Self::Second => time.second(),
         };
-        NaiveTime::from_hms_opt(time.hour(), time.minute(), second).unwrap_or(time)
+        Time::new(time.hour(), time.minute(), second, 0).unwrap_or(time)
     }
 }
 
@@ -98,14 +99,14 @@ impl TimeSegment {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeFieldEvent {
     /// Keyboard editing changed the time.
-    Change(NaiveTime),
+    Change(Time),
 }
 
 /// The pure editing rules of a [`TimeFieldState`], kept apart from focus so
 /// they can be tested without a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SegmentEditor {
-    time: NaiveTime,
+    time: Time,
     precision: TimePrecision,
     hour_cycle: HourCycle,
     segment: TimeSegment,
@@ -116,7 +117,7 @@ struct SegmentEditor {
 impl SegmentEditor {
     fn new() -> Self {
         Self {
-            time: NaiveTime::MIN,
+            time: Time::midnight(),
             precision: TimePrecision::default(),
             hour_cycle: HourCycle::default(),
             segment: TimeSegment::Hour,
@@ -148,12 +149,12 @@ impl SegmentEditor {
     /// The displayed value of a segment: the hour follows the cycle, and the
     /// period is `0` for AM and `1` for PM.
     fn value(&self, segment: TimeSegment) -> u32 {
-        let hour = self.time.hour();
+        let hour = self.time.hour() as u32;
         match (segment, self.hour_cycle) {
             (TimeSegment::Hour, HourCycle::H23) => hour,
             (TimeSegment::Hour, HourCycle::H12) => (hour + 11) % 12 + 1,
-            (TimeSegment::Minute, _) => self.time.minute(),
-            (TimeSegment::Second, _) => self.time.second(),
+            (TimeSegment::Minute, _) => self.time.minute() as u32,
+            (TimeSegment::Second, _) => self.time.second() as u32,
             (TimeSegment::Period, _) => hour / 12,
         }
     }
@@ -166,17 +167,27 @@ impl SegmentEditor {
         }
     }
 
-    fn with_value(&self, segment: TimeSegment, value: u32) -> NaiveTime {
+    fn with_value(&self, segment: TimeSegment, value: u32) -> Time {
         let time = self.time;
-        let pm_offset = time.hour() / 12 * 12;
-        match (segment, self.hour_cycle) {
-            (TimeSegment::Hour, HourCycle::H23) => time.with_hour(value),
+        let hour = time.hour() as u32;
+        let pm_offset = hour / 12 * 12;
+        let (field, value) = match (segment, self.hour_cycle) {
+            (TimeSegment::Hour, HourCycle::H23) => (TimeSegment::Hour, value),
             // 12 AM is midnight and 12 PM is noon.
-            (TimeSegment::Hour, HourCycle::H12) => time.with_hour(value % 12 + pm_offset),
-            (TimeSegment::Minute, _) => time.with_minute(value),
-            (TimeSegment::Second, _) => time.with_second(value),
-            (TimeSegment::Period, _) => time.with_hour(time.hour() % 12 + value * 12),
+            (TimeSegment::Hour, HourCycle::H12) => (TimeSegment::Hour, value % 12 + pm_offset),
+            (TimeSegment::Period, _) => (TimeSegment::Hour, hour % 12 + value * 12),
+            (field, _) => (field, value),
+        };
+        let Ok(value) = i8::try_from(value) else {
+            return time;
+        };
+        let with = time.with();
+        match field {
+            TimeSegment::Hour | TimeSegment::Period => with.hour(value),
+            TimeSegment::Minute => with.minute(value),
+            TimeSegment::Second => with.second(value),
         }
+        .build()
         .unwrap_or(time)
     }
 
@@ -198,7 +209,7 @@ impl SegmentEditor {
         self.pending_digit = None;
     }
 
-    fn set_time(&mut self, time: NaiveTime) -> bool {
+    fn set_time(&mut self, time: Time) -> bool {
         let time = self.precision.truncate(time);
         if self.time == time {
             // Keep a half-typed segment when the owner echoes the same value back.
@@ -348,12 +359,12 @@ impl TimeFieldState {
         }
     }
 
-    pub fn time(&self) -> NaiveTime {
+    pub fn time(&self) -> Time {
         self.editor.time
     }
 
     /// Replace the time without emitting [`TimeFieldEvent::Change`].
-    pub fn set_time(&mut self, time: NaiveTime, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_time(&mut self, time: Time, _: &mut Window, cx: &mut Context<Self>) {
         if self.editor.set_time(time) {
             cx.notify();
         }
@@ -528,7 +539,8 @@ impl RenderOnce for TimeFieldSegment {
 /// Base owns focus, the keyboard model and pointer segment selection; the
 /// presentation lays out and decorates the field with `Styled` and each
 /// segment through [`TimeField::render_segment`]. A `:` separates the numeric
-/// segments; the AM/PM segment follows without one.
+/// segments unless [`TimeField::separator`] says otherwise; the AM/PM segment
+/// follows without one.
 #[derive(IntoElement)]
 pub struct TimeField {
     id: ElementId,
@@ -536,6 +548,7 @@ pub struct TimeField {
     disabled: bool,
     style: StyleRefinement,
     segment: SegmentRenderer,
+    separator: SharedString,
 }
 
 impl TimeField {
@@ -546,7 +559,15 @@ impl TimeField {
             disabled: false,
             style: StyleRefinement::default(),
             segment: Rc::new(|segment, _, _, _| segment.into_any_element()),
+            separator: SharedString::new_static(":"),
         }
+    }
+
+    /// What stands between the field's segments (`:` by default), as a caller
+    /// showing a time in its own locale may need.
+    pub fn separator(mut self, separator: impl Into<SharedString>) -> Self {
+        self.separator = separator.into();
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -585,7 +606,7 @@ impl RenderOnce for TimeField {
             .id(self.id.clone())
             .test_support()
             .role(Role::TimeInput)
-            .aria_value(SharedString::from(editor.time.format(format).to_string()))
+            .aria_value(SharedString::from(editor.time.strftime(format).to_string()))
             .track_focus(&focus_handle.clone().tab_stop(!disabled))
             .when(!disabled, |this| {
                 this.key_context(CONTEXT)
@@ -597,11 +618,24 @@ impl RenderOnce for TimeField {
                     .on_action(window.listener_for(&self.state, TimeFieldState::on_next_column))
                     .on_action(window.listener_for(&self.state, TimeFieldState::on_prev_column))
                     .on_key_down(window.listener_for(&self.state, TimeFieldState::on_key_down))
+                    // A press on the field outside any segment focuses it and selects the
+                    // first segment; a press on a segment stops here and selects that one.
+                    .on_mouse_down(MouseButton::Left, {
+                        let state = self.state.clone();
+                        let focus_handle = focus_handle.clone();
+                        move |_: &MouseDownEvent, window, cx| {
+                            focus_handle.focus(window, cx);
+                            state.update(cx, |state, cx| {
+                                let first = state.editor.segments()[0];
+                                state.select_segment(first, cx);
+                            });
+                        }
+                    })
             });
 
         for (ix, segment) in editor.segments().iter().copied().enumerate() {
             if ix > 0 && segment != TimeSegment::Period {
-                root = root.child(div().child(":"));
+                root = root.child(div().child(self.separator.clone()));
             }
             let segment_state = TimeFieldSegmentState {
                 segment,
@@ -620,6 +654,7 @@ impl RenderOnce for TimeField {
                 let focus_handle = focus_handle.clone();
                 item =
                     item.on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
                         focus_handle.focus(window, cx);
                         state.update(cx, |state, cx| state.select_segment(segment, cx));
                     });
@@ -627,7 +662,7 @@ impl RenderOnce for TimeField {
             root = root.child((self.segment)(item, segment_state, window, cx));
         }
 
-        root.refine_style(&self.style)
+        root.refine_style(&self.style).a11y_disabled(disabled)
     }
 }
 
@@ -635,8 +670,8 @@ impl RenderOnce for TimeField {
 mod tests {
     use super::*;
 
-    fn hms(h: u32, m: u32, s: u32) -> NaiveTime {
-        NaiveTime::from_hms_opt(h, m, s).unwrap()
+    fn hms(h: i8, m: i8, s: i8) -> Time {
+        Time::new(h, m, s, 0).unwrap()
     }
 
     fn editor(precision: TimePrecision, hour_cycle: HourCycle) -> SegmentEditor {
@@ -771,5 +806,21 @@ mod tests {
         editor.step(1);
         assert_eq!(editor.time, hms(0, 0, 0));
         assert!(!editor.input_digit(1), "digits do not edit the period");
+    }
+
+    #[gpui::test]
+    fn the_separator_is_a_colon_unless_set(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let cx = cx.add_empty_window();
+        let state = cx.update(|window, cx| cx.new(|cx| TimeFieldState::new(window, cx)));
+        assert_eq!(TimeField::new("time", &state).separator.as_ref(), ":");
+        assert_eq!(
+            TimeField::new("time", &state)
+                .separator(".")
+                .separator
+                .as_ref(),
+            "."
+        );
     }
 }

@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/ghostty-sys", "crates/herdr-shell"]
-exclude = ["crates/herdr-shell/rquickjs-compat", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
+exclude = ["crates/herdr-shell/rquickjs-compat", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
 resolver = "2"
 
 [workspace.package]
@@ -17,8 +17,8 @@ publish.workspace = true
 
 [dependencies]
 ghostty-sys = { path = "crates/ghostty-sys" }
-gpui = { package = "gpui-pre", version = "=0.3.8", features = ["render-to-image"] }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-pre", version = "=0.3.14", features = ["render-to-image"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 herdr-shell = { path = "crates/herdr-shell" }
 gpui-base = { path = "vendor/gpui-kit/crates/base" }
 anyhow = "1"
@@ -43,8 +43,8 @@ path = "tests/shot_pixels.rs"
 harness = false
 
 [dev-dependencies]
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["test-support"] }
-gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.14", features = ["test-support"] }
 herdr-shell = { path = "crates/herdr-shell", features = ["render-test-support"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -54,19 +54,19 @@ swash = "=0.2.10"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
+gpui_linux = { package = "gpui-pre-linux", version = "=0.3.14", features = ["render-to-image"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
+gpui_macos = { package = "gpui-pre-macos", version = "=0.3.14", features = ["render-to-image"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString"] }
 
 [target.'cfg(windows)'.dependencies]
-gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8", features = ["render-to-image"] }
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.14", features = ["render-to-image"] }
 uds_windows = "1.2"
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console", "Win32_System_Com", "Win32_Media_Multimedia"] }
@@ -90,8 +90,6 @@ zed-xim = { path = "vendor/zed-xim" }
 xim-ctext = { path = "vendor/xim-ctext" }
 # Our copy: Windows completes dead keys through native text input (HERDR:).
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-# Our copy: a flex item's min-content was measured even when unused (HERDR:).
-taffy = { path = "vendor/taffy" }
 
 # Our copy: the JIT copied all its call feedback on every refresh scan and
 # threw it away, ~40% of the main thread with a mod of many small

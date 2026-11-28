@@ -1,3 +1,4 @@
+// Modified for gpui-pre (snapshot of zed@f126950): adapt device queues and sRGB detection to wgpu 30.0.1.
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
@@ -123,6 +124,7 @@ impl PlatformAtlas for WgpuAtlas {
         self.0.lock().remove(key);
     }
 
+    // HERDR: invalidate all cached sizes of edited mod SVG icons.
     fn remove_svg(&self, path: &str) {
         self.0.lock().remove_svg(path);
     }
@@ -416,6 +418,7 @@ mod tests {
                     power_preference: wgpu::PowerPreference::LowPower,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 })
                 .await
                 .map_err(|error| anyhow::anyhow!("failed to request adapter: {error}"))?;

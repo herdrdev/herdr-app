@@ -28,11 +28,16 @@ struct FontKey {
     family: SharedString,
     features: FontFeatures,
     fallbacks: Option<FontFallbacks>,
+    // HERDR: allow emoji-only faces in explicit user_fallback_chain.
     is_fallback: bool,
 }
 
 impl FontKey {
-    fn new(family: SharedString, features: FontFeatures, fallbacks: Option<FontFallbacks>) -> Self {
+    fn new(
+        family: SharedString,
+        features: FontFeatures,
+        fallbacks: Option<FontFallbacks>,
+    ) -> Self {
         Self {
             family,
             features,
@@ -53,6 +58,7 @@ type ColorFallback = Vec<(Range<usize>, FontId)>;
 struct CosmicTextSystemState {
     font_system: FontSystem,
     scratch: ShapeBuffer,
+    // HERDR: COLRv1/empty-color fallback cache and single-slot pending glyph image.
     color_fallbacks: HashMap<(FontId, u32, String), Option<ColorFallback>>,
     swash_scale_context: ScaleContext,
     pending_glyph_image: Option<(RenderGlyphParams, swash::scale::image::Image)>,
@@ -102,6 +108,7 @@ impl FontMatchProperties {
 }
 
 impl CosmicTextSystem {
+    // HERDR: test probe counting glyph rasterizations for COLRv1 caching tests.
     #[cfg(feature = "test-support")]
     pub fn glyph_image_render_count(&self) -> usize {
         self.0.read().glyph_image_renders
@@ -186,6 +193,7 @@ impl CosmicTextSystem {
 }
 
 impl PlatformTextSystem for CosmicTextSystem {
+    // HERDR: report whether a color glyph uses the run foreground color.
     fn glyph_uses_foreground(&self, params: &RenderGlyphParams) -> bool {
         if !params.is_emoji {
             return false;
@@ -274,6 +282,7 @@ impl PlatformTextSystem for CosmicTextSystem {
         self.0.write().prewarm_fonts(font_ids);
     }
 
+    // HERDR: expose raw OpenType tables for terminal cell metrics.
     fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
         let state = self.0.read();
         let font = &state.loaded_font(font_id).font;
@@ -438,8 +447,7 @@ impl CosmicTextSystemState {
                         cached.clone()
                     } else {
                         let loaded = self.load_family(fallback_name, features, None, true)?;
-                        self.font_ids_by_family_cache
-                            .insert(fb_key.clone(), loaded.clone());
+                        self.font_ids_by_family_cache.insert(fb_key, loaded.clone());
                         loaded
                     };
                     let Some(&fb_id) = fb_ids.first() else {
@@ -492,12 +500,19 @@ impl CosmicTextSystemState {
                 "Segoe Fluent Icons",
             ];
 
+            // This only decides whether a face can be a primary font. The
+            // editor measures layout with the width of 'm' and would panic
+            // without it.
+            //
+            // Don't remove the face from the font database. Arabic, Devanagari
+            // and emoji fonts often have no Latin glyphs, and they are exactly
+            // what cosmic-text falls back to when the primary font lacks a
+            // glyph.
+            // HERDR: primary fonts supply cell metrics; emoji-only faces remain valid as explicit fallbacks.
             if !is_fallback
                 && font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
-                // Primary terminal fonts supply cell metrics. An emoji-only
-                // face is still valid as a fallback, even after this rejection.
                 continue;
             };
 
@@ -536,7 +551,7 @@ impl CosmicTextSystemState {
     }
 
     fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        // Policy discovery may already have rendered this exact variant.
+        // HERDR: Policy discovery may already have rendered this exact variant.
         if !self
             .pending_glyph_image
             .as_ref()
@@ -583,6 +598,7 @@ impl CosmicTextSystemState {
             }
             swash::scale::image::Content::Mask => {
                 if params.is_emoji {
+                    // HERDR: tint mask glyphs in emoji runs with the run foreground color.
                     let [r, g, b, a] = params.foreground;
                     let expanded = image
                         .data
@@ -630,6 +646,7 @@ impl CosmicTextSystemState {
             return Ok(swash::scale::image::Image::new());
         }
 
+        // HERDR: rasterize COLRv1 vector color glyphs with foreground palette support.
         if params.is_emoji
             && let Some(image) = crate::colr::render_with_foreground(
                 font_ref.data,
@@ -819,6 +836,7 @@ impl CosmicTextSystemState {
         layout.descent = layout.descent.max(segment.descent);
     }
 
+    // HERDR: detect empty/broken color glyphs and resolve a drawable fallback face.
     fn empty_color_glyph(&mut self, glyph: &cosmic_text::LayoutGlyph) -> bool {
         let std::result::Result::Ok(font_id) = self.font_id_for_cosmic_id(glyph.font_id) else {
             return false;
@@ -1075,7 +1093,7 @@ impl CosmicTextSystemState {
             };
         };
 
-        // Resolve fonts first, then shape the entire line again. Cosmic-text
+        // HERDR: Resolve fonts first, then shape the entire line again. Cosmic-text
         // owns advances, bidi positioning and ascent/descent, not the repair.
         let mut repairs = Vec::new();
         let mut start = 0;
@@ -1210,7 +1228,10 @@ impl CosmicTextSystemState {
 
             let shaped_glyph = ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),
-                position: point(glyph.x.into(), glyph.y.into()),
+                position: point(
+                    (glyph.x + glyph.x_offset * f32::from(font_size)).into(),
+                    (glyph.y - glyph.y_offset * f32::from(font_size)).into(),
+                ),
                 index: glyph.start,
                 is_emoji,
             };
@@ -1317,6 +1338,7 @@ impl CosmicTextSystemState {
     }
 }
 
+// HERDR: inspect EBLC/EBDT bitmap strike dimensions before calling swash.
 fn alpha_bitmap<'a>(
     font: swash::FontRef<'a>,
     glyph_id: u16,
@@ -1325,7 +1347,8 @@ fn alpha_bitmap<'a>(
     let locations = font.table(swash::tag_from_bytes(b"EBLC"))?;
     let data = font.table(swash::tag_from_bytes(b"EBDT"))?;
     let locations = ttf_parser::cblc::Table::parse(locations)?;
-    ttf_parser::cbdt::Table::parse(locations, data)?.get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
+    ttf_parser::cbdt::Table::parse(locations, data)?
+        .get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
 }
 
 #[inline(always)]
@@ -1612,8 +1635,14 @@ fn check_is_known_emoji_font(postscript_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[cfg(feature = "test-support")]
     use std::{cell::RefCell, rc::Rc};
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn all_font_names_tracks_available_families() -> Result<()> {
@@ -1671,6 +1700,70 @@ mod tests {
     }
 
     #[test]
+    fn cached_font_resolution_does_not_wait_for_cold_lookups() -> Result<()> {
+        for family in [".ZedSans", "Missing Font"] {
+            let platform_text_system = Arc::new(text_system()?);
+            let text_system = gpui::TextSystem::new(platform_text_system.clone());
+            let cached = gpui::font(family);
+            let expected = platform_text_system.font_id(&gpui::font(".ZedSans"))?;
+            assert_eq!(text_system.resolve_font(&cached), expected);
+            let (sender, receiver) = mpsc::channel();
+
+            thread::scope(|scope| {
+                let backend = platform_text_system.0.read();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let cold = scope.spawn(|| text_system.resolve_font(&cached.clone().bold()));
+                while !platform_text_system.0.is_locked_exclusive() && Instant::now() < deadline {
+                    thread::yield_now();
+                }
+                let cold_waiting = platform_text_system.0.is_locked_exclusive();
+                let warm = scope.spawn(|| sender.send(text_system.resolve_font(&cached)));
+                let result =
+                    receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+                drop(backend);
+                let cold_result = cold.join();
+                let warm_result = warm.join();
+
+                assert!(cold_waiting);
+                assert_eq!(result.expect("cached lookup blocked"), expected);
+                assert_eq!(cold_result.expect("cold lookup panicked"), expected);
+                warm_result
+                    .expect("warm lookup panicked")
+                    .expect("receiver dropped");
+            });
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn adding_fonts_retries_cached_font_failures() -> Result<()> {
+        let platform_text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Lilex"));
+        let text_system = gpui::TextSystem::new(platform_text_system.clone());
+        text_system.add_fonts(vec![Cow::Borrowed(IBM_PLEX)])?;
+        let original_fallback = platform_text_system.font_id(&gpui::font(".ZedSans"))?;
+        let requests = [
+            gpui::Font::default(),
+            gpui::font("Lilex"),
+            gpui::font("Missing Font"),
+        ];
+        for requested in &requests {
+            assert_eq!(text_system.resolve_font(requested), original_fallback);
+        }
+        assert_eq!(
+            text_system.get_font_for_id(original_fallback),
+            Some(gpui::font(".ZedSans"))
+        );
+
+        text_system.add_fonts(vec![Cow::Borrowed(LILEX)])?;
+        for (requested, resolved) in requests.iter().zip([".SystemUIFont", "Lilex", ".ZedMono"]) {
+            let installed = platform_text_system.font_id(&gpui::font(resolved))?;
+            assert_ne!(installed, original_fallback);
+            assert_eq!(text_system.resolve_font(requested), installed);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn font_properties_describe_the_selected_face() -> Result<()> {
         let text_system = text_system()?;
         let regular = gpui::font("IBM Plex Sans");
@@ -1702,6 +1795,29 @@ mod tests {
             font_id,
         }];
         Ok(text_system.layout_line(text, gpui::px(14.0), &runs))
+    }
+
+    #[test]
+    fn combining_marks_are_positioned_over_their_base() -> Result<()> {
+        let text_system = text_system()?;
+        let layout = layout_text(&text_system, "v\u{0304}v")?;
+        let glyphs = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(glyphs.len(), 3);
+        let base = glyphs[0].position;
+        let mark = glyphs[1].position;
+        let next = glyphs[2].position;
+        assert!(mark.x > base.x);
+        assert!(
+            mark.x < next.x,
+            "combining mark positioned after its base: mark.x={:?}, next.x={:?}",
+            mark.x,
+            next.x
+        );
+        Ok(())
     }
 
     /// Mirrors the original crash: mixed-direction text reaching the shaper

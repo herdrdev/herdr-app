@@ -42,6 +42,19 @@ pre-release: test docs-check
 build:
     cargo build --locked
 
+# Vendored gpui-base unit tests (Linux only; CI runs this on Linux alongside herdr-shell).
+[linux]
+test-base *args:
+    bash scripts/test-base {{args}}
+
+[linux]
+test:
+    bun test scripts/changes.test.ts scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
+    cargo test --locked -p herdr-app -p herdr-shell
+    bash scripts/test-base
+
+[macos]
+[windows]
 test:
     bun test scripts/changes.test.ts scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
     cargo test --locked -p herdr-app -p herdr-shell

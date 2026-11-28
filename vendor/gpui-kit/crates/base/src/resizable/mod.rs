@@ -1,8 +1,6 @@
 use std::ops::Range;
 
-use gpui::{
-    Along, App, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window, px,
-};
+use gpui::{Along, Axis, Bounds, Context, ElementId, EventEmitter, IsZero, Pixels, Window, px};
 
 mod panel;
 mod resize_handle;
@@ -59,15 +57,23 @@ impl ResizableState {
         &self.sizes
     }
 
+    /// Whether a resize handle is being dragged.
+    ///
+    /// Starting a drag does not notify, so read this while rendering during
+    /// the drag rather than relying on a notification when it starts.
+    pub fn is_resizing(&self) -> bool {
+        self.resizing_panel_ix.is_some()
+    }
+
     /// Programmatically resize the panel at `ix` to `size`, redistributing
     /// space among siblings using the same logic as a drag.
     ///
-    /// Sizes are clamped to the panel's `size_range` and to the container.
+    /// The size change respects the visible panels' `size_range` and available space.
     /// Emits `ResizablePanelEvent::Resized` so subscribers (e.g. preference
     /// persistence) see the change just as if the user had dragged a handle.
     ///
-    /// Out-of-range indices are a no-op. For the last panel, space is taken
-    /// from the previous sibling (the last panel has no handle of its own).
+    /// Hidden panels and out-of-range indices are ignored. The last visible
+    /// panel resizes using the boundary with its previous visible sibling.
     pub fn resize_panel(
         &mut self,
         ix: usize,
@@ -75,17 +81,17 @@ impl ResizableState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if ix >= self.sizes.len() {
+        if self.panels.get(ix).is_none_or(|panel| panel.hidden) {
             return;
         }
-        if ix + 1 < self.sizes.len() {
+        if self.next_visible_panel(ix).is_some() {
             self.resize_panel_at_handle(ix, size, window, cx);
-        } else if ix > 0 {
+        } else if let Some(previous) = self.previous_visible_panel(ix) {
             // Last panel: drive its size by resizing the previous sibling so
             // the freed space lands here.
-            let delta = self.sizes[ix] - size;
-            let prev = self.sizes[ix - 1];
-            self.resize_panel_at_handle(ix - 1, prev + delta, window, cx);
+            let delta = self.panels[ix].bounds.size.along(self.axis) - size;
+            let previous_size = self.panels[previous].bounds.size.along(self.axis);
+            self.resize_panel_at_handle(previous, previous_size + delta, window, cx);
         }
         self.done_resizing(cx);
     }
@@ -113,6 +119,9 @@ impl ResizableState {
         let total_leftover_size = (container_size - size).max(px(1.));
 
         for (i, panel) in self.panels.iter_mut().enumerate() {
+            if panel.hidden {
+                continue;
+            }
             let ratio = self.sizes[i] / container_size;
             self.sizes[i] = total_leftover_size * ratio;
             panel.size = Some(self.sizes[i]);
@@ -150,6 +159,9 @@ impl ResizableState {
                 if panel.size != *size {
                     panel.size = *size;
                     changed = true;
+                }
+                if panel.hidden {
+                    continue;
                 }
             }
 
@@ -199,6 +211,40 @@ impl ResizableState {
         }
     }
 
+    fn sync_panel_visibility(
+        &mut self,
+        visibility: impl Iterator<Item = bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        for ((panel, size), visible) in self.panels.iter_mut().zip(&mut self.sizes).zip(visibility)
+        {
+            if panel.hidden == visible {
+                panel.hidden = !visible;
+                // Hidden panels keep their slot and preferred size but occupy no space.
+                *size = if visible {
+                    panel.size.unwrap_or(PANEL_MIN_SIZE)
+                } else {
+                    px(0.)
+                };
+                changed = true;
+            }
+        }
+        if changed {
+            self.resizing_panel_ix = None;
+            // Flex lays out the visible panels without replacing their preferred sizes.
+            cx.notify();
+        }
+    }
+
+    fn previous_visible_panel(&self, ix: usize) -> Option<usize> {
+        (0..ix).rfind(|&ix| !self.panels[ix].hidden)
+    }
+
+    fn next_visible_panel(&self, ix: usize) -> Option<usize> {
+        (ix + 1..self.panels.len()).find(|&ix| !self.panels[ix].hidden)
+    }
+
     /// Whether [`Self::update_panel_size`] with these arguments would change
     /// anything. A panel reports its bounds as it prepaints, every frame it
     /// is drawn; updating the state for the same bounds would mark it, and
@@ -208,6 +254,7 @@ impl ResizableState {
         panel_ix: usize,
         bounds: Bounds<Pixels>,
         size_range: &Range<Pixels>,
+        fixed: bool,
     ) -> bool {
         let Some(panel) = self.panels.get(panel_ix) else {
             return true;
@@ -215,6 +262,7 @@ impl ResizableState {
         self.sizes.get(panel_ix).map(|size| size.as_f32()) == Some(PANEL_MIN_SIZE.as_f32())
             || panel.bounds != bounds
             || panel.size_range != *size_range
+            || panel.fixed != fixed
     }
 
     pub(crate) fn update_panel_size(
@@ -222,8 +270,10 @@ impl ResizableState {
         panel_ix: usize,
         bounds: Bounds<Pixels>,
         size_range: Range<Pixels>,
+        fixed: bool,
         cx: &mut Context<Self>,
     ) {
+        self.panels[panel_ix].fixed = fixed;
         let size = bounds.size.along(self.axis);
         // This check is only necessary to stop the very first panel from resizing on its own
         // it needs to be passed when the panel is freshly created so we get the initial size,
@@ -251,10 +301,12 @@ impl ResizableState {
 
     /// Reset the panel at `panel_ix` while preserving its current size.
     pub fn reset_panel(&mut self, panel_ix: usize, cx: &mut Context<Self>) {
-        let old_size = self.sizes[panel_ix];
-
-        self.panels[panel_ix] = ResizablePanelState::default();
-        self.sizes[panel_ix] = old_size;
+        let panel = &mut self.panels[panel_ix];
+        *panel = ResizablePanelState {
+            hidden: panel.hidden,
+            size: if panel.hidden { panel.size } else { None },
+            ..Default::default()
+        };
         self.adjust_to_container_size(cx);
     }
 
@@ -262,6 +314,7 @@ impl ResizableState {
     pub fn clear(&mut self) {
         self.panels.clear();
         self.sizes.clear();
+        self.resizing_panel_ix = None;
     }
 
     #[inline]
@@ -275,23 +328,8 @@ impl ResizableState {
         cx.emit(ResizablePanelEvent::Resized);
     }
 
-    fn panel_size_range(&self, ix: usize) -> Range<Pixels> {
-        let Some(panel) = self.panels.get(ix) else {
-            return PANEL_MIN_SIZE..Pixels::MAX;
-        };
-
-        panel.size_range.clone()
-    }
-
-    fn sync_real_panel_sizes(&mut self, _: &App) {
-        for (i, panel) in self.panels.iter().enumerate() {
-            self.sizes[i] = panel.bounds.size.along(self.axis);
-        }
-    }
-
     /// Resize the panel at `ix` by treating `ix` as the drag-handle position
-    /// (the handle that sits between panel `ix` and panel `ix + 1`). Returns
-    /// early on the last panel since there is no handle below it.
+    /// between it and the next visible panel.
     ///
     /// This is the worker behind drag interactions and the public
     /// [`Self::resize_panel`] API.
@@ -302,69 +340,65 @@ impl ResizableState {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let old_sizes = self.sizes.clone();
-
-        let mut ix = ix;
-        // Only resize the left panels.
-        if ix >= old_sizes.len() - 1 {
+        if self.panels.get(ix).is_none_or(|panel| panel.hidden) {
             return;
         }
-        let container_size = self.container_size();
-        self.sync_real_panel_sizes(cx);
-
-        let move_changed = size - old_sizes[ix];
-        if move_changed == px(0.) {
+        let Some(next) = self.next_visible_panel(ix) else {
             return;
+        };
+        // The pointer position is relative to the last layout, not the flex basis.
+        let mut sizes: Vec<_> = self
+            .panels
+            .iter()
+            .map(|panel| {
+                if panel.hidden {
+                    px(0.)
+                } else {
+                    panel.bounds.size.along(self.axis)
+                }
+            })
+            .collect();
+        let delta = size - sizes[ix];
+        if delta > px(0.) {
+            self.transfer_size(&mut sizes, ix, next..self.panels.len(), delta);
+        } else if delta < px(0.) {
+            self.transfer_size(&mut sizes, next, (0..=ix).rev(), -delta);
         }
 
-        let size_range = self.panel_size_range(ix);
-        let new_size = size.clamp(size_range.start, size_range.end);
-        let is_expand = move_changed > px(0.);
-
-        let main_ix = ix;
-        let mut new_sizes = old_sizes.clone();
-
-        if is_expand {
-            let mut changed = new_size - old_sizes[ix];
-            new_sizes[ix] = new_size;
-
-            while changed > px(0.) && ix < old_sizes.len() - 1 {
-                ix += 1;
-                let size_range = self.panel_size_range(ix);
-                let available_size = (new_sizes[ix] - size_range.start).max(px(0.));
-                let to_reduce = changed.min(available_size);
-                new_sizes[ix] -= to_reduce;
-                changed -= to_reduce;
+        if sizes != self.sizes {
+            for (panel, &size) in self.panels.iter_mut().zip(&sizes) {
+                if !panel.hidden {
+                    panel.size = Some(size);
+                }
             }
-        } else {
-            let mut changed = new_size - size;
-            new_sizes[ix] = new_size;
+            self.sizes = sizes;
+            cx.notify();
+        }
+    }
 
-            while changed > px(0.) && ix > 0 {
-                ix -= 1;
-                let size_range = self.panel_size_range(ix);
-                let available_size = (new_sizes[ix] - size_range.start).max(px(0.));
-                let to_reduce = changed.min(available_size);
-                changed -= to_reduce;
-                new_sizes[ix] -= to_reduce;
+    fn transfer_size(
+        &self,
+        sizes: &mut [Pixels],
+        receiver: usize,
+        donors: impl Iterator<Item = usize>,
+        delta: Pixels,
+    ) {
+        let capacity = (self.panels[receiver].size_range.end - sizes[receiver]).max(px(0.));
+        let mut remaining = delta.min(capacity);
+        for (index, donor) in donors.enumerate() {
+            if remaining.is_zero() {
+                break;
             }
-
-            new_sizes[main_ix + 1] += old_sizes[main_ix] - size - changed;
+            let panel = &self.panels[donor];
+            // A fixed panel can shrink only if it borders the dragged handle.
+            if panel.hidden || (panel.fixed && index != 0) {
+                continue;
+            }
+            let amount = remaining.min((sizes[donor] - panel.size_range.start).max(px(0.)));
+            sizes[donor] -= amount;
+            sizes[receiver] += amount;
+            remaining -= amount;
         }
-
-        // If total size exceeds container size, adjust the main panel
-        let total_size: Pixels = new_sizes.iter().map(|s| s.as_f32()).sum::<f32>().into();
-        if total_size > container_size {
-            let overflow = total_size - container_size;
-            new_sizes[main_ix] = (new_sizes[main_ix] - overflow).max(size_range.start);
-        }
-
-        for (i, _) in old_sizes.iter().enumerate() {
-            let size = new_sizes[i];
-            self.panels[i].size = Some(size);
-        }
-        self.sizes = new_sizes;
-        cx.notify();
     }
 
     /// Adjust panel sizes according to the container size.
@@ -382,21 +416,47 @@ impl ResizableState {
         // flexible panel comes back 587px wide on the frame after the first,
         // which reads as the layout jumping once for no reason. Flex already
         // fits the container, so there is nothing here to adjust.
-        if self.panels.iter().any(|panel| panel.size.is_none()) {
+        if self
+            .panels
+            .iter()
+            .any(|panel| !panel.hidden && panel.size.is_none())
+        {
             return;
         }
 
-        let container_size = self.container_size();
-        let total = self.sizes.iter().map(|s| s.as_f32()).sum::<f32>();
+        // Fixed panels keep their size; the other panels share what is left
+        // in the same proportions as before. A container too small for the
+        // fixed panels leaves every size alone, so the proportions survive
+        // until it grows again.
+        let sum = |fixed: bool| {
+            self.panels
+                .iter()
+                .zip(&self.sizes)
+                .filter(|(panel, _)| !panel.hidden && panel.fixed == fixed)
+                .map(|(_, size)| size.as_f32())
+                .sum::<f32>()
+        };
+        let (fixed_size, total) = (px(sum(true)), sum(false));
         if !total.is_finite() || total <= 0. {
             return;
         }
         let total_size = px(total);
+        let available = self.container_size() - fixed_size;
+        if available <= px(0.) {
+            return;
+        }
 
         for i in 0..self.panels.len() {
+            if self.panels[i].hidden {
+                continue;
+            }
+            if self.panels[i].fixed {
+                self.panels[i].size = Some(self.sizes[i]);
+                continue;
+            }
             let size = self.sizes[i];
             let ratio = size / total_size;
-            let new_size = container_size * ratio;
+            let new_size = available * ratio;
 
             self.sizes[i] = new_size;
             self.panels[i].size = Some(new_size);
@@ -412,6 +472,9 @@ pub(crate) struct ResizablePanelState {
     pub size: Option<Pixels>,
     pub size_range: Range<Pixels>,
     bounds: Bounds<Pixels>,
+    /// See [`ResizablePanel::fixed`].
+    pub(crate) fixed: bool,
+    hidden: bool,
 }
 
 #[cfg(test)]
@@ -422,8 +485,8 @@ mod tests {
     };
 
     use gpui::{
-        App, AppContext as _, Context, InteractiveElement as _, IntoElement, Modifiers,
-        MouseButton, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
+        App, AppContext as _, Axis, Context, InputEvent as _, InteractiveElement as _, IntoElement,
+        Modifiers, MouseButton, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
         VisualTestContext, Window, div, point, prelude::FluentBuilder as _, px, size,
     };
 
@@ -480,6 +543,135 @@ mod tests {
         assert_eq!(followup_frame, settled_frame);
     }
 
+    struct FixedPanelHarness {
+        width: Pixels,
+        fixed: bool,
+        state: gpui::Entity<ResizableState>,
+    }
+
+    impl Render for FixedPanelHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(self.width).h(px(100.)).child(
+                h_resizable("fixed-panel")
+                    .with_state(&self.state)
+                    .child(
+                        resizable_panel()
+                            .size(px(240.))
+                            .size_range(px(100.)..px(480.))
+                            .when(self.fixed, |panel| panel.fixed())
+                            .child(div().size_full().debug_selector(|| "fp-sidebar".into())),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size(px(400.))
+                            .child(div().size_full().debug_selector(|| "fp-main".into())),
+                    )
+                    .child(
+                        resizable_panel()
+                            .child(div().size_full().debug_selector(|| "fp-aside".into())),
+                    ),
+            )
+        }
+    }
+
+    /// A fixed panel keeps its size when the container resizes, the other
+    /// panels share the rest in their proportions, and a container briefly
+    /// too small for the fixed panel does not lose those proportions. A drag
+    /// on another handle does not take space from it either.
+    #[gpui::test]
+    fn fixed_panel_keeps_its_size_across_a_container_resize(cx: &mut TestAppContext) {
+        let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
+        let (view, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| FixedPanelHarness {
+                width: px(840.),
+                fixed: true,
+                state,
+            }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+        let widths = |cx: &mut VisualTestContext| {
+            ["fp-sidebar", "fp-main", "fp-aside"].map(|selector| {
+                cx.debug_bounds(selector)
+                    .expect("every panel must lay out")
+                    .size
+                    .width
+            })
+        };
+        assert_eq!(widths(cx), [px(240.), px(400.), px(200.)]);
+
+        for (width, expected) in [
+            (px(1140.), Some([px(240.), px(600.), px(300.)])),
+            (px(200.), None),
+            (px(600.), Some([px(240.), px(240.), px(120.)])),
+        ] {
+            view.update(cx, |view, cx| {
+                view.width = width;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(widths(cx)[0], px(240.), "{width:?}");
+            if let Some(expected) = expected {
+                assert_eq!(widths(cx), expected, "{width:?}");
+            }
+        }
+
+        // Dragging the main panel below its minimum takes the rest from the
+        // panel after it, not from the fixed sidebar before it.
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| state.resize_panel(1, px(50.), window, cx));
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(widths(cx), [px(240.), px(100.), px(260.)]);
+
+        // Its own handle still resizes the fixed sidebar, and it keeps the
+        // new width when the container resizes again.
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| state.resize_panel(0, px(300.), window, cx));
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(widths(cx), [px(300.), px(100.), px(200.)]);
+        view.update(cx, |view, cx| {
+            view.width = px(900.);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(widths(cx)[0], px(300.));
+    }
+
+    /// A panel made fixed after its first frame, while its bounds stay the
+    /// same, keeps its size on the next container resize.
+    #[gpui::test]
+    fn panel_made_fixed_in_place_keeps_its_size_across_a_container_resize(cx: &mut TestAppContext) {
+        let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
+        let (view, cx) = cx.add_window_view(move |_, _| FixedPanelHarness {
+            width: px(840.),
+            fixed: false,
+            state,
+        });
+        let draw = |cx: &mut VisualTestContext, update: fn(&mut FixedPanelHarness)| {
+            view.update(cx, |view, cx| {
+                update(view);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(cx, |_| {});
+        draw(cx, |view| view.fixed = true);
+        draw(cx, |view| view.width = px(1140.));
+
+        let sidebar = cx
+            .debug_bounds("fp-sidebar")
+            .expect("the sidebar must lay out");
+        assert_eq!(sidebar.size.width, px(240.));
+    }
+
     struct CallerStateHarness {
         width: Pixels,
         state: gpui::Entity<ResizableState>,
@@ -506,12 +698,9 @@ mod tests {
     #[gpui::test]
     fn caller_owned_state_settles_on_the_same_frame(cx: &mut TestAppContext) {
         let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
-        let (view, cx) = cx.add_window_view({
-            let state = state.clone();
-            move |_, _| CallerStateHarness {
-                width: px(800.),
-                state,
-            }
+        let (view, cx) = cx.add_window_view(move |_, _| CallerStateHarness {
+            width: px(800.),
+            state,
         });
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
@@ -689,9 +878,52 @@ mod tests {
     }
 
     #[gpui::test]
+    fn resizing_uses_measured_sizes_and_respects_both_limits(cx: &mut TestAppContext) {
+        let (cx, state, _) = harness(cx);
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                let first = state.panels[0].bounds.size.width;
+                let second = state.panels[1].bounds.size.width;
+                state.sizes[0] = first - px(20.);
+                state.panels[0].size_range.start = first - px(30.);
+                state.panels[1].size_range.end = second + px(10.);
+                state.resize_panel_at_handle(0, first - px(50.), window, cx);
+                assert_eq!(state.sizes.as_slice(), &[first - px(10.), second + px(10.)]);
+
+                state.panels[1].size_range.end = second + px(60.);
+                state.resize_panel_at_handle(0, first - px(50.), window, cx);
+                assert_eq!(state.sizes.as_slice(), &[first - px(30.), second + px(30.)]);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn hiding_a_panel_preserves_its_slot_and_preferred_size(cx: &mut TestAppContext) {
+        let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
+        cx.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.bounds.size = size(px(600.), px(100.));
+                state.sync_panels_count(Axis::Horizontal, 3, cx);
+                state.adopt_sizes(&[Some(px(200.)); 3], cx);
+
+                state.sync_panel_visibility([true, false, true].into_iter(), cx);
+                assert_eq!(state.sizes.as_slice(), &[px(200.), px(0.), px(200.)]);
+                assert_eq!(state.next_visible_panel(0), Some(2));
+                assert_eq!(state.previous_visible_panel(2), Some(0));
+
+                state.insert_panel(Some(px(100.)), None, cx);
+                state.sync_panel_visibility([true; 4].into_iter(), cx);
+                assert_eq!(state.sizes[1], px(200.));
+                assert_eq!(state.next_visible_panel(0), Some(1));
+            });
+        });
+    }
+
+    #[gpui::test]
     fn dragging_the_handle_resizes_and_emits_once(cx: &mut TestAppContext) {
         let (cx, state, resizes) = harness(cx);
         let boundary = cx.debug_bounds("second-panel").unwrap().left();
+        assert!(!state.read_with(cx, |state, _| state.is_resizing()));
 
         cx.simulate_mouse_down(
             point(boundary - px(2.), px(50.)),
@@ -708,6 +940,7 @@ mod tests {
             Some(MouseButton::Left),
             Modifiers::default(),
         );
+        assert!(state.read_with(cx, |state, _| state.is_resizing()));
         cx.simulate_mouse_up(
             point(px(220.), px(50.)),
             MouseButton::Left,
@@ -716,7 +949,174 @@ mod tests {
 
         state.read_with(cx, |state, _| {
             assert_eq!(state.sizes(), &vec![px(220.), px(180.)]);
+            assert!(!state.is_resizing());
         });
+        assert_eq!(resizes.get(), 1);
+    }
+
+    #[gpui::test]
+    fn dragging_before_the_next_paint_resizes_and_emits_once(cx: &mut TestAppContext) {
+        let (cx, state, resizes) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+
+        // Dispatch the whole gesture in one update. The simulation helpers
+        // allow a paint between events and hide stale listener state.
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::MouseDownEvent {
+                    position: point(boundary - px(2.), px(50.)),
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            for x in [boundary + px(10.), px(220.)] {
+                window.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position: point(x, px(50.)),
+                        pressed_button: Some(MouseButton::Left),
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            }
+            assert_eq!(state.read(cx).resizing_panel_ix, Some(0));
+            assert_eq!(state.read(cx).sizes(), &vec![px(220.), px(180.)]);
+            assert_eq!(resizes.get(), 0);
+
+            // Repeated release and subsequent movement must not reuse the
+            // active index from the gesture that just finished.
+            for _ in 0..2 {
+                window.dispatch_event(
+                    gpui::MouseUpEvent {
+                        position: point(px(220.), px(50.)),
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            }
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    position: point(px(260.), px(50.)),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert_eq!(state.read(cx).resizing_panel_ix, None);
+            assert_eq!(state.read(cx).sizes(), &vec![px(220.), px(180.)]);
+            assert_eq!(resizes.get(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn cancelled_drag_does_not_reuse_the_painted_index(cx: &mut TestAppContext) {
+        let (cx, state, resizes) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+        cx.simulate_mouse_down(
+            point(boundary - px(2.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(boundary + px(10.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            assert_eq!(state.read(cx).resizing_panel_ix, Some(0));
+            window.draw(cx).clear(cx);
+            state.update(cx, |state, cx| state.resize_panel(0, px(210.), window, cx));
+            cx.stop_active_drag(window);
+            assert_eq!(state.read(cx).resizing_panel_ix, None);
+
+            // Cancel after painting the active index, then deliver queued
+            // events without replacing that frame's listeners.
+            window.dispatch_event(
+                gpui::MouseMoveEvent {
+                    position: point(px(260.), px(50.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::MouseUpEvent {
+                    position: point(px(260.), px(50.)),
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert_eq!(state.read(cx).sizes(), &vec![px(210.), px(190.)]);
+            assert_eq!(state.read(cx).resizing_panel_ix, None);
+            assert_eq!(resizes.get(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_mid_drag_stops_resizing(cx: &mut TestAppContext) {
+        let (cx, state, _) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+        cx.simulate_mouse_down(
+            point(boundary - px(2.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(boundary + px(10.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(state.read_with(cx, |state, _| state.is_resizing()));
+
+        state.update(cx, |state, _| state.clear());
+        assert!(!state.read_with(cx, |state, _| state.is_resizing()));
+    }
+
+    #[gpui::test]
+    fn stopping_the_drag_ends_resizing(cx: &mut TestAppContext) {
+        let (cx, state, resizes) = harness(cx);
+        let boundary = cx.debug_bounds("second-panel").unwrap().left();
+        cx.simulate_mouse_down(
+            point(boundary - px(2.), px(50.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(220.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(state.read_with(cx, |state, _| state.is_resizing()));
+
+        // No mouse up follows a cancelled drag.
+        cx.update(|window, cx| {
+            cx.stop_active_drag(window);
+            window.draw(cx).clear(cx);
+        });
+        let sizes = state.read_with(cx, |state, _| {
+            assert!(!state.is_resizing());
+            state.sizes().clone()
+        });
+        assert_eq!(resizes.get(), 1);
+
+        // Moving the mouse afterwards no longer resizes.
+        cx.simulate_mouse_move(
+            point(px(260.), px(50.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert_eq!(state.read_with(cx, |state, _| state.sizes().clone()), sizes);
         assert_eq!(resizes.get(), 1);
     }
 

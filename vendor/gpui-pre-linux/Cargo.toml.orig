@@ -1,10 +1,10 @@
 [package]
 name = "gpui-pre-linux"
-version = "0.3.8"
+version = "0.3.14"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `gpui_linux` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_linux` crate (gpui-pre snapshot of zed@f126950)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.cargo-shear]
@@ -13,7 +13,7 @@ ignored = ["scap"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui_linux"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [lib]
 path = "src/gpui_linux.rs"
@@ -24,6 +24,7 @@ name = "gpui_linux"
 default = ["wayland", "x11"]
 test-support = ["gpui/test-support"]
 wayland = [
+    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd/wayland",
     "calloop-wayland-source",
@@ -37,8 +38,10 @@ wayland = [
     "xkbcommon/wayland",
     "open",
     "gpui/wayland",
+    "uuid/v5",
 ]
 x11 = [
+    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd",
     "as-raw-xcb-connection",
@@ -53,9 +56,9 @@ screen-capture = ["gpui/screen-capture", "scap"]
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 accesskit = { workspace = true }
-accesskit_unix = { workspace = true }
+accesskit_unix = { workspace = true, optional = true }
 anyhow = { workspace = true }
-bytemuck = "1"
+bytemuck = { workspace = true }
 collections = { workspace = true }
 futures = { workspace = true }
 gpui = { workspace = true }
@@ -70,14 +73,14 @@ smol = { workspace = true }
 strum = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-oo7 = { version = "0.6", default-features = false, features = ["async-std", "native_crypto"] }
+oo7 = { workspace = true, features = ["async-std", "native_crypto"] }
 calloop = "0.14.3"
 notify-rust = { workspace = true }
 raw-window-handle = { workspace = true }
 ashpd = { workspace = true, optional = true }
 filedescriptor = { version = "0.8.2", optional = true }
 open = { version = "5.2.0", optional = true }
-xkbcommon = { version = "0.8.0", default-features = false, optional = true }
+xkbcommon = { workspace = true, optional = true }
 scap = { workspace = true, optional = true }
 calloop-wayland-source = { version = "0.4.1", optional = true }
 wayland-backend = { version = "0.3.15", features = ["client_system", "dlopen", "log"], optional = true }

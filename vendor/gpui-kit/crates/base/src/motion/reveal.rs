@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window, px, relative, size,
+    InspectorElementId, LayoutId, Pixels, Style, Window, px, relative, size,
 };
 
 /// A measured, clipped vertical reveal driven by normalized progress.
@@ -22,14 +22,6 @@ impl MotionReveal {
             progress: progress.clamp(0.0, 1.0),
             child,
         }
-    }
-}
-
-impl IntoElement for MotionReveal {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

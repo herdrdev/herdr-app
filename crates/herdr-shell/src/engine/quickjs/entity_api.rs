@@ -851,7 +851,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .map(|weeks| {
                             weeks
                                 .into_iter()
-                                .map(|days| days.into_iter().map(|day| day.to_string()).collect())
+                                .map(|days| days.into_iter().map(format_civil_date).collect())
                                 .collect()
                         })
                         .collect()
@@ -1913,6 +1913,18 @@ fn calendar_state(
         })
 }
 
+/// Explicit calendar wire format matching Chrono's `NaiveDate::to_string()`:
+/// `YYYY-MM-DD` for non-negative years and `-YYYY-MM-DD` for negative years,
+/// so every date round-trips cleanly through `jiff::civil::Date::strptime("%Y-%m-%d", ...)`.
+fn format_civil_date(day: jiff::civil::Date) -> String {
+    let year = day.year();
+    if year < 0 {
+        format!("-{:04}-{:02}-{:02}", year.unsigned_abs(), day.month(), day.day())
+    } else {
+        format!("{:04}-{:02}-{:02}", year, day.month(), day.day())
+    }
+}
+
 /// A `Date` on the wire: one slot for a single day, two for a range.
 ///
 /// The slot *count* is what carries the variant, and it has to. A single day
@@ -1926,21 +1938,21 @@ fn calendar_state(
 /// two directions cannot drift.
 pub(super) fn date_to_parts(date: gpui_base::Date) -> Vec<Option<String>> {
     match date {
-        gpui_base::Date::Single(day) => vec![day.map(|day| day.to_string())],
+        gpui_base::Date::Single(day) => vec![day.map(format_civil_date)],
         gpui_base::Date::Range(start, end) => vec![
-            start.map(|day| day.to_string()),
-            end.map(|day| day.to_string()),
+            start.map(format_civil_date),
+            end.map(format_civil_date),
         ],
     }
 }
 
 /// The same slots, read back. Two of them means a range was meant.
 fn date_from_parts(ctx: &Ctx<'_>, parts: &[Option<String>]) -> JsResult<gpui_base::Date> {
-    let day = |slot: Option<&String>| -> JsResult<Option<chrono::NaiveDate>> {
+    let day = |slot: Option<&String>| -> JsResult<Option<jiff::civil::Date>> {
         let Some(text) = slot else {
             return Ok(None);
         };
-        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        jiff::civil::Date::strptime("%Y-%m-%d", text)
             .map(Some)
             .map_err(|error| {
                 Exception::throw_type(

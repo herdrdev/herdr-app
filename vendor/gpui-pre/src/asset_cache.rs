@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+// HERDR: cloneable CachedLoad for per-window image asset ownership and refresh.
 #[derive(Clone)]
 pub(crate) struct CachedLoad<T> {
     state: Rc<RefCell<CachedLoadState<T>>>,
@@ -28,7 +29,11 @@ impl<T: Clone + Send + 'static> CachedLoad<T> {
         Self::new_with_refresh(future, cx, false)
     }
 
-    pub(crate) fn new_with_refresh(future: impl Future<Output = T> + Send + 'static, cx: &App, refresh: bool) -> Self {
+    pub(crate) fn new_with_refresh(
+        future: impl Future<Output = T> + Send + 'static,
+        cx: &App,
+        refresh: bool,
+    ) -> Self {
         let state = Rc::new(RefCell::new(CachedLoadState::Loading(FxHashSet::default())));
         let task = cx.background_executor().spawn(future);
         let task = cx.spawn({
@@ -48,16 +53,23 @@ impl<T: Clone + Send + 'static> CachedLoad<T> {
                     for view in views {
                         cx.notify(view);
                     }
-                    if refresh && !has_subscribers { cx.refresh_windows(); }
+                    if refresh && !has_subscribers {
+                        cx.refresh_windows();
+                    }
                 });
             }
         });
-        Self { state, _task: Rc::new(task) }
+        Self {
+            state,
+            _task: Rc::new(task),
+        }
     }
 
     pub(crate) fn loading_for(&self, views: &FxHashSet<EntityId>) -> bool {
         match &*self.state.borrow() {
-            CachedLoadState::Loading(subscribers) => subscribers.iter().any(|view| views.contains(view)),
+            CachedLoadState::Loading(subscribers) => {
+                subscribers.iter().any(|view| views.contains(view))
+            }
             CachedLoadState::Loaded(_) => false,
         }
     }
@@ -121,7 +133,7 @@ pub trait Asset: 'static {
     /// The loaded asset
     type Output: Clone + Send;
 
-    /// Identity used to share an asset load, without changing its source.
+    /// HERDR: Identity used to share an asset load, without changing its source.
     fn cache_key(source: &Self::Source, _cx: &App) -> u64 {
         hash(source)
     }

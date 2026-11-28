@@ -1,16 +1,16 @@
 [package]
 name = "gpui-pre-apple"
-version = "0.3.8"
+version = "0.3.14"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `gpui_apple` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_apple` crate (gpui-pre snapshot of zed@f126950)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.gpui-pre]
 zed-crate = "gpui_apple"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [lib]
 path = "src/gpui_apple.rs"
@@ -22,6 +22,12 @@ default = []
 bench-support = ["gpui/bench-support"]
 test-support = ["gpui/test-support"]
 runtime_shaders = []
+font-kit = [
+    "dep:font-kit",
+    "dep:core-text",
+    "dep:objc2-core-text",
+    "dep:pathfinder_geometry",
+]
 
 [dependencies]
 gpui = { workspace = true }
@@ -30,23 +36,61 @@ gpui = { workspace = true }
 anyhow = { workspace = true }
 async-task = { workspace = true }
 block2 = { workspace = true }
+collections = { workspace = true }
 core-foundation = { workspace = true }
+core-foundation-sys = { workspace = true }
 core-graphics = { workspace = true }
-core-video = { workspace = true }
-derive_more = { workspace = true }
-dispatch2 = { workspace = true }
+core-text = { workspace = true, optional = true }
+dispatch2 = { workspace = true, features = ["block2"] }
 etagere = { workspace = true }
-foreign-types = { workspace = true }
+futures = { workspace = true }
+font-kit = { workspace = true, optional = true, features = ["source"] }
 gpui_util = { workspace = true }
 image = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 mach2 = { workspace = true }
-metal = { workspace = true }
 objc2 = { workspace = true }
-objc2-foundation = { workspace = true, features = ["NSThread"] }
-objc2-quartz-core = { workspace = true }
+objc2-core-foundation = { workspace = true, features = ["std", "CFData", "CFDictionary", "CFString", "CFNumber", "CFBase", "CFCGTypes"] }
+objc2-core-graphics = { workspace = true, features = ["CGColorSpace"] }
+objc2-core-text = { workspace = true, optional = true }
+objc2-core-video = { workspace = true, features = [
+    "CVPixelBuffer",
+    "CVMetalTexture",
+    "CVMetalTextureCache",
+    "CVReturn",
+    "objc2",
+    "objc2-metal",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDepthStencil",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLTexture",
+    "MTLTypes",
+] }
+objc2-foundation = { workspace = true, features = ["NSThread", "NSNotification", "NSOperation", "NSProcessInfo", "block2"] }
+objc2-quartz-core = { workspace = true, features = ["objc2-core-foundation", "objc2-core-graphics", "objc2-metal"] }
+objc2-security = { workspace = true }
 parking_lot = { workspace = true }
+pathfinder_geometry = { workspace = true, optional = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies]
 cbindgen = { workspace = true }

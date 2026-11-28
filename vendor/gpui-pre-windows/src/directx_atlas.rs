@@ -87,6 +87,7 @@ impl PlatformAtlas for DirectXAtlas {
         self.0.lock().remove(key);
     }
 
+    // HERDR: invalidate all cached sizes of edited mod SVG icons.
     fn remove_svg(&self, path: &str) {
         self.0.lock().remove_svg(path);
     }

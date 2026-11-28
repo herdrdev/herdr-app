@@ -7666,6 +7666,212 @@ export default class Picker extends View {
     );
 }
 
+/// Negative calendar years round-trip through set_value(), value(), and month_days().
+#[gpui::test]
+fn a_negative_calendar_year_survives_the_round_trip(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, CalendarState } from "gpui-base";
+
+export default class Picker extends View {
+  init(_props, _cx) {
+    this.calendar = CalendarState.new();
+    this.calendar.set_value("-0001-01-01");
+    this.first = this.calendar.value();
+    this.calendar.set_value(this.first);
+    this.second = this.calendar.value();
+    const grid = this.calendar.month_days();
+    const negDay = grid.flat().flat().find((d) => d.startsWith("-0001-"));
+    this.gridDay = negDay ?? "";
+    this.calendar.set_value(this.gridDay);
+    this.afterGrid = this.calendar.value();
+  }
+  render(_cx) {
+    return v_flex()
+      .child(`first=${this.first}`)
+      .child(`second=${this.second}`)
+      .child(`grid=${this.gridDay}`)
+      .child(`afterGrid=${this.afterGrid}`);
+  }
+}
+"#;
+    let view_type = runtime.load_source("negative-date", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let view = context
+        .update(|window, cx| runtime.instantiate_view(&view_type, window, cx))
+        .expect("instantiate");
+    draw(&mut context, &view);
+    let rendered = context.update(|_, cx| {
+        view.read(cx)
+            .snapshot()
+            .map(crate::RenderSnapshot::debug_tree)
+            .unwrap_or_default()
+    });
+    assert!(rendered.contains("first=-0001-01-01"), "got: {rendered}");
+    assert!(rendered.contains("second=-0001-01-01"), "got: {rendered}");
+    assert!(rendered.contains("grid=-0001-"), "got: {rendered}");
+    assert!(rendered.contains("afterGrid=-0001-"), "got: {rendered}");
+}
+
+/// A mod Tab list built by herdr-shell does not insert a Tab key focus stop.
+#[gpui::test]
+fn a_mod_tab_list_is_not_a_tab_stop(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, Button, Tabs, Tab } from "gpui-base";
+
+export default class FormWithTabs extends View {
+  init(_props, cx) {
+    this.handles = [cx.focus_handle(), cx.focus_handle()];
+  }
+  render(_cx) {
+    return v_flex()
+      .w(300)
+      .h(200)
+      .child(Button.new("before").w(120).h(32).track_focus(this.handles[0]).child("Before"))
+      .child(
+        Tabs.new("mod-tabs")
+          .child(Tab.new("tab-a").selected(true).child("A"))
+          .child(Tab.new("tab-b").child("B"))
+      )
+      .child(Button.new("after").w(120).h(32).track_focus(this.handles[1]).child("After"));
+  }
+}
+"#;
+    let view_type = runtime.load_source("tabs-not-tab-stop", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    let (root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    // Draw twice so any sync_tab_stops refresh would take effect if the opt-out regressed.
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let handles = runtime.entities().focus_handles();
+    assert_eq!(handles.len(), 2);
+    // ShellRoot mounts one internal focus stop (toast_focus_handle); the full
+    // window Tab cycle must contain ONLY before, after, and that root stop — never Tabs.
+    context.update(|window, cx| window.focus(&handles[0], cx));
+
+    context.simulate_keystrokes("tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&handles[1]),
+        "Tab must skip herdr-shell Tabs and land directly on after"
+    );
+    context.simulate_keystrokes("tab");
+    let root_stop = context
+        .update(|window, cx| window.focused(cx))
+        .expect("ShellRoot stop on wrap");
+    assert_ne!(root_stop, handles[0]);
+    assert_ne!(root_stop, handles[1]);
+    context.simulate_keystrokes("tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&handles[0]),
+        "wrapped Tab must return to before without landing on Tabs"
+    );
+
+    context.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&root_stop),
+        "Shift-Tab from before wraps to ShellRoot stop"
+    );
+    context.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&handles[1]),
+        "Shift-Tab from ShellRoot stop lands on after without landing on Tabs"
+    );
+    context.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&handles[0]),
+        "Shift-Tab from after must skip herdr-shell Tabs directly back to before"
+    );
+    let _ = root;
+}
+
+/// Mod `cx.bind_keys` loads with `DummyKeyboardMapper` so Windows platform key
+/// remapping cannot rewrite shifted punctuation bindings.
+#[gpui::test]
+fn mod_bind_keys_uses_dummy_mapper_even_when_platform_mapper_rewrites_shifted_keys(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::init(cx);
+        cx.set_key_equivalent_mapper(|mut keystroke, _use_key_equivalents| {
+            if keystroke.modifiers.shift && keystroke.key == "/" {
+                keystroke.modifiers.shift = false;
+                keystroke.key = "?".into();
+            }
+            gpui::KeybindingKeystroke::from_keystroke(keystroke)
+        });
+        // Sanity check: KeyBinding::load WOULD rewrite ctrl-shift-/ under this mapper.
+        let mapped = gpui::KeyBinding::load(
+            "ctrl-shift-/",
+            Box::new(gpui::NoAction),
+            None,
+            false,
+            None,
+            cx,
+        )
+        .unwrap();
+        assert_eq!(mapped.keystrokes()[0].inner().key, "?");
+        assert!(!mapped.keystrokes()[0].inner().modifiers.shift);
+    });
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex } from "gpui-base";
+
+export default class Keys extends View {
+  init(_props, cx) {
+    cx.bind_keys([{ keystroke: "ctrl-shift-/", action: "r4_dummy_mapper_guard" }]);
+  }
+  render(_cx) {
+    return v_flex();
+  }
+}
+"#;
+    let view_type = runtime.load_source("dummy-mapper-keys", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let _view = context
+        .update(|window, cx| runtime.instantiate_view(&view_type, window, cx))
+        .expect("instantiate");
+
+    let bindings = context.update(|_, cx| {
+        cx.key_bindings()
+            .borrow()
+            .bindings_for_action(&crate::action::ShellAction::new("r4_dummy_mapper_guard"))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(bindings.len(), 1);
+    let stroke = bindings[0].keystrokes()[0].inner();
+    assert_eq!(stroke.key, "/");
+    assert!(stroke.modifiers.control);
+    assert!(stroke.modifiers.shift);
+}
+
 /// A range is stored as one, and reads back as a pair.
 ///
 /// The other half of the same wire question. A pair going in has to arrive as
@@ -10364,7 +10570,7 @@ fn mount_virtual_list(
 }
 
 fn scroll_by(context: &mut VisualTestContext, dy: f32) {
-    context.simulate_event(gpui::ScrollWheelEvent {
+    context.simulate_event(gpui::ScrollEvent {
         position: point(px(150.), px(100.)),
         delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
         ..Default::default()

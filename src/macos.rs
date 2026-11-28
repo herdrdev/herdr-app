@@ -176,14 +176,14 @@ mod tests {
 
     /// Items show the key the keymap binds to the same command.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn menu_items_show_the_shipped_keys() {
-        let keymap = Keymap::new(crate::keys::parse(crate::keys::DEFAULTS).unwrap());
+    #[gpui::test]
+    fn menu_items_show_the_shipped_keys(cx: &mut gpui::TestAppContext) {
+        let keymap = Keymap::new(cx.read(|cx| crate::keys::parse(crate::keys::DEFAULTS, cx)).unwrap());
         let menus = menus(&[], None);
         let items = all(&menus);
         let key = |title: &str| {
             let (_, action) = items.iter().find(|(t, _)| t == title).unwrap();
-            keymap.bindings_for_action(action.as_ref()).next().map(|b| b.keystrokes()[0].unparse())
+            keymap.bindings_for_action(action.as_ref()).next().map(|b| b.keystrokes()[0].unparse(gpui::OperatingSystem::Mac))
         };
         assert_eq!(key("New Tab").as_deref(), Some("cmd-t"));
         assert_eq!(key("Split Right").as_deref(), Some("cmd-d"));
@@ -194,9 +194,9 @@ mod tests {
         assert_eq!(key("Minimize").as_deref(), Some("cmd-m"));
     }
 
-    #[test]
-    fn clipboard_items_show_personal_keys() {
-        let keymap = Keymap::new(crate::keys::parse(r#"{"global":{"cmd-alt-c":"terminal.copy","cmd-alt-v":"terminal.paste"}}"#).unwrap());
+    #[gpui::test]
+    fn clipboard_items_show_personal_keys(cx: &mut gpui::TestAppContext) {
+        let keymap = Keymap::new(cx.read(|cx| crate::keys::parse(r#"{"global":{"cmd-alt-c":"terminal.copy","cmd-alt-v":"terminal.paste"}}"#, cx)).unwrap());
         let items = all(&menus(&[], None));
         for (title, shortcut) in [("Copy", "cmd-alt-c"), ("Paste", "cmd-alt-v")] {
             let (_, action) = items.iter().find(|(name, _)| name == title).unwrap();

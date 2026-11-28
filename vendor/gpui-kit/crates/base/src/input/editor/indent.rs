@@ -1,4 +1,4 @@
-use crate::input::InputModeKind;
+use crate::input::{EditorLineNumberRenderer, InputModeKind};
 use crate::input::{
     Indent, IndentInline, InputBaseState, Outdent, OutdentInline, RopeExt, cursor::CursorSelection,
     element::TextElement, layout::LastLayout, mode::LayoutMode,
@@ -40,7 +40,11 @@ impl TabSize {
         let mut count = 0;
         for ch in line.chars() {
             match ch {
-                '\t' => count += self.tab_size,
+                '\t' => {
+                    if self.tab_size > 0 {
+                        count += self.tab_size - count % self.tab_size;
+                    }
+                }
                 ' ' => count += 1,
                 _ => break,
             }
@@ -80,7 +84,7 @@ impl LayoutMode {
     }
 }
 
-impl<M: InputModeKind> TextElement<M> {
+impl<M: InputModeKind, R: EditorLineNumberRenderer> TextElement<M, R> {
     /// Measure the indent width in pixels for given column count.
     fn measure_indent_width(&self, style: &TextStyle, column: usize, window: &Window) -> Pixels {
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -108,7 +112,7 @@ impl<M: InputModeKind> TextElement<M> {
         last_layout: &LastLayout,
         text_style: &TextStyle,
         window: &mut Window,
-    ) -> Option<Path<Pixels>> {
+    ) -> Option<Path> {
         if !state.is_multi_line() || !state.mode.has_indent_guides() {
             return None;
         }
@@ -122,11 +126,14 @@ impl<M: InputModeKind> TextElement<M> {
         let mut offset_y = last_layout.visible_top;
         let mut last_indents = vec![];
 
-        for (&buffer_line, line_layout) in last_layout
+        for (ix, (&buffer_line, line_layout)) in last_layout
             .visible_buffer_lines
             .iter()
             .zip(last_layout.lines.iter())
+            .enumerate()
         {
+            let (spacer_above, spacer_below) = last_layout.spacers(ix);
+            offset_y += spacer_above;
             let line = state.text.slice_line(buffer_line);
             let mut current_indents = vec![];
             if line.len() > 0 {
@@ -138,7 +145,7 @@ impl<M: InputModeKind> TextElement<M> {
                         px(0.)
                     };
 
-                    let pos = point(x + last_layout.line_number_width, offset_y);
+                    let pos = point(x + last_layout.text_origin_x, offset_y);
 
                     builder.move_to(pos);
                     builder.line_to(point(pos.x, pos.y + line_height));
@@ -153,7 +160,7 @@ impl<M: InputModeKind> TextElement<M> {
                 current_indents = last_indents.clone();
             }
 
-            offset_y += line_layout.wrapped_lines.len() * line_height;
+            offset_y += line_layout.wrapped_lines.len() * line_height + spacer_below;
             last_indents = current_indents;
         }
 
@@ -482,8 +489,10 @@ mod tests {
         assert_eq!(tab.indent_count(&RopeSlice::from("  abc")), 2);
         assert_eq!(tab.indent_count(&RopeSlice::from("    abc")), 4);
         assert_eq!(tab.indent_count(&RopeSlice::from("\tabc")), 4);
-        assert_eq!(tab.indent_count(&RopeSlice::from("  \tabc")), 6);
-        assert_eq!(tab.indent_count(&RopeSlice::from(" \t abc  ")), 6);
+        assert_eq!(tab.indent_count(&RopeSlice::from("  \tabc")), 4);
+        assert_eq!(tab.indent_count(&RopeSlice::from(" \t abc  ")), 5);
+        assert_eq!(tab.indent_count(&RopeSlice::from(" \t \tabc")), 8);
+        assert_eq!(tab.indent_count(&RopeSlice::from("    \tabc")), 8);
         assert_eq!(tab.indent_count(&RopeSlice::from("abc")), 0);
     }
 }

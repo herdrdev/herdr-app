@@ -17,7 +17,7 @@ pub trait AssetSource: 'static + Send + Sync {
     /// Load the given asset from the source path.
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>>;
 
-    /// Normalize a resource's identity without changing how it is read.
+    /// HERDR: Normalize a resource's identity without changing how it is read.
     fn image_resource(&self, resource: &crate::Resource) -> crate::Resource {
         resource.clone()
     }
@@ -53,6 +53,7 @@ pub struct RenderImage {
     pub id: ImageId,
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
+    // HERDR: Arc<Frame> + lazy encoded animation bytes for bounded image memory.
     data: SmallVec<[Arc<Frame>; 1]>,
     animation: Option<Animation>,
     _animation_source: Option<Arc<RenderImage>>,
@@ -91,8 +92,14 @@ impl RenderImage {
     }
 
     pub(crate) fn cache_bytes(&self) -> usize {
-        self.data.iter().map(|frame| frame.buffer().as_raw().len()).sum::<usize>()
-            + self.animation.as_ref().map_or(0, |animation| animation.bytes.len())
+        self.data
+            .iter()
+            .map(|frame| frame.buffer().as_raw().len())
+            .sum::<usize>()
+            + self
+                .animation
+                .as_ref()
+                .map_or(0, |animation| animation.bytes.len())
     }
 
     pub(crate) fn has_animation(&self) -> bool {
@@ -114,13 +121,14 @@ impl RenderImage {
                 image::codecs::gif::GifDecoder::new(Cursor::new(&animation.bytes))
                     .map(|decoder| decoder.into_frames())
             }
-            image::ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(Cursor::new(
-                &animation.bytes,
-            ))
-            .map(|mut decoder| {
-                let _ = decoder.set_background_color(image::Rgba([0, 0, 0, 0]));
-                decoder.into_frames()
-            }),
+            image::ImageFormat::WebP => {
+                image::codecs::webp::WebPDecoder::new(Cursor::new(&animation.bytes)).map(
+                    |mut decoder| {
+                        let _ = decoder.set_background_color(image::Rgba([0, 0, 0, 0]));
+                        decoder.into_frames()
+                    },
+                )
+            }
             _ => unreachable!(),
         };
         if let Ok(frames) = frames {

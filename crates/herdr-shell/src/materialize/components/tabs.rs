@@ -36,7 +36,7 @@ pub(in crate::materialize) fn tab_list(
 ) -> AnyElement {
     warn_ignored_key(&behavior, "Tabs");
     warn_unhonoured_a11y(&behavior, "Tabs", &[]);
-    let tabs = Tabs::new(SharedString::from(id));
+    let tabs = Tabs::new(SharedString::from(id)).tab_stop(false);
     let tabs = with_hover(tabs, &states);
     let tabs = with_active_and_focus(tabs, &states);
     let tabs = with_input_handlers(tabs, &behavior, runtime);
