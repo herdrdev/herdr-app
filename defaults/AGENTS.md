@@ -158,9 +158,12 @@ the highlighted line shows where it will land.
   screens, and so do other machines' terminals, unless Herdr started them
   for a space on that machine.
 - **Agents** are terminals whose program reports a status (OSC 7501):
-  `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
-  looking (it becomes `idle` once they look). A space's and a tab's
-  status is the most urgent of its agents: blocked > done > working > idle.
+  `working`, `blocked`, `idle`, or `done` (a finished turn awaiting
+  acknowledgement). In the active window, focusing a visible terminal or
+  its Find field turns `done` into `idle` without typing. An unread agent
+  stays `done` while a sibling pane, dialog or mod holds the keyboard.
+  A space's and a tab's status is the most urgent of its agents:
+  blocked > done > working > idle.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). Parent addresses use
   the app's machine names, or a bare ID for this computer, when they can be

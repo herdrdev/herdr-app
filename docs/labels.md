@@ -39,6 +39,12 @@ Writing it:
 - Write once per turn while it stays on screen, not on every update: then
   a "mark unread" from another client isn't overruled by a screen nobody
   watches. Looking again later raises it again.
+- The desktop app acknowledges the drawn terminal that owns keyboard focus,
+  including its Find field. A sidebar selection, keyboard navigation or click
+  that gives it focus is enough. Visible siblings stay unread while another
+  pane, dialog or mod holds the keyboard. Returning focus starts a new look.
+  Completion alerts still use visibility, so a visible agent that finishes
+  in the active window stays quiet even when its turn remains unread.
 - A turn ends with a `status` event first, then a `turn` event. Decide on
   the `turn` event.
 - Mark unread is the one lower write: `herdr.seen=<turn - 1>`. At turn 0
