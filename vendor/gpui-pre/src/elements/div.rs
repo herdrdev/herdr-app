@@ -2154,6 +2154,9 @@ pub struct Interactivity {
     pub hovered: Option<bool>,
     pub(crate) tooltip_id: Option<TooltipId>,
     pub(crate) content_size: Size<Pixels>,
+    /// HERDR: how far this box can scroll, from its last layout; the wheel
+    /// listener uses it to tell whether an event moved the box.
+    pub(crate) scroll_max: std::cell::Cell<Point<Pixels>>,
     pub(crate) key_context: Option<KeyContext>,
     pub(crate) focusable: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
@@ -2488,6 +2491,7 @@ impl Interactivity {
             let scroll_max = Point::from(padded_content_size - bounds.size)
                 .map(round_to_two_decimals)
                 .max(&Default::default());
+            self.scroll_max.set(scroll_max);
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3350,6 +3354,7 @@ impl Interactivity {
             let line_height = window.line_height();
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
+            let scroll_max = self.scroll_max.get();
             window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
@@ -3365,22 +3370,19 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
+                    // HERDR: a touchpad swipe stays on its axis, as in a browser: a
+                    // box that only scrolls sideways leaves an up-and-down swipe to
+                    // what's around it. A mouse wheel, which has one axis, still
+                    // turns it (#1157).
+                    let turn = !restrict_scroll_to_axis && !event.delta.precise();
                     let mut delta_x = match overflow.x {
                         Overflow::Scroll if !delta.x.is_zero() => delta.x,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
-                        {
-                            delta.y
-                        }
+                        Overflow::Scroll if turn && overflow.y != Overflow::Scroll => delta.y,
                         _ => Pixels::ZERO,
                     };
                     let mut delta_y = match overflow.y {
                         Overflow::Scroll if !delta.y.is_zero() => delta.y,
-                        Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
-                        {
-                            delta.x
-                        }
+                        Overflow::Scroll if turn && overflow.x != Overflow::Scroll => delta.x,
                         _ => Pixels::ZERO,
                     };
                     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
@@ -3390,10 +3392,14 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
-                    scroll_offset.y += delta_y;
-                    scroll_offset.x += delta_x;
+                    // HERDR: stop at the box's ends, and keep an event that moved the
+                    // box from also scrolling the boxes around it. One at an end
+                    // passes the event on (#1157).
+                    scroll_offset.y = (scroll_offset.y + delta_y).clamp(-scroll_max.y, px(0.));
+                    scroll_offset.x = (scroll_offset.x + delta_x).clamp(-scroll_max.x, px(0.));
                     if *scroll_offset != old_scroll_offset {
                         cx.notify(current_view);
+                        cx.stop_propagation();
                     }
                 }
             });
