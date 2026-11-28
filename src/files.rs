@@ -30,7 +30,7 @@ impl Revisions {
             self.next += 1;
             self.all = self.next;
         }
-        for root in changed.iter().filter_map(|path| mod_of(path).map(|name| PathBuf::from("mods").join(name))).collect::<HashSet<_>>() {
+        for root in changed.iter().filter_map(|path| code_root(path)).collect::<HashSet<_>>() {
             self.next += 1;
             self.roots.insert(root, self.next);
         }
@@ -49,7 +49,7 @@ impl FileEvents {
         let revisions = self.revisions.clone();
         move |root| {
             let relative = root.strip_prefix(&base).ok()?;
-            if relative.components().count() != 2 || !relative.starts_with("mods") {
+            if relative.components().count() != 2 || code_root(relative).is_none() {
                 return None;
             }
             let mut revisions = revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -59,17 +59,30 @@ impl FileEvents {
     }
 }
 
-fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, bool) {
-    let Ok(event) = event else { return (Vec::new(), true) };
+/// What an event means: the files to reload, the code files whose folder gets
+/// a new revision (the reloads plus the app's own `frame/` mods, which load
+/// fresh rather than reload), and whether every revision is stale.
+fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, Changed, bool) {
+    let Ok(event) = event else { return (Vec::new(), Vec::new(), true) };
     if !event.need_rescan() && matches!(event.kind, notify::EventKind::Access(_)) {
-        return (Vec::new(), false);
+        return (Vec::new(), Vec::new(), false);
     }
     let rescan = event.need_rescan() || event.paths.iter().any(|path| {
-        base.starts_with(path) || path.strip_prefix(base).is_ok_and(|relative| relative.starts_with("mods") && mod_of(relative).is_none())
+        base.starts_with(path) || path.strip_prefix(base).is_ok_and(|relative| {
+            (relative.starts_with("mods") || relative.starts_with("frame")) && code_root(relative).is_none()
+        })
     });
-    let changed = event.paths.iter().filter_map(|path| path.strip_prefix(base).ok())
-        .filter(|path| watched(path)).map(Path::to_path_buf).collect();
-    (changed, rescan)
+    let relative: Vec<&Path> = event.paths.iter().filter_map(|path| path.strip_prefix(base).ok()).collect();
+    let changed: Changed = relative.iter().filter(|path| watched(path)).map(|path| path.to_path_buf()).collect();
+    let code = relative.iter().filter(|path| frame_file_counts(path)).map(|path| path.to_path_buf()).chain(changed.iter().cloned()).collect();
+    (changed, code, rescan)
+}
+
+/// A file in one of the app's own `frame/` mods that is its code (not the
+/// typings the runtime writes into it, nor an editor's hidden or backup file).
+fn frame_file_counts(rel: &Path) -> bool {
+    let mut parts = rel.components();
+    parts.next().is_some_and(|c| c.as_os_str() == "frame") && mod_file_counts(parts)
 }
 
 /// Starts watching `home`; None if the OS watcher can't start (the app then
@@ -85,8 +98,8 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     let event_revisions = revisions.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (changed, rescan) = changes(&base, event);
-        revisions.changed(&changed, rescan);
+        let (changed, code, rescan) = changes(&base, event);
+        revisions.changed(&code, rescan);
         drop(revisions);
         if !changed.is_empty() {
             #[cfg(not(test))]
@@ -456,6 +469,15 @@ fn deliver_pending(root: &Path, generation: &Arc<()>, pending: HashSet<String>) 
     true
 }
 
+/// The folder whose code a file belongs to: `mods/<name>`, or `frame/<name>`
+/// for the app's own mods.
+fn code_root(rel: &Path) -> Option<PathBuf> {
+    let mut parts = rel.components();
+    let top = parts.next()?.as_os_str();
+    (top == "mods" || top == "frame").then_some(())?;
+    Some(Path::new(top).join(parts.next()?.as_os_str().to_str()?))
+}
+
 /// Source file metadata, excluding generated editor helpers and directory mtimes.
 pub type ModStamp = Option<std::collections::BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>>;
 
@@ -538,8 +560,8 @@ mod tests {
             let mut revisions = Revisions::default();
             revisions.roots.insert("mods/one".into(), 0);
             revisions.roots.insert("mods/two".into(), 0);
-            let (changed, rescan) = changes(base, event);
-            revisions.changed(&changed, rescan);
+            let (changed, code, rescan) = changes(base, event);
+            revisions.changed(&code, rescan);
             assert!(revisions.all > 0);
             assert!(!changed.contains(&PathBuf::from("mods/one")));
             assert!(!changed.contains(&PathBuf::from("mods/two")));
@@ -555,12 +577,40 @@ mod tests {
         let event = notify::Event::new(notify::EventKind::Any)
             .set_flag(notify::event::Flag::Rescan)
             .add_path(base.join("mods/one/main.js"));
-        let (changed, rescan) = changes(base, Ok(event));
-        revisions.changed(&changed, rescan);
+        let (changed, code, rescan) = changes(base, Ok(event));
+        revisions.changed(&code, rescan);
         assert_eq!(changed, vec![PathBuf::from("mods/one/main.js")]);
         assert!(revisions.all > 0);
         assert!(revisions.roots[Path::new("mods/one")] > revisions.all);
         assert_eq!(revisions.roots[Path::new("mods/two")], 0);
+    }
+
+    #[test]
+    fn frame_mods_get_revisions_without_reloading() {
+        let base = Path::new("/home/probe");
+        let (_, changes_rx) = async_channel::unbounded();
+        let events = FileEvents { changes: changes_rx, root: base.to_path_buf(), revisions: Default::default() };
+        let revision = events.revision_provider();
+        let palette = base.join("frame/palette");
+        let settings = base.join("frame/settings");
+        assert_eq!(revision(&palette), Some(0), "a frame mod has a revision, so loading it walks no tree");
+        assert_eq!(revision(&base.join("frame")), None);
+        assert_eq!(revision(&base.join("frame/palette/lib")), None);
+        let edit = |path: &str| {
+            let (changed, code, rescan) = changes(base, Ok(notify::Event::new(notify::EventKind::Any).add_path(base.join(path))));
+            events.revisions.lock().unwrap().changed(&code, rescan);
+            (changed, rescan)
+        };
+        assert_eq!(edit("frame/palette/main.js"), (Vec::new(), false), "frame edits mint a revision but reload nothing");
+        assert_eq!(revision(&palette), Some(1));
+        assert_eq!(revision(&settings), Some(0));
+        edit("frame/palette/.main.js.swp");
+        edit("frame/palette/gpui-kit.d.ts");
+        edit("frame/palette/jsconfig.json");
+        assert_eq!(revision(&palette), Some(1), "editor and typings files are not code");
+        let (_, rescan) = edit("frame");
+        assert!(rescan, "the folder itself replaced: every revision is stale");
+        assert!(revision(&settings).unwrap() > 1);
     }
 
     #[test]
