@@ -62,14 +62,17 @@ impl AppWindow {
         });
     }
 
-    /// The root's `window_blur`: frosted glass behind the window, else opaque.
+    /// The window's backing from the root: `window_blur` frosts it, a `window_opacity`
+    /// below 1 makes it see-through, else opaque.
     pub(super) fn apply_blur(&mut self, window: &mut Window) {
-        let want = self.chrome.window_blur;
+        use gpui::WindowBackgroundAppearance::*;
+        let s = crate::settings::get();
+        let want = if self.chrome.window_blur { Blurred } else if s.window_opacity < 1.0 { Transparent } else { Opaque };
         if self.blur_applied == want {
             return;
         }
         self.blur_applied = want;
-        window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
+        window.set_background_appearance(want);
     }
 
     /// What mods know about the window: `window()`.

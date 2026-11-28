@@ -364,6 +364,19 @@ struct Overlay {
     frame: bool,
 }
 
+impl Overlay {
+    /// Takes the accent outline in a see-through window: dialogs, windows and
+    /// popups hung from the top (the palette, the picker). Menus at the pointer
+    /// and toasts keep their border; a `frame: "none"` mod draws its own.
+    fn outlined(&self) -> bool {
+        !self.bare && match self.kind {
+            OverlayKind::Dialog | OverlayKind::Window => true,
+            OverlayKind::Popup => self.top.is_some(),
+            OverlayKind::Toast => false,
+        }
+    }
+}
+
 struct Drag {
     container: String,
     index: usize,
@@ -473,7 +486,7 @@ pub struct AppWindow {
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
-    blur_applied: bool,
+    blur_applied: gpui::WindowBackgroundAppearance,
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
@@ -593,7 +606,7 @@ impl AppWindow {
             drag_from: None,
             titlebar_applied: None,
             // Windows open opaque: leave the platform alone until a layout asks for blur.
-            blur_applied: false,
+            blur_applied: gpui::WindowBackgroundAppearance::Opaque,
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
@@ -960,6 +973,7 @@ impl AppWindow {
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
         }
+        let s = s.in_range();
         if settings::set(s) {
             for term in self.terms.values() {
                 term.view.read(cx).refresh_theme();
@@ -4972,6 +4986,7 @@ impl AppWindow {
                 None => self.render_slot(&o.slot, cx),
             };
             let fit_toast = o.kind == OverlayKind::Toast && o.fit;
+            let outlined = settings::get().window_opacity < 1.0 && o.outlined();
             let body = div()
                 .id(SharedString::from(format!("ov-{}", o.id)))
                 .track_focus(&o.focus)
@@ -4979,7 +4994,8 @@ impl AppWindow {
                 .when(o.layout.is_none() && o.kind.modal_keys(), |d| d.key_context("Overlay"))
                 .when(sized(o.size.width), |d| d.w(w))
                 .when(sized(o.size.height), |d| if o.fit { d.max_h(h) } else { d.h(h) })
-                .when(!o.bare, |d| d.bg(c("popover")).border_1().border_color(c("border")).rounded(settings::z(8.0)).shadow_lg())
+                // Nothing dims a see-through window behind an overlay, so its outline marks it instead.
+                .when(!o.bare, |d| d.bg(c("popover")).border_1().border_color(c(if outlined { "accent" } else { "border" })).rounded(settings::z(8.0)).shadow_lg())
                 .overflow_hidden()
                 .when(o.kind == OverlayKind::Toast && !fit_toast, |d| d.flex_none())
                 .when(fit_toast, |d| {
@@ -5010,7 +5026,9 @@ impl AppWindow {
                     div()
                         .absolute()
                         .inset_0()
-                        .bg(hsla(0.0, 0.0, 0.0, 0.35))
+                        // A see-through window keeps its look behind a dialog:
+                        // only the dialog appears, nothing dims the rest.
+                        .when(settings::get().window_opacity >= 1.0, |d| d.bg(hsla(0.0, 0.0, 0.0, 0.35)))
                         .occlude()
                         .flex()
                         .items_center()
@@ -5702,6 +5720,8 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        let see_through = settings::get().window_opacity < 1.0;
+        let terminals: Vec<_> = self.terms.values().map(|t| t.view.clone()).collect();
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -5709,7 +5729,8 @@ impl Render for AppWindow {
             .key_context(key_context("Herdr", "layout", &self.layout_name))
             .size_full()
             .relative()
-            .bg(c("background"))
+            .when(!see_through, |root| root.bg(settings::solid("background")))
+            .when(see_through, |root| root.child(crate::terminal::window_background(terminals)))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
@@ -6959,6 +6980,35 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn a_see_through_window_outlines_dialogs_windows_and_top_popups_only() {
+        in_own_process("outlined_overlays");
+    }
+
+    #[gpui::test]
+    fn outlined_overlays(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("outlined_overlays") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "root", "type": "block" }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let cases = [
+                ("dialog", json!({"kind": "dialog"}), true),
+                ("window", json!({"kind": "window"}), true),
+                ("palette", json!({"kind": "popup", "at": "top", "offset": 60}), true),
+                ("menu", json!({"kind": "popup"}), false),
+                ("toast", json!({"kind": "toast"}), false),
+                ("bare", json!({"kind": "dialog", "frame": "none"}), false),
+            ];
+            for (id, spec, want) in cases {
+                this.open_overlay(id.into(), spec, window, cx);
+                let o = this.overlays.iter().find(|o| o.id == id).unwrap();
+                assert_eq!(o.outlined(), want, "{id}");
+            }
+        }));
     }
 
     #[test]

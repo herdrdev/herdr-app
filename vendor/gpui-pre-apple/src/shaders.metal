@@ -97,10 +97,25 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
+float4 quad_color(QuadFragmentInput input, Quad quad);
+
 fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
-  Quad quad = quads[input.quad_id];
+  return quad_color(input, quads[input.quad_id]);
+}
+
+// HERDR: a replacing quad's coverage, which its pipeline uses to clear what's
+// below before the quad itself is drawn over the cleared pixels.
+fragment float4 quad_erase_fragment(QuadFragmentInput input [[stage_in]],
+                                    constant Quad *quads
+                                    [[buffer(QuadInputIndex_Quads)]]) {
+  input.background_solid.a = 1.0;
+  input.border_color.a = 1.0;
+  return float4(0.0, 0.0, 0.0, quad_color(input, quads[input.quad_id]).a);
+}
+
+float4 quad_color(QuadFragmentInput input, Quad quad) {
   float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
 

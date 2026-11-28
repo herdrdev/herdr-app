@@ -119,6 +119,8 @@ pub struct MetalRenderer {
     path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
+    // HERDR: clears what's below a replacing quad (see `Background::replaces_below`).
+    quads_erase_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
@@ -326,6 +328,14 @@ impl MetalRenderer {
             "quad_fragment",
             MTLPixelFormat::BGRA8Unorm,
         );
+        let quads_erase_pipeline_state = build_erase_pipeline_state(
+            &device,
+            &library,
+            "quads_erase",
+            "quad_vertex",
+            "quad_erase_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+        );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
             &library,
@@ -377,6 +387,7 @@ impl MetalRenderer {
             path_sprites_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
+            quads_erase_pipeline_state,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
@@ -709,7 +720,23 @@ impl MetalRenderer {
                     self.draw_shadows(range, instance_bindings, viewport_size, command_encoder)
                 }
                 PrimitiveBatch::Quads(range) => {
-                    self.draw_quads(range, instance_bindings, viewport_size, command_encoder)
+                    // HERDR: a replacing quad clears what's below it, then
+                    // draws; each on its own so one nested in another works.
+                    let mut start = range.start;
+                    while start < range.end {
+                        if scene.quads[start].background.replaces_below() {
+                            let one = start..start + 1;
+                            self.draw_quads(one.clone(), &self.quads_erase_pipeline_state, instance_bindings, viewport_size, command_encoder);
+                            self.draw_quads(one, &self.quads_pipeline_state, instance_bindings, viewport_size, command_encoder);
+                            start += 1;
+                        } else {
+                            let end = (start..range.end)
+                                .find(|&i| scene.quads[i].background.replaces_below())
+                                .unwrap_or(range.end);
+                            self.draw_quads(start..end, &self.quads_pipeline_state, instance_bindings, viewport_size, command_encoder);
+                            start = end;
+                        }
+                    }
                 }
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
@@ -891,6 +918,7 @@ impl MetalRenderer {
     fn draw_quads(
         &self,
         quads: Range<usize>,
+        pipeline: &metal::RenderPipelineStateRef,
         instance_bindings: &InstanceBindings,
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
@@ -899,7 +927,7 @@ impl MetalRenderer {
             return;
         }
 
-        command_encoder.set_render_pipeline_state(&self.quads_pipeline_state);
+        command_encoder.set_render_pipeline_state(pipeline);
         command_encoder.set_vertex_buffer(
             QuadInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1333,7 +1361,45 @@ fn build_pipeline_state(
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    // HERDR: "over" for alpha too. `One` added alpha up, so in a see-through
+    // window any translucent layer (a hover, a dialog's backdrop) went opaque.
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+// HERDR: multiplies what's below by one minus the quad's coverage (color and
+// alpha), so the quad drawn next replaces it rather than blending over it.
+fn build_erase_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function(vertex_fn_name, None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(pixel_format);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::Zero);
+    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::Zero);
+    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1367,7 +1433,9 @@ fn build_path_sprite_pipeline_state(
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    // HERDR: "over" for alpha too. `One` added alpha up, so in a see-through
+    // window any translucent layer (a hover, a dialog's backdrop) went opaque.
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)
