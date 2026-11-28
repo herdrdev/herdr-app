@@ -1,5 +1,6 @@
 // Context menus (Herdr's items). Opened as a popup with
-// props { tab: "pane" | "tab" | "space" | "global", target }.
+// props { tab: "pane" | "tab" | "space" | "global", target, git? }, where a
+// space menu's `git` is its checkout when the opener already knows it.
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
 // a command "worktree" opens the worktree dialog instead.
 
@@ -14,9 +15,13 @@ function place(s) {
 }
 
 // A space's checkout: "main" (a repo's own), "linked" (a worktree), or null.
+// Both reads at once: on another machine each is a round trip. Two reads, not
+// one, because a folder name may itself contain a newline.
 async function checkout(folder, on) {
-  const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on });
-  const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: folder, on });
+  const [top, common] = await Promise.all([
+    exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on }),
+    exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: folder, on }),
+  ]);
   if (top.code !== 0 || common.code !== 0) return null;
   return common.stdout.trim() === `${top.stdout.trim()}/.git` ? "main" : "linked";
 }
@@ -96,11 +101,14 @@ function shortcut(name, args) {
 export default class Menu extends View {
   init(_props, cx) {
     this.at = 0;
-    this.git = null;
+    const p = props();
+    // The spaces sidebar passes the checkout it already knows ("main",
+    // "linked" or null); without it, ask git.
+    const known = Boolean(p && "git" in p);
+    this.git = known ? p.git : null;
     this.handle = cx.focus_handle();
     this.handle.focus();
-    const p = props();
-    const space = p?.tab === "space" && spaces().find((s) => s.id === p.target?.id);
+    const space = !known && p?.tab === "space" && spaces().find((s) => s.id === p.target?.id);
     const folder = space && place(space);
     if (folder)
       cx.spawn(async (cx) => {
