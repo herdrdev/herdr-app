@@ -711,7 +711,8 @@ The main ones:
 - Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
-  (personal tree edits; on shipped layouts only click/look fields change),
+  (personal tree edits; click fields and the picked theme it leaves as `layout()` showed them
+  stay clicks, out of the file; on shipped layouts only click/look fields change),
   `layout.reset {name?}` (reset a shipped layout and its clicks),
   `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
 - App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`

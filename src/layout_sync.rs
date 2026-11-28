@@ -286,6 +286,53 @@ pub fn without_clicks(file: &Node, now: &Node) -> Node {
     out
 }
 
+/// `set` (a tree handed back, often what `shown` was) with every click field
+/// it left as `shown` has it put back as `file` has it: only what was changed
+/// on purpose reaches the file; the clicks stay clicks.
+pub fn keep_clicks_out(file: &Node, shown: &Node, set: &Node) -> Node {
+    let mut out = set.clone();
+    let ids: Vec<String> = out.walk().iter().map(|n| n.id.clone()).collect();
+    for id in ids {
+        let (Some(f), Some(s), Some(n)) = (file.find(&id), shown.find(&id), out.find_mut(&id)) else { continue };
+        if n.size == s.size {
+            n.size = f.size;
+        }
+        if n.hidden == s.hidden {
+            n.hidden = f.hidden;
+        }
+        if n.background == s.background {
+            n.background = f.background.clone();
+        }
+        if n.look.font_size == s.look.font_size {
+            n.look.font_size = f.look.font_size;
+        }
+        if PaneClick::of(n) == PaneClick::of(s)
+            && let Some(pane) = PaneClick::of(f)
+        {
+            pane.apply(n);
+        }
+        if active(n) == active(s) {
+            set_active(n, active(f).cloned());
+        }
+        for fl in n.floating.iter_mut() {
+            let (Some(o), Some(sh)) = (f.floating.iter().find(|x| x.id == fl.id), s.floating.iter().find(|x| x.id == fl.id)) else { continue };
+            if fl.edge == sh.edge {
+                fl.edge = o.edge;
+            }
+            if fl.align == sh.align {
+                fl.align = o.align;
+            }
+            if fl.hidden == sh.hidden {
+                fl.hidden = o.hidden;
+            }
+        }
+    }
+    if out.look.theme == shown.look.theme {
+        out.look.theme = file.look.theme.clone();
+    }
+    out
+}
+
 // ---- updates -----------------------------------------------------------
 
 /// Whole numbers written as `268.0` (the app's own saves) read as `268`, so
@@ -344,6 +391,34 @@ mod tests {
         assert_eq!(shown, now);
         shown.find_mut("main").unwrap().kind = Kind::Block { content: Content::Mod { name: "other".into(), props: Value::Null } };
         assert_ne!(without_clicks(&file, &shown), file);
+    }
+
+    #[test]
+    fn a_tree_read_back_from_the_screen_keeps_its_clicks_out_of_the_file() {
+        let file = node(json!({ "id": "root", "type": "row", "theme": "mytheme", "font_size": 16, "children": [
+            { "id": "side", "type": "block", "size": { "px": 240 }, "content": { "mod": "spaces" } },
+            { "id": "work", "type": "block", "content": { "tab": "active" } } ] }));
+        // On screen: a dragged sidebar and the theme picker's choice.
+        let mut shown = file.clone();
+        shown.find_mut("side").unwrap().size = Some(Size::Px { px: 300.0 });
+        shown.look.theme = Some(serde_json::from_value(json!({ "light": "paper", "dark": "graphite" })).unwrap());
+        // A mod reads that back and changes only the font size.
+        let mut set = shown.clone();
+        set.look.font_size = Some(11.429);
+        let out = keep_clicks_out(&file, &shown, &set);
+        let mut want = file.clone();
+        want.look.font_size = Some(11.429);
+        assert_eq!(out, want, "only the font size reaches the file");
+        // The clicks it kept apart still show.
+        let mut s = State::between(&file, &shown);
+        s.forget_edited(&shown, &set);
+        let mut again = out.clone();
+        s.apply(&mut again);
+        assert_eq!(again, set);
+        // Changing a click field on purpose writes it.
+        let mut wider = shown.clone();
+        wider.find_mut("side").unwrap().size = Some(Size::Px { px: 180.0 });
+        assert_eq!(keep_clicks_out(&file, &shown, &wider).find("side").unwrap().size, Some(Size::Px { px: 180.0 }));
     }
 
     #[test]

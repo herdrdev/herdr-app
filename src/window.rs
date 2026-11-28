@@ -3628,10 +3628,21 @@ impl AppWindow {
                 self.picked_theme = state.theme;
                 self.apply_look(window, cx);
             }
-            // A deliberate edit: the file becomes this tree, clicks start over.
+            // A deliberate edit: the file becomes this tree. A tree read back
+            // from layout() carries the clicks and the picked theme; what it
+            // leaves as shown stays a click, not part of the file.
             "layout.set" => match serde_json::from_value::<Node>(a.get("layout").cloned().unwrap_or_default()) {
                 Ok(mut n) => {
                     fill_ids(&mut n, &mut self.model);
+                    // A broken file's stand-in has no clicks to keep: the tree wins whole.
+                    let mut state = layout_sync::State::default();
+                    let shown = n.clone();
+                    if self.layout_file_ok {
+                        state = layout_sync::State::between(&self.file_chrome, &self.chrome);
+                        state.theme = self.picked_theme.clone();
+                        state.forget_edited(&self.chrome, &shown);
+                        n = layout_sync::keep_clicks_out(&self.file_chrome, &self.chrome, &shown);
+                    }
                     let text = layout_sync::text_of(&n);
                     if !write_atomic(&layout_path(&self.layout_name), &text) {
                         return self.fail(format!("cannot write layouts/{}.json", self.layout_name));
@@ -3642,10 +3653,11 @@ impl AppWindow {
                     self.written_layout = text;
                     self.layout_file_ok = true;
                     self.reset_divider_interaction();
-                    self.file_chrome = n.clone();
-                    self.chrome = n;
-                    self.picked_theme = None;
-                    self.write_state(&layout_sync::State::default());
+                    self.file_chrome = n;
+                    self.chrome = self.file_chrome.clone();
+                    state.apply(&mut self.chrome);
+                    self.picked_theme = state.theme.clone();
+                    self.write_state(&state);
                     self.apply_look(window, cx);
                 }
                 Err(e) => return self.fail(format!("layout: {e}")),
