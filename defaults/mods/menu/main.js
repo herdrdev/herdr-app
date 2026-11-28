@@ -149,8 +149,13 @@ export default class Menu extends View {
             .items_center()
             .justify_between()
             .text_color(t.foreground)
+            // One highlight: the pointer moves the keyboard's row, as in native menus (#753).
             .when(i === this.at, (el) => el.bg(t.selected))
-            .hover((s) => s.bg(t.hover))
+            .on_hover((on, cx) => {
+              if (!on || this.at === i) return;
+              this.at = i;
+              cx.notify();
+            })
             .on_click((_e, cx) => this.choose(i, cx))
             .child(svg(menuIcon(it[1], it[2])).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().child(it[0]))
