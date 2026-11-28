@@ -1256,11 +1256,13 @@ All of it is in `herdr.d.ts`. In short:
   `run`), most picked first, each `installed` or not there (asked of the
   shell agents start in; a remote Unix machine's login/interactive shell when supported);
   rejects if the check fails (failed checks are not cached); start one with `argv: agent.run`.
-  `pickFolder({ prompt })`: the system's folder picker (here only),
+  `pickFolder({ prompt, directory })`: the system's folder picker (here only),
   resolves with the folder or null.
-  `pickFiles({ prompt, multiple })`: the system's file picker (here only),
+  `pickFiles({ prompt, multiple, directory })`: the system's file picker (here only),
   resolves with the files' paths or null on cancel, and rejects if the picker fails
-  or a path cannot be represented as a string.
+  or a path cannot be represented as a string. `directory` (an absolute path
+  here) is where either picker opens; without it, the system chooses
+  (usually the last folder picked).
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything

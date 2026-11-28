@@ -6515,6 +6515,49 @@ mod tests {
     }
 
     #[test]
+    fn pickers_open_in_the_folder_a_mod_names() {
+        in_own_process("pickers_open_in_folder");
+    }
+
+    #[gpui::test]
+    fn pickers_open_in_folder(cx: &mut gpui::TestAppContext) {
+        if !running_alone("pickers_open_in_folder") {
+            return;
+        }
+        let picker = r#"import { View, div } from "gpui-kit";
+import { pickFolder, pickFiles, setShared } from "herdr";
+export default class Picker extends View {
+  init(_props, cx) {
+    cx.spawn(async () => {
+      setShared("pick.folder", await pickFolder({ directory: "/tmp/start-here" }));
+      setShared("pick.files", await pickFiles({ multiple: true, directory: "/tmp/files-here" }));
+      setShared("pick.plain", await pickFolder());
+    });
+  }
+  render() { return div(); }
+}
+"#;
+        let (_view, cx) = open_window(cx, "picker", picker, serde_json::json!({ "id": "picker", "type": "block", "content": { "mod": "picker" } }));
+        let mut asked = Vec::new();
+        for answer in ["/tmp/start-here/a", "/tmp/files-here/b.txt", "/tmp/c"] {
+            cx.run_until_parked();
+            assert!(cx.did_prompt_for_paths(), "the mod opened a picker");
+            cx.simulate_path_prompt_response(|options| {
+                asked.push((options.directories, options.directory.clone()));
+                Some(vec![std::path::PathBuf::from(answer)])
+            });
+        }
+        cx.run_until_parked();
+        assert_eq!(asked, [
+            (true, Some(std::path::PathBuf::from("/tmp/start-here"))),
+            (false, Some(std::path::PathBuf::from("/tmp/files-here"))),
+            (true, None),
+        ]);
+        assert_eq!(crate::mods::shared("pick.folder"), Some(serde_json::json!("/tmp/start-here/a")));
+        assert_eq!(crate::mods::shared("pick.files"), Some(serde_json::json!(["/tmp/files-here/b.txt"])));
+    }
+
+    #[test]
     fn repeated_mod_edits_start_a_new_vm_before_the_old_one_fills() {
         in_own_process("edits_restart_full_vm");
     }
