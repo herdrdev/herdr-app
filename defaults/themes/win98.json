@@ -21,6 +21,7 @@
     "accent": "#000080",
     "accent_foreground": "#ffffff",
     "ring": "#000000",
+    "selection": "#00008080",
     "working": "#808000",
     "blocked": "#ff0000",
     "done": "#0000ff",

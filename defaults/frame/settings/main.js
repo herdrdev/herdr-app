@@ -476,7 +476,7 @@ export default class Settings extends View {
           .border_b(1)
           .border_color(t.border)
           .text_size(13)
-          .child(Input.new(this.fontInput).h(28).text_color(t.foreground)),
+          .child(Input.new(this.fontInput).h(28).bg(t.input).text_color(t.foreground)),
       )
       .child(
         div()
@@ -714,7 +714,7 @@ export default class Settings extends View {
       else row.child(v_flex().gap(6)
         .child(div().text_size(12).text_color(t.dim).child("New name (addresses using the old name stop working)"))
         .child(h_flex().gap(6).items_center()
-          .child(Input.new(this.renameInput).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(this.renameFocused ? t.accent : t.input).bg(t.background).text_size(13).text_color(t.foreground))
+          .child(Input.new(this.renameInput).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(this.renameFocused ? t.accent : t.input).bg(t.input).text_size(13).text_color(t.foreground))
           .child(cancel).child(this.button(t, `st-m-save-${m.name}`, "Save", (_e, cx) => this.machineAction(m.name, "rename", cx, edit.name)))));
     }
     if (result) row.child(div().text_size(12.5).text_color(result.ok ? t.ansi2 : t.blocked).child(result.message));

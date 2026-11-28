@@ -136,10 +136,11 @@ const PREVIOUS_THEMES: &[(&str, &str)] = &[
   "selection": "#000080",
   "cursor": "#c0c0c0",
   "ansi": [
-    "#000000", "#aa0000", "#00aa00", "#aa5500", "#0000aa", "#aa00aa", "#00aaaa", "#aaaaaa",
+    "#555555", "#aa0000", "#00aa00", "#aa5500", "#0000bb", "#aa00aa", "#00aaaa", "#aaaaaa",
     "#555555", "#ff5555", "#55ff55", "#ffff55", "#5555ff", "#ff55ff", "#55ffff", "#ffffff"
   ],
   "colors": {
+    "background": "#000000",
     "foreground": "#000000",
     "surface": "#c0c0c0",
     "popover": "#c0c0c0",
