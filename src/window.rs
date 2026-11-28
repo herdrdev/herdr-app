@@ -7886,6 +7886,7 @@ export default class Probe extends View {
     }
 
     include!("window/drag_tests.rs");
+    include!("window/movable_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a
     /// notification opens it with its props, and it can close itself (as one
