@@ -137,8 +137,8 @@ fn watched(rel: &Path) -> bool {
 fn mod_file_counts(rest: std::path::Components) -> bool {
     let mut rest = rest;
     let Some(name) = rest.next() else { return true };
-    gpui_shell::application_file_counts(Path::new(name.as_os_str()))
-        && gpui_shell::application_file_counts(rest.as_path())
+    herdr_shell::application_file_counts(Path::new(name.as_os_str()))
+        && herdr_shell::application_file_counts(rest.as_path())
 }
 
 /// Folders mods watch (`watchFolder`): one OS watcher each, shared by every
@@ -470,7 +470,7 @@ pub fn mod_stamp(root: &Path) -> ModStamp {
             if count > 4096 { return None; }
             let path = entry.path();
             let Ok(relative) = path.strip_prefix(root) else { continue };
-            if !gpui_shell::application_file_counts(relative) { continue; }
+            if !herdr_shell::application_file_counts(relative) { continue; }
             let meta = std::fs::metadata(&path).ok()?;
             if meta.is_dir() {
                 if depth >= 8 { return None; }

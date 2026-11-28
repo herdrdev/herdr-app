@@ -3,7 +3,7 @@
 
 use crate::{layout::Node, links};
 use gpui::App;
-use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
+use herdr_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -81,7 +81,7 @@ pub fn write_workspace() -> std::io::Result<()> {
         let _ = std::fs::remove_file(dir.join("CLAUDE.md"));
     }
     write_if_changed(&dir.join("herdr.d.ts"), DECLARATIONS)?;
-    let types = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
+    let types = herdr_shell::type_declarations(&herdr_shell::FrozenComponentRegistry::default());
     write_if_changed(&dir.join("gpui-kit.d.ts"), &types)?;
     let _ = std::fs::remove_dir_all(frame_dir());
     for (path, bytes) in FRAME_MODS {
@@ -664,10 +664,11 @@ pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::Termin
     PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
 }
 
+pub fn untrack_pane_view(pane: &str) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.remove(pane); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
-    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
-        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
-    }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
 pub fn publish_terminals(mut v: Value) -> bool {
@@ -752,7 +753,7 @@ fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot)
         }
         // Output and resizing change these numbers without invalidating mods.
         let mut panes = snapshot.panes.clone();
-        gpui_shell::with_current_app(|cx| {
+        herdr_shell::with_current_app(|cx| {
             PANE_VIEWS.with_borrow(|views| {
                 for pane in panes.as_array_mut().into_iter().flatten() {
                     if let Some(view) = pane["pane"].as_str().and_then(|id| {
@@ -768,7 +769,41 @@ fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot)
     })
 }
 
-fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
+fn terminal_rows(args: &herdr_shell::HostArguments) -> herdr_shell::HostResult {
+    let terminal = args.string(0)?;
+    let from = u64::try_from(args.integer(1)?).map_err(|_| HostError::new("from must be nonnegative"))?;
+    let count = u64::try_from(args.integer(2)?).map_err(|_| HostError::new("count must be nonnegative"))?;
+    let rows = herdr_shell::with_current(|window, cx| {
+        SNAPSHOT.with_borrow(|snapshot| {
+            let own_pane = snapshot.panes.as_array().into_iter().flatten()
+                .find(|p| p["terminal"].as_str() == Some(terminal)).and_then(|p| p["pane"].as_str());
+            PANE_VIEWS.with_borrow(|views| {
+                views.iter().filter_map(|(pane, view)| {
+                    let view = view.upgrade()?;
+                    let view = view.read(cx);
+                    (view.address == terminal).then_some((pane, view))
+                }).max_by_key(|(pane, view)| {
+                    (view.owns_keyboard_focus(window, cx), view.on_screen_this_frame(), own_pane == Some(pane.as_str()))
+                }).map(|(_, view)| view.text_rows(from, count))
+            })
+        })
+    }).flatten();
+
+    let Some(rows) = rows else { return Ok(HostValue::Null) };
+    let rows_value = rows.rows.into_iter().map(|row| HostValue::Object(vec![
+        ("cells".into(), HostValue::Array(row.cells.into_iter().map(|cell| HostValue::Object(vec![
+            ("text".into(), HostValue::Str(cell.text)),
+            ("wide".into(), HostValue::Bool(cell.wide)),
+        ])).collect())),
+        ("wrapped".into(), HostValue::Bool(row.wrapped)),
+    ])).collect();
+    Ok(HostValue::Object(vec![
+        ("total".into(), HostValue::Number(rows.total as f64)),
+        ("rows".into(), HostValue::Array(rows_value)),
+    ]))
+}
+
+fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&herdr_shell::HostArguments) -> herdr_shell::HostResult {
     move |_| Ok(read(&reads, key, f))
 }
 
@@ -1173,7 +1208,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .function("feedbackPasteImage", move |_| {
             if !feedback_frame { return Err(HostError::new("feedback screenshots are frame-only")); }
-            let bytes = gpui_shell::with_current_app(|cx| {
+            let bytes = herdr_shell::with_current_app(|cx| {
                 cx.read_from_clipboard()?.entries().iter().find_map(|e| match e {
                     gpui::ClipboardEntry::Image(i) => Some(i.bytes.clone()),
                     _ => None,
@@ -1191,7 +1226,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("feedbackPickImages", move |_| {
             if !feedback_frame { return Err(HostError::new("feedback screenshots are frame-only")); }
-            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+            let picked = herdr_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
                 files: true, directories: false, multiple: true, prompt: Some("Add".into()), directory: None,
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
@@ -1216,7 +1251,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("pickFolder", |a| {
             let options = a.get(0);
             let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
-            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+            let picked = herdr_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
                 files: false, directories: true, multiple: false, prompt: Some(prompt.into()), directory: opt_str(options, "directory").map(Into::into),
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
@@ -1228,7 +1263,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let options = a.get(0);
             let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
             let multiple = options.and_then(|o| o.get("multiple")).and_then(HostValue::as_bool).unwrap_or(false);
-            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+            let picked = herdr_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
                 files: true, directories: false, multiple, prompt: Some(prompt.into()), directory: opt_str(options, "directory").map(Into::into),
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
@@ -1302,6 +1337,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
+        .function("terminalRows", terminal_rows)
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
         .function("layouts", |_| Ok(to_host(&json!(crate::window::layout_names()))))
@@ -1372,7 +1408,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
 
 /// The runtime's base layer, themed from settings.json.
 pub fn init(cx: &mut App) {
-    gpui_shell::init(cx);
+    herdr_shell::init(cx);
     apply_theme(cx);
 }
 
@@ -1431,7 +1467,7 @@ pub fn install_check_policy() {
 
 /// What mods may touch, and the `herdr` module they import.
 pub fn install_policy() -> async_channel::Receiver<Request> {
-    gpui_shell::policy::update_default(|p| {
+    herdr_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
             .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0))
             .expect("herdr module is valid")
@@ -1448,11 +1484,11 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 /// Readies the next load of `inst`; returns the copy's number (for commands).
 pub fn prepare_load(inst: &Instance) -> u64 {
     let (copy, policy) = mod_policy(inst);
-    gpui_shell::policy::set_default(policy);
+    herdr_shell::policy::set_default(policy);
     copy
 }
 
-fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
+fn mod_policy(inst: &Instance) -> (u64, herdr_shell::policy::Policy) {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
@@ -1467,7 +1503,7 @@ fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
         inst.props.to_string().hash(&mut h);
         format!("store-{:016x}.json", h.finish())
     };
-    let policy = gpui_shell::policy::Policy::new()
+    let policy = herdr_shell::policy::Policy::new()
         .with_application(inst.key())
         // The shipped palette reads manifests even when the app home is outside the login home.
         .with_capabilities(capabilities_at(home(), app_dir(), inst.name == "frame-palette"))
@@ -1486,7 +1522,7 @@ pub fn handle_link(
 ) -> impl std::future::Future<Output = anyhow::Result<String>> + use<> {
     use std::{future::{Future, poll_fn}, pin::pin, task::Poll};
     let (_, policy) = mod_policy(&Instance { name: name.to_owned(), props: Value::Null });
-    let call = gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx);
+    let call = herdr_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx);
     let timeout = cx.background_executor().timer(Duration::from_secs(30));
     async move {
         let mut call = pin!(call);
@@ -1508,12 +1544,12 @@ pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
     anyhow::ensure!(rules.is_empty() || has_link, "mod.json declares link_handlers but link.js is missing");
     let handles_links = standalone || !rules.is_empty();
     if handles_links {
-        gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
+        herdr_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
     }
     Ok(handles_links)
 }
 
-fn picked_files(paths: Option<Vec<PathBuf>>) -> gpui_shell::HostResult {
+fn picked_files(paths: Option<Vec<PathBuf>>) -> herdr_shell::HostResult {
     let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
         return Ok(HostValue::Null);
     };

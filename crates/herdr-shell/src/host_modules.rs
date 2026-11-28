@@ -8,9 +8,9 @@
 //! §17.6).
 //!
 //! ```no_run
-//! use gpui_shell::{HostModule, HostValue};
+//! use herdr_shell::{HostModule, HostValue};
 //!
-//! gpui_shell::export_module(
+//! herdr_shell::export_module(
 //!     HostModule::new("workspace")
 //!         .function("project_name", |_| Ok(HostValue::from("gpui-component"))),
 //! )
@@ -504,7 +504,7 @@ impl HostModule {
     /// hold the thread that renders.
     ///
     /// ```no_run
-    /// # use gpui_shell::{HostModule, HostValue};
+    /// # use herdr_shell::{HostModule, HostValue};
     /// HostModule::new("db")
     ///     .declarations("export function query(sql: string): Promise<unknown[]>;")
     ///     .async_function("query", |arguments| {
@@ -601,7 +601,7 @@ impl HostModule {
     /// the exports:
     ///
     /// ```no_run
-    /// # use gpui_shell::{HostModule, HostValue};
+    /// # use herdr_shell::{HostModule, HostValue};
     /// HostModule::new("market")
     ///     .function("quotes", |_| Ok(HostValue::Null))
     ///     .declarations(

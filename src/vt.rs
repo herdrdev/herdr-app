@@ -21,6 +21,23 @@ pub struct SelectionPositions {
     pub end: CellPosition,
 }
 
+const MAX_TERMINAL_ROWS: u64 = 128;
+
+pub struct TextRows {
+    pub total: u64,
+    pub rows: Vec<TextRow>,
+}
+
+pub struct TextRow {
+    pub cells: Vec<TextCell>,
+    pub wrapped: bool,
+}
+
+pub struct TextCell {
+    pub text: String,
+    pub wide: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
@@ -90,6 +107,7 @@ pub struct Cell {
     pub text: String,
     pub fg: Rgb,
     pub bg: Option<Rgb>,
+    pub selected: bool,
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
@@ -193,8 +211,9 @@ pub struct Placement {
 }
 
 impl Placement {
-    pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32) -> [f32; 4] {
-        let [sx, sy] = self.cell_pixels.map_or([1.0, 1.0], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
+    pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32, scale: f32) -> [f32; 4] {
+        // Direct placements use device pixels, while placeholders scale with the cell.
+        let [sx, sy] = self.cell_pixels.map_or([1.0 / scale; 2], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
         [
             self.col as f32 * cell_width + self.offset[0] as f32 * sx,
             self.row as f32 * cell_height + self.offset[1] as f32 * sy,
@@ -849,6 +868,12 @@ impl Vt {
                     }
                     let mut generation = 0u64;
                     ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+                    let mut offset = [0u32; 2];
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_X_OFFSET, &mut offset[0] as *mut _ as *mut c_void);
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Y_OFFSET, &mut offset[1] as *mut _ as *mut c_void);
+                    // Ghostty sizes placements using offsets clamped to the first cell.
+                    offset[0] = offset[0].min(self.shared.size.cell_width.saturating_sub(1));
+                    offset[1] = offset[1].min(self.shared.size.cell_height.saturating_sub(1));
                     out.push(Placement {
                         image: id,
                         generation,
@@ -857,7 +882,7 @@ impl Vt {
                         width: info.pixel_width,
                         height: info.pixel_height,
                         source: [info.source_x, info.source_y, info.source_width, info.source_height],
-                        offset: [0, 0],
+                        offset,
                         cell_pixels: None,
                         z,
                     });
@@ -1083,7 +1108,7 @@ impl Vt {
         Some(SelectionPositions { start: self.cell_position(&selection.start)?, end: self.cell_position(&selection.end)? })
     }
 
-    pub fn select_at(&mut self, at: Option<CellPosition>, mode: &str) -> Result<(), String> {
+    pub fn select_at(&mut self, at: Option<CellPosition>, to: Option<CellPosition>, mode: &str) -> Result<(), String> {
         if !matches!(mode, "cell" | "word" | "line") {
             return Err("terminal.select mode is cell, word or line".into());
         }
@@ -1092,15 +1117,23 @@ impl Vt {
         let mut selection = GhosttySelection {
             size: std::mem::size_of::<GhosttySelection>(), start: reference, end: reference, ..Default::default()
         };
-        let result = unsafe {
+        let result = if let Some(to) = to {
+            selection.end = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, to.col, to.row)
+                .ok_or("terminal.select to is outside the screen and history")?;
+            if mode == "line" {
+                let last_col = self.cols.saturating_sub(1);
+                (selection.start.x, selection.end.x) = if at.row <= to.row { (0, last_col) } else { (last_col, 0) };
+            }
+            GHOSTTY_SUCCESS
+        } else {
             match mode {
                 "word" => {
                     let options = GhosttyTerminalSelectWordOptions { size: std::mem::size_of::<GhosttyTerminalSelectWordOptions>(), ref_: reference, ..Default::default() };
-                    ghostty_terminal_select_word(self.term, &options, &mut selection)
+                    unsafe { ghostty_terminal_select_word(self.term, &options, &mut selection) }
                 }
                 "line" => {
                     let options = GhosttyTerminalSelectLineOptions { size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(), ref_: reference, semantic_prompt_boundary: true, ..Default::default() };
-                    ghostty_terminal_select_line(self.term, &options, &mut selection)
+                    unsafe { ghostty_terminal_select_line(self.term, &options, &mut selection) }
                 }
                 _ => GHOSTTY_SUCCESS,
             }
@@ -1113,6 +1146,9 @@ impl Vt {
             return Err("terminal.select could not select that cell".into());
         }
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        if let Some(to) = to {
+            self.follow_selection_row(to.row);
+        }
         Ok(())
     }
 
@@ -1156,14 +1192,18 @@ impl Vt {
         // Convert before installing the snapshot: any mutating call invalidates its refs.
         let end = self.cell_position(&selection.end).ok_or("selection end is outside the screen")?;
         unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        self.follow_selection_row(end.row);
+        Ok(())
+    }
+
+    fn follow_selection_row(&mut self, row: u32) {
         let scrollbar = self.scrollbar();
-        let row = u64::from(end.row);
+        let row = u64::from(row);
         if row < scrollbar.offset {
             self.scroll_to_row(row as usize);
         } else if row >= scrollbar.offset.saturating_add(scrollbar.len) {
             self.scroll_to_row(row.saturating_sub(scrollbar.len.saturating_sub(1)) as usize);
         }
-        Ok(())
     }
 
     /// Select the active screen and its history without formatting or copying text.
@@ -1310,14 +1350,37 @@ impl Vt {
 
     /// Whether the terminal wrapped screen row `y` onto the next.
     fn wraps(&self, y: u32) -> bool {
-        unsafe {
-            let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
-            let mut line: GhosttyRow = Default::default();
-            let mut wrap = false;
-            ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
-                && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
-                && wrap
+        self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y).is_some_and(|r| row_wraps(&r))
+    }
+
+    pub fn text_rows(&self, from: u64, count: u64) -> TextRows {
+        let total = self.scrollbar().total;
+        let end = total.min(from.saturating_add(count.min(MAX_TERMINAL_ROWS)));
+        let rows = (from..end).map_while(|y| self.text_row(u32::try_from(y).ok()?)).collect();
+        TextRows { total, rows }
+    }
+
+    fn text_row(&self, y: u32) -> Option<TextRow> {
+        let mut reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
+        let wrapped = row_wraps(&reference);
+        let mut cells = Vec::with_capacity(self.cols as usize);
+        for x in 0..self.cols {
+            reference.x = x;
+            let mut cell: GhosttyCell = Default::default();
+            let mut width = GHOSTTY_CELL_WIDE_NARROW;
+            unsafe {
+                ghostty_grid_ref_cell(&reference, &mut cell);
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut width as *mut _ as *mut c_void);
+            }
+            if matches!(width, GHOSTTY_CELL_WIDE_SPACER_HEAD | GHOSTTY_CELL_WIDE_SPACER_TAIL) {
+                continue;
+            }
+            cells.push(TextCell {
+                text: cell_grapheme(&reference),
+                wide: width == GHOSTTY_CELL_WIDE_WIDE,
+            });
         }
+        Some(TextRow { cells, wrapped })
     }
 
     /// The text of screen row `y` and where each character shows.
@@ -1861,6 +1924,7 @@ impl Vt {
                 text,
                 fg,
                 bg,
+                selected,
                 bold: style.bold,
                 italic: style.italic,
                 faint: style.faint,
@@ -1877,11 +1941,16 @@ impl Vt {
     /// Option for "\u{df}" on a Mac), as Ghostty reports them. Without it the
     /// kitty keyboard protocol reports shift+; and Neovim never sees ":".
     pub fn encode_key(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>) -> Vec<u8> {
+        self.encode_key_with_alt_override(key, mods, consumed, text, unshifted, false)
+    }
+
+    pub fn encode_key_with_alt_override(&mut self, key: GhosttyKey, mods: GhosttyMods, consumed: GhosttyMods, text: Option<&str>, unshifted: Option<char>, _force_alt: bool) -> Vec<u8> {
         unsafe {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
             #[cfg(target_os = "macos")]
             {
-                let option = match gpui_macos::option_as_alt() {
+                let option_as_alt = if _force_alt { gpui_macos::OptionAsAlt::Both } else { gpui_macos::option_as_alt() };
+                let option = match option_as_alt {
                     gpui_macos::OptionAsAlt::None => GHOSTTY_OPTION_AS_ALT_FALSE,
                     gpui_macos::OptionAsAlt::Both => GHOSTTY_OPTION_AS_ALT_TRUE,
                     gpui_macos::OptionAsAlt::Left => GHOSTTY_OPTION_AS_ALT_LEFT,
@@ -2006,9 +2075,70 @@ impl Drop for Vt {
     }
 }
 
+fn row_wraps(reference: &GhosttyGridRef) -> bool {
+    let mut row: GhosttyRow = Default::default();
+    let mut wrapped = false;
+    unsafe {
+        ghostty_grid_ref_row(reference, &mut row) == GHOSTTY_SUCCESS
+            && ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP, &mut wrapped as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+            && wrapped
+    }
+}
+
+fn cell_grapheme(reference: &GhosttyGridRef) -> String {
+    let mut stack = [0; 16];
+    let mut len = 0;
+    let result = unsafe { ghostty_grid_ref_graphemes(reference, stack.as_mut_ptr(), stack.len(), &mut len) };
+    match result {
+        GHOSTTY_SUCCESS => stack[..len].iter().filter_map(|&cp| char::from_u32(cp)).collect(),
+        GHOSTTY_OUT_OF_SPACE => {
+            let mut buffer = vec![0; len];
+            let result = unsafe { ghostty_grid_ref_graphemes(reference, buffer.as_mut_ptr(), buffer.len(), &mut len) };
+            if result != GHOSTTY_SUCCESS {
+                return String::new();
+            }
+            buffer.into_iter().take(len).filter_map(char::from_u32).collect()
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_rows_read_history_graphemes_and_wrap_without_spacer_cells() {
+        let mut vt = Vt::new(5, 2);
+        vt.write("a\u{301}xyz界!\r\nlast".as_bytes());
+        let text = vt.text_rows(0, 2);
+        assert_eq!(text.total, 3);
+        let [head, tail] = text.rows.as_slice() else { panic!("expected two rows") };
+        assert!(head.wrapped);
+        assert!(!tail.wrapped);
+        let cells = |row: &TextRow| row.cells.iter().map(|c| (c.text.clone(), c.wide)).collect::<Vec<_>>();
+        assert_eq!(cells(head), [("a\u{301}".into(), false), ("x".into(), false), ("y".into(), false), ("z".into(), false)]);
+        assert_eq!(cells(tail), [("界".into(), true), ("!".into(), false), ("".into(), false), ("".into(), false)]);
+        assert!(vt.text_rows(3, 1).rows.is_empty());
+        assert!(vt.text_rows(0, 0).rows.is_empty());
+
+        vt.write(b"\x1b[?1049h\x1b[Halt");
+        let alt = vt.text_rows(0, 1);
+        assert_eq!(alt.total, 2);
+        assert_eq!(alt.rows[0].cells[0].text, "a");
+    }
+
+    #[test]
+    fn terminal_rows_cap_large_reads() {
+        let mut vt = Vt::new(10, 4);
+        for line in 0..200 {
+            vt.write(format!("{line:03}\r\n").as_bytes());
+        }
+        let result = vt.text_rows(20, u64::MAX);
+        assert_eq!(result.total, 201);
+        assert_eq!(result.rows.len(), MAX_TERMINAL_ROWS as usize);
+        assert_eq!(result.rows[0].cells[1].text, "2");
+    }
 
     #[test]
     fn keyboard_selection_tracks_history_while_output_arrives() {
@@ -2017,7 +2147,7 @@ mod tests {
             vt.write(format!("line {line:02}\r\n").as_bytes());
         }
         assert_eq!(vt.cursor_position(), CellPosition { row: 12, col: 0 });
-        vt.select_at(None, "cell").unwrap();
+        vt.select_at(None, None, "cell").unwrap();
         vt.adjust_selection("left").unwrap();
         assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
             start: CellPosition { row: 12, col: 0 }, end: CellPosition { row: 11, col: 6 },
@@ -2047,11 +2177,48 @@ mod tests {
     }
 
     #[test]
+    fn exact_selection_reaches_into_history_and_follows_the_moving_end() {
+        let mut vt = Vt::new(20, 2);
+        vt.write(b"first\r\nsecond\r\nthird\r\nfourth");
+        let at = CellPosition { row: 3, col: 2 };
+        let to = CellPosition { row: 0, col: 2 };
+        vt.select_at(Some(at), Some(to), "word").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions { start: at, end: to }));
+        assert_eq!(vt.selection_text().as_deref(), Some("rst\nsecond\nthird\nfou"));
+        assert_eq!(vt.scrollbar().offset, 0);
+        let invalid = CellPosition { row: 10, col: 0 };
+        assert!(vt.select_at(Some(at), Some(invalid), "cell").is_err());
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions { start: at, end: to }));
+    }
+
+    #[test]
+    fn exact_line_selection_covers_physical_rows_in_either_direction() {
+        let mut vt = Vt::new(5, 4);
+        vt.write(b"abcdef\r\n\r\nlast");
+        let wrapped = CellPosition { row: 1, col: 0 };
+        let blank = CellPosition { row: 2, col: 1 };
+        vt.select_at(Some(wrapped), None, "line").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("abcdef"));
+        vt.select_at(Some(wrapped), Some(blank), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: wrapped, end: CellPosition { row: 2, col: 4 },
+        }));
+        vt.select_at(Some(blank), Some(wrapped), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: CellPosition { row: 2, col: 4 }, end: wrapped,
+        }));
+        vt.select_at(Some(blank), Some(blank), "line").unwrap();
+        assert_eq!(vt.selection_positions(), Some(SelectionPositions {
+            start: CellPosition { row: 2, col: 0 }, end: CellPosition { row: 2, col: 4 },
+        }));
+    }
+
+    #[test]
     fn shift_click_extends_the_selection_from_its_start() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"first line\r\nsecond line\r\nthird");
         assert!(!vt.extend_selection(3, 1), "nothing to extend without a selection");
-        vt.select_at(Some(CellPosition { row: 0, col: 6 }), "cell").unwrap();
+        vt.select_at(Some(CellPosition { row: 0, col: 6 }), None, "cell").unwrap();
         assert!(vt.extend_selection(5, 1));
         assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
             start: CellPosition { row: 0, col: 6 }, end: CellPosition { row: 1, col: 5 },
@@ -2070,7 +2237,7 @@ mod tests {
         let mut vt = Vt::new(30, 3);
         vt.write("hello 日本語\r\nsecond line".as_bytes());
         let at = Some(CellPosition { row: 0, col: 1 });
-        vt.select_at(at, "word").unwrap();
+        vt.select_at(at, None, "word").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("hello"));
         let word = vt.selection_positions();
         for _ in 0..2 {
@@ -2078,13 +2245,13 @@ mod tests {
             vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
         }
         assert_eq!(vt.selection_positions(), word);
-        vt.select_at(at, "line").unwrap();
+        vt.select_at(at, None, "line").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("hello 日本語"));
         let line = vt.selection_positions();
         vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
         vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
         assert_eq!(vt.selection_positions(), line);
-        vt.select_at(Some(CellPosition { row: 1, col: 0 }), "cell").unwrap();
+        vt.select_at(Some(CellPosition { row: 1, col: 0 }), None, "cell").unwrap();
         vt.adjust_selection("right").unwrap();
         assert_eq!(vt.selection_text().as_deref(), Some("se"));
         let frame = vt.frame();
@@ -2092,14 +2259,14 @@ mod tests {
         assert_eq!(frame.rows[1][1].bg, Some(theme().selection_bg));
         assert_ne!(frame.rows[1][2].bg, Some(theme().selection_bg));
         let selected = vt.selection_positions();
-        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), "cell").is_err());
-        assert!(vt.select_at(at, "invalid").is_err());
+        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), None, "cell").is_err());
+        assert!(vt.select_at(at, None, "invalid").is_err());
         assert!(vt.adjust_selection("word").is_err());
         assert_eq!(vt.selection_positions(), selected);
         vt.write(b"\x1b[?1049h\x1b[H");
         assert_eq!(vt.cursor_position().row, 0);
         assert_eq!(vt.selection_positions(), None);
-        vt.select_at(None, "cell").unwrap();
+        vt.select_at(None, None, "cell").unwrap();
         vt.adjust_selection("home").unwrap();
         assert_eq!(vt.selection_positions().unwrap().end.row, 0);
     }
@@ -2550,12 +2717,28 @@ mod tests {
         let p = vt.placements();
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row), (7, 0, 0));
-        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5, 1.0), [0.0, 0.0, 1.0, 1.0]);
         let (w, h, bgra) = vt.image_bgra(7, p[0].source).unwrap();
         assert_eq!((w, h), (1, 1));
         assert_eq!(&bgra[..], &[0, 0, 255, 255]);
         let reply = String::from_utf8(vt.take_replies()).unwrap();
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
+    }
+
+    #[test]
+    fn kitty_direct_placement_offsets_apply_in_device_pixels() {
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        vt.write(b"\x1b[2;3H\x1b_Ga=T,f=32,s=1,v=1,i=7,c=1,r=1,X=7,Y=5,C=1;/wAA/w==\x1b\\");
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].pixel_geometry(8.0, 16.0, 1.0), [23.0, 21.0, 1.0, 11.0]);
+        assert_eq!(p[0].pixel_geometry(4.0, 8.0, 2.0), [11.5, 10.5, 0.5, 5.5]);
+
+        vt.resize(20, 5, 4, 4);
+        let p = vt.placements();
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].pixel_geometry(4.0, 4.0, 1.0), [11.0, 7.0, 1.0, 1.0]);
     }
 
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
@@ -2588,7 +2771,7 @@ mod tests {
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row, p[0].width, p[0].height), (7, 0, 0, 64, 32));
         assert_eq!(p[0].source, [0, 0, 8, 4]);
-        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 78.0, 82.0]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5, 2.0), [0.0, 0.0, 78.0, 82.0]);
         vt.write(b"\x1b[6;1H\n\n");
         vt.frame();
         let p = vt.placements();
