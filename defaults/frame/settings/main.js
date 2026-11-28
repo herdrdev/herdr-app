@@ -8,14 +8,19 @@ const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
-  ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
+  ...(window()?.platform === "macos"
+    ? [
+        { id: "keyboard", title: "Keyboard", icon: "keyboard" },
+        { id: "quick", title: "Quick terminal", icon: "quick" },
+      ]
+    : []),
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "updates", title: "Updates", icon: "refresh" },
   { id: "privacy", title: "Privacy", icon: "shield" },
 ];
 
-const LOOKS = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" };
+const LOOKS = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98", dropdown: "Drop-down" };
 const APPEARANCES = [
   [null, "System"],
   ["light", "Light"],
@@ -25,6 +30,11 @@ const APPEARANCES = [
 // What the app uses when settings.json names no font (settings.rs).
 const DEFAULT_FONT = "JetBrains Mono";
 const DEFAULT_UI_FONT = "Geist";
+
+
+// keys.json's key names as a Mac keyboard prints them, in the order macOS writes modifiers.
+const MAC_MODIFIERS = [["ctrl", "Control"], ["alt", "Option"], ["shift", "Shift"], ["cmd", "Command"]];
+const MAC_KEYS = { escape: "Esc", space: "Space", enter: "Return", backspace: "Delete", tab: "Tab", delete: "Forward Delete", up: "↑", down: "↓", left: "←", right: "→", pageup: "Page Up", pagedown: "Page Down", home: "Home", end: "End" };
 
 export default class Settings extends View {
   init(_props, cx) {
@@ -54,6 +64,8 @@ export default class Settings extends View {
     this.machineResults = {};
     this.machineEdit = null;
     this.machineNotice = null;
+    this.recording = false; // the next key press is the quick terminal's key
+    this.keyError = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
@@ -247,7 +259,7 @@ export default class Settings extends View {
     const line = (w, c = t.dim) => div().h(3).w(w).flex_none().rounded(2).bg(c);
     const lines = (n, c) => col().gap(4).p(5).children([...Array(n)].map((_, i) => line(i % 2 ? 22 : 32, c)));
     const frame = (el) => el.size_full().rounded(6).overflow_hidden().border_1().border_color(t.border).bg(t.surface);
-    if (name === "main")
+    if (name === "main" || name === "dropdown")
       return frame(row())
         .child(col().w(42).border_r(1).border_color(t.border).child(lines(4)))
         .child(
@@ -274,7 +286,8 @@ export default class Settings extends View {
     // Shipped looks in the welcome's order, then the person's own; new files show up by themselves.
     const shipped = Object.keys(LOOKS);
     const rank = (n) => (shipped.includes(n) ? shipped.indexOf(n) : shipped.length);
-    const names = [...layouts()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    // The drop-down is a macOS window kind; elsewhere it would only be Herdr's layout again.
+    const names = [...layouts()].filter((n) => n !== "dropdown" || window()?.platform === "macos").sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
     if (names.join("\n") !== this.previewsOf) this.loadPreviews(names, cx);
     return h_flex()
       .w_full()
@@ -589,7 +602,135 @@ export default class Settings extends View {
           .on_click((_e, cx) => this.change((p) => { p.option_as_alt = value; }, cx))
           .child(div().text_color(on ? t.accent : t.muted).child(on ? "◉" : "○"))
           .child(div().text_size(14).text_color(t.foreground).child(label));
-      }));
+      }))
+      .child(div().h(18))
+      .child(this.heading(t, "Quick terminal"))
+      .child(this.row(t, "Show and hide", this.quickKeyAbout(t), this.shortcut(t, this.person.quick_terminal ?? null)));
+  }
+
+  quickKeyAbout(t) {
+    if (this.keyError) return div().text_color(t.blocked).child(this.keyError);
+    if (this.recording) return "Escape stops recording.";
+    return "From any app: brings Herdr to the front, or drops it down in the Drop-down layout. Other apps no longer get this key.";
+  }
+
+  // Quick terminal -------------------------------------------------------
+
+  // A key in keys.json's spelling ("cmd-shift-.") in words ("Shift + Command + ."): a lone ⇧ sign reads as no modifier at this size.
+  keyLabel(key) {
+    const parts = key.split(/-(?=.)/);
+    const name = parts.pop();
+    const mods = MAC_MODIFIERS.filter(([m]) => parts.includes(m)).map(([, word]) => word);
+    return [...mods, MAC_KEYS[name] ?? name.toUpperCase()].join(" + ");
+  }
+
+  // A key press while recording: its keys.json spelling, why it can't be the key, or null to keep waiting (a modifier alone).
+  // A system-wide key needs a modifier (or is an F key), so it can't take a plain key from typing in every app.
+  recordedKey(e) {
+    const m = e.modifiers;
+    if (/^(shift|control|ctrl|alt|cmd|platform|fn|function)$/.test(e.key)) return null;
+    if (m.function) return { error: "The Fn key can't be part of it." };
+    // Every app loses the key, so it can't be one that types (shift-a, or ? which macOS reports without its shift).
+    const fKey = /^f([1-9]|1\d|20)$/.test(e.key);
+    if (/^f\d+$/.test(e.key) && !fKey) return { error: "macOS takes F keys up to F20." };
+    if (!m.control && !m.alt && !m.platform && e.key !== "escape" && !fKey) return { error: "Hold Command, Control or Option with it, or use Esc or an F key from F1 to F20." };
+    if (e.key === "escape" && m.control && m.alt && m.shift && !m.platform) return { error: "That's Herdr's reset key." };
+    return { key: e.keystroke };
+  }
+
+  // While recording, every key press is the new key's (Escape alone stops).
+  record(e, cx) {
+    const m = e.modifiers;
+    if (e.key === "escape" && !m.shift && !m.control && !m.alt && !m.platform) {
+      this.recording = false;
+      this.keyError = null;
+      return;
+    }
+    const got = this.recordedKey(e);
+    if (!got) return;
+    this.keyError = got.error ?? null;
+    if (got.key) {
+      this.recording = false;
+      this.change((p) => { p.quick_terminal = { ...(p.quick_terminal ?? {}), key: got.key }; }, cx);
+    }
+  }
+
+  // The quick terminal's key: what it is, and a click records a new one.
+  shortcut(t, q) {
+    const recording = this.recording;
+    const label = recording ? "Press the keys…" : q?.key ? this.keyLabel(q.key) : "Record shortcut";
+    const recorder = div()
+      .id("st-qt-key")
+      .min_w(140)
+      .px(12)
+      .py(5)
+      .rounded(7)
+      .border_1()
+      .border_color(recording ? t.accent : t.border)
+      .bg(t.raised)
+      .flex()
+      .justify_center()
+      .text_size(13)
+      .text_color(recording || !q?.key ? t.muted : t.foreground)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => {
+        this.recording = !recording;
+        this.keyError = null;
+        this.handle.focus();
+        cx.notify();
+      })
+      .child(label);
+    return h_flex()
+      .gap(8)
+      .items_center()
+      .child(recorder)
+      .when(Boolean(q?.key) && !recording, (el) =>
+        el.child(this.button(t, "st-qt-key-clear", "Clear", (_e, cx) => this.change((p) => { if (p.quick_terminal) delete p.quick_terminal.key; }, cx))),
+      );
+  }
+
+  // One stepper click on a setting counted in whole 1/scale units, so repeated clicks don't drift (0.1 + 0.05 is 0.15000000000000002).
+  stepped(value, scale, lo, hi, d) {
+    // A value outside the stepper's range (written by hand) only moves toward it, never away.
+    const now = Math.round(value * scale);
+    return Math.max(Math.min(lo, now), Math.min(Math.max(hi, now), now + d)) / scale;
+  }
+
+  quickTerminal(t) {
+    const q = this.person.quick_terminal ?? null;
+    const flip = (key, on) => (_e, cx) => this.change((p) => { p.quick_terminal = { ...(p.quick_terminal ?? {}), [key]: !on }; }, cx);
+    const step = (key, fallback, scale, lo, hi, d) => (_e, cx) =>
+      this.change((p) => {
+        p.quick_terminal = { ...(p.quick_terminal ?? {}), [key]: this.stepped(p.quick_terminal?.[key] ?? fallback, scale, lo, hi, d) };
+      }, cx);
+    const height = Math.round((q?.height ?? 0.5) * 100);
+    const resize = (d) => step("height", 0.5, 100, 10, 100, d);
+    const opacity = Math.round((q?.opacity ?? 1) * 100);
+    const blur = Math.round(q?.blur ?? 50);
+    const inUse = (shared("layout") ?? "main") === "dropdown";
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "Quick terminal"))
+      .child(this.row(t, "Shortcut", this.quickKeyAbout(t), this.shortcut(t, q)))
+      .child(
+        this.row(
+          t,
+          "Drop down from the top of the screen",
+          inUse
+            ? "In use: the Drop-down layout. Herdr's window comes down over any app, on the Space you're in."
+            : "With the Drop-down layout, Herdr's window comes down over any app, on the Space you're in. Switching layouts in or out of it applies when Herdr restarts.",
+          inUse ? div().text_size(13).text_color(t.dim).child("In use") : this.button(t, "st-qt-use", "Use Drop-down", () => run("layout.switch", { name: "dropdown" })),
+        ),
+      )
+      .child(div().h(18))
+      .child(this.heading(t, "Drop-down"))
+      .child(this.row(t, "Height", q?.fullscreen ? "Full screen covers it all." : "Share of the screen. Dragging its bottom edge sets it too.", this.stepper(t, "st-qt-height", `${height}%`, resize(-5), resize(5))))
+      .child(this.row(t, "Full screen", "Cover the whole screen, menu bar and Dock too.", this.toggle(t, "st-qt-full", q?.fullscreen === true, flip("fullscreen", q?.fullscreen === true))))
+      .child(this.row(t, "Slide", "Slide down and up, instead of appearing at once.", this.toggle(t, "st-qt-slide", q?.slide !== false, flip("slide", q?.slide !== false))))
+      .child(this.row(t, "Hide when you click away", "Goes away when another app takes the keys.", this.toggle(t, "st-qt-autohide", q?.auto_hide === true, flip("auto_hide", q?.auto_hide === true))))
+      .child(this.row(t, "See-through", "Below 100%, the desktop shows behind the terminals. Text, mods and panels stay solid.", this.stepper(t, "st-qt-opacity", `${opacity}%`, step("opacity", 1, 100, 10, 100, -10), step("opacity", 1, 100, 10, 100, 10))))
+      .child(this.row(t, "Blur", opacity < 100 || (q?.active_opacity ?? 1) < 1 ? "How far the desktop behind is blurred." : "Blurs the desktop when it's see-through.", this.stepper(t, "st-qt-blur", `${blur} px`, step("blur", 50, 1, 0, 100, -10), step("blur", 50, 1, 0, 100, 10))));
   }
 
   // Machines -------------------------------------------------------------
@@ -912,6 +1053,8 @@ export default class Settings extends View {
               this.section = s.id;
               this.picking = null;
               this.machineEdit = null;
+              this.recording = false;
+              this.keyError = null;
               this.handle.focus();
               if (s.id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
               cx.notify();
@@ -936,6 +1079,12 @@ export default class Settings extends View {
       .items_start()
       .on_key_down((e, cx) => {
         const k = e.key;
+        if (this.recording) {
+          this.record(e, cx);
+          cx.stop_propagation();
+          cx.notify();
+          return;
+        }
         if (this.machineEdit) {
           if (k === "escape") this.machineEdit = null;
           else return;
@@ -977,6 +1126,8 @@ export default class Settings extends View {
                       ? this.look(t, cx)
                       : this.section === "keyboard"
                         ? this.keyboard(t)
+                      : this.section === "quick"
+                        ? this.quickTerminal(t)
                       : this.section === "machines"
                         ? this.machines(t)
                       : this.section === "alerts"

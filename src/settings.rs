@@ -412,6 +412,9 @@ pub struct Person {
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
+    /// macOS: the window drops down from the top of the screen (quick.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quick_terminal: Option<QuickTerminal>,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -453,6 +456,34 @@ impl OptionAsAlt {
     }
 }
 
+/// The quick terminal: `key` shows and hides it from any app, `height` is
+/// its share of the screen, `fullscreen` covers all of it (menu bar and Dock
+/// too), `slide` animates it, `auto_hide` puts it away when it loses the keys,
+/// `opacity` below 1 lets the blurred desktop show through its terminals,
+/// `active_opacity` (default `opacity`) through the one with the cursor,
+/// `blur` is how far the desktop behind is blurred, in px (0: not at all).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QuickTerminal {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// f64, not f32: a dragged height written back reads 0.37, not 0.3700000047683716.
+    pub height: f64,
+    pub fullscreen: bool,
+    pub slide: bool,
+    pub auto_hide: bool,
+    pub opacity: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_opacity: Option<f32>,
+    pub blur: f32,
+}
+
+impl Default for QuickTerminal {
+    fn default() -> Self {
+        QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false, opacity: 1.0, active_opacity: None, blur: 50.0 }
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -478,6 +509,7 @@ impl Default for Person {
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            quick_terminal: None,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -522,10 +554,18 @@ pub struct Settings {
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
+    /// `terminal_opacity` for the terminal with the cursor.
+    pub active_terminal_opacity: f32,
+    /// A see-through quick terminal: the layout's `background` and `canvas`
+    /// are clear and the desktop behind the window is blurred.
+    pub glass: bool,
+    /// With `glass`: how far the desktop behind is blurred, px (0: not at all).
+    pub blur: f32,
     pub clipboard_write: bool,
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    pub quick_terminal: Option<QuickTerminal>,
     pub sounds: Sounds,
 }
 
@@ -570,10 +610,14 @@ impl Default for Settings {
             pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
+            active_terminal_opacity: 1.0,
+            glass: false,
+            blur: 0.0,
             clipboard_write: true,
             copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            quick_terminal: None,
             sounds: Sounds::default(),
         }
     }
@@ -614,12 +658,31 @@ impl Settings {
             pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            active_terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            glass: false,
+            blur: 0.0,
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            quick_terminal: person.quick_terminal.clone(),
         }
+    }
+
+    /// The window is the quick terminal: its `opacity` and `active_opacity`,
+    /// when either is below 1, replace the layout's `terminal_opacity` and
+    /// turn the glass on.
+    pub fn in_quick_terminal(mut self) -> Settings {
+        let Some(q) = &self.quick_terminal else { return self };
+        let active = q.active_opacity.unwrap_or(q.opacity);
+        if q.opacity < 1.0 || active < 1.0 {
+            self.terminal_opacity = q.opacity.clamp(0.0, 1.0);
+            self.active_terminal_opacity = active.clamp(0.0, 1.0);
+            self.glass = true;
+            self.blur = q.blur.max(0.0);
+        }
+        self
     }
 }
 
@@ -673,6 +736,24 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        // Off macOS it's ignored, like option_as_alt: a settings.json shared with a Mac stays quiet here.
+        if let Some(q) = self.quick_terminal.as_ref().filter(|_| cfg!(target_os = "macos")) {
+            if let Some(key) = q.key.as_deref().filter(|k| crate::quick::keycode(k).is_none()) {
+                out.push(format!("quick_terminal.key: {key:?} can't be taken from every app: use Command, Control or Option with a key (\"ctrl-alt-space\"), Esc or an F key"));
+            }
+            if !(0.1..=1.0).contains(&q.height) {
+                out.push(format!("quick_terminal.height {} is outside 0.1..1", q.height));
+            }
+            if !(0.0..=1.0).contains(&q.opacity) {
+                out.push(format!("quick_terminal.opacity {} is outside 0..1", q.opacity));
+            }
+            if let Some(a) = q.active_opacity.filter(|a| !(0.0..=1.0).contains(a)) {
+                out.push(format!("quick_terminal.active_opacity {a} is outside 0..1"));
+            }
+            if !(0.0..=100.0).contains(&q.blur) {
+                out.push(format!("quick_terminal.blur {} is outside 0..100", q.blur));
+            }
         }
         out
     }
@@ -1083,6 +1164,69 @@ mod tests {
     }
 
     #[test]
+    fn quick_terminal_is_off_by_default_and_validates_its_key_and_height() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.quick_terminal, None);
+        assert!(!serde_json::to_value(&default).unwrap().as_object().unwrap().contains_key("quick_terminal"));
+        let bare: Person = serde_json::from_str(r#"{"quick_terminal":{}}"#).unwrap();
+        assert_eq!(bare.quick_terminal, Some(QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false, opacity: 1.0, active_opacity: None, blur: 50.0 }));
+        let person: Person = serde_json::from_str(r#"{"quick_terminal":{"key":"cmd-.","height":0.4,"fullscreen":true,"slide":false,"auto_hide":true,"opacity":0.8}}"#).unwrap();
+        let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!(settings.quick_terminal, Some(QuickTerminal { key: Some("cmd-.".into()), height: 0.4, fullscreen: true, slide: false, auto_hide: true, opacity: 0.8, active_opacity: None, blur: 50.0 }));
+        assert_eq!(serde_json::to_value(&person).unwrap()["quick_terminal"]["key"], "cmd-.");
+        // Off macOS quick_terminal is ignored, so a settings.json shared with a Mac reports nothing there.
+        let on_mac = |problems: usize| if cfg!(target_os = "macos") { problems } else { 0 };
+        assert_eq!(settings.problems().len(), 0);
+        for (key, height, problems) in [("cmd+.", 0.5, 1), ("ctrl-alt-space", 0.05, 1), ("f13", 1.0, 0), ("fn-q", 2.0, 2)] {
+            let q = QuickTerminal { key: Some(key.into()), height, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), on_mac(problems), "{key} {height}");
+        }
+        for (opacity, problems) in [(0.0, 0), (0.5, 0), (1.0, 0), (-0.1, 1), (1.5, 1)] {
+            let q = QuickTerminal { opacity, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), on_mac(problems), "opacity {opacity}");
+            let q = QuickTerminal { active_opacity: Some(opacity), ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), on_mac(problems), "active_opacity {opacity}");
+        }
+        for (blur, problems) in [(0.0, 0), (1.0, 0), (100.0, 0), (-1.0, 1), (101.0, 1)] {
+            let q = QuickTerminal { blur, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), on_mac(problems), "blur {blur}");
+        }
+    }
+
+    #[test]
+    fn a_see_through_quick_terminal_overrides_the_layouts_terminal_opacity() {
+        let look = crate::layout::Look { terminal_opacity: Some(0.9), ..Default::default() };
+        let quick = |json: &str| Settings::compose(&serde_json::from_str(json).unwrap(), &look, true);
+        let opacities = |s: Settings| (s.terminal_opacity, s.active_terminal_opacity, s.glass);
+        let s = quick(r#"{"quick_terminal":{"opacity":0.7}}"#);
+        assert_eq!(opacities(s.clone()), (0.9, 0.9, false), "a normal window keeps the layout's look");
+        assert_eq!(opacities(s.in_quick_terminal()), (0.7, 0.7, true), "the active pane follows opacity");
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"active_opacity":0.9}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (0.6, 0.9, true));
+        let s = quick(r#"{"quick_terminal":{"active_opacity":0.8}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (1.0, 0.8, true), "only the active pane see-through");
+        let s = quick(r#"{"quick_terminal":{}}"#).in_quick_terminal();
+        assert_eq!(opacities(s), (0.9, 0.9, false), "opacity 1 changes nothing");
+        assert_eq!(quick(r#"{"quick_terminal":{"opacity":0.6}}"#).in_quick_terminal().blur, 50.0, "blurred by default");
+        assert_eq!(quick(r#"{"quick_terminal":{"opacity":0.6,"blur":12}}"#).blur, 0.0, "a normal window keeps the layout's blur");
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"blur":12}}"#).in_quick_terminal();
+        assert_eq!((s.glass, s.blur), (true, 12.0));
+        let s = quick(r#"{"quick_terminal":{"opacity":0.6,"blur":0}}"#).in_quick_terminal();
+        assert_eq!((s.glass, s.blur), (true, 0.0), "see-through without the blur");
+    }
+
+    #[test]
+    fn a_quick_terminal_height_writes_back_as_written() {
+        let person = Person { quick_terminal: Some(QuickTerminal { height: 0.37, ..QuickTerminal::default() }), ..Person::default() };
+        let text = person_text(&person, "{}").unwrap();
+        assert!(text.contains("\"height\": 0.37\n") || text.contains("\"height\": 0.37,"), "{text}");
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -1107,7 +1251,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), font_weight_bold: Some(700), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), font_weight_bold: Some(700), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), quick_terminal: Some(QuickTerminal::default()), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

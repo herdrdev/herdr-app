@@ -63,13 +63,16 @@ impl AppWindow {
     }
 
     /// The root's `window_blur`: frosted glass behind the window, else opaque.
-    pub(super) fn apply_blur(&mut self, window: &mut Window) {
-        let want = self.chrome.window_blur;
+    pub(super) fn apply_blur(&mut self, window: &mut Window, cx: &App) {
+        let want = window_background(self.chrome.window_blur, &settings::get());
         if self.blur_applied == want {
             return;
         }
         self.blur_applied = want;
-        window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
+        window.set_background_appearance(want.0);
+        if want.1.is_some() {
+            crate::quick::blur(cx);
+        }
     }
 
     /// What mods know about the window: `window()`.
@@ -100,6 +103,10 @@ impl AppWindow {
 
     /// Makes a node move the window when dragged and maximize it on a double-click.
     pub(super) fn window_drag(&self, el: Div, cx: &mut Context<Self>) -> Div {
+        // The quick terminal stays where it dropped down.
+        if crate::quick::on() {
+            return el;
+        }
         el.on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, _| {
             if ev.click_count == 2 {
                 this.drag_from = None;
@@ -142,7 +149,8 @@ impl AppWindow {
         #[cfg(target_os = "macos")]
         {
             let _ = window;
-            if self.titlebar() == Titlebar::System {
+            // The quick terminal has no window buttons to leave room for.
+            if self.titlebar() == Titlebar::System && !crate::quick::on() {
                 let strip = self.window_drag(div().flex_none().h(px(MAC_STRIP)).w_full(), cx);
                 return div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element();
             }
@@ -208,6 +216,15 @@ impl AppWindow {
 
     pub(super) fn window_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         match name {
+            "window.close" if crate::quick::on() => crate::quick::hide(cx),
+            // The quick terminal: the whole screen, or back to its height.
+            "window.maximize" if crate::quick::on() => {
+                self.write_person(|p| {
+                    let q = p.quick_terminal.get_or_insert_with(Default::default);
+                    q.fullscreen = !q.fullscreen;
+                }, window, cx);
+                crate::quick::show(cx);
+            }
             "window.close" => {
                 self.drain_documents(window, cx);
                 self.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
@@ -286,5 +303,19 @@ mod win {
             .child(button("win-max", if maximized { include_bytes!("../../defaults/mods/tabs/win-restore.svg") } else { include_bytes!("../../defaults/mods/tabs/win-max.svg") }, WindowControlArea::Max, c("raised"), c("foreground")))
             .child(button("win-close", include_bytes!("../../defaults/mods/tabs/win-close.svg"), WindowControlArea::Close, red, gpui::white()))
             .into_any_element()
+    }
+}
+
+/// Blurred when the layout's `window_blur` asks for it (the system's radius)
+/// or a see-through quick terminal's `blur` does (its own), plainly
+/// see-through for one with `blur: 0`, else opaque.
+pub(super) fn window_background(layout_blur: bool, s: &settings::Settings) -> (gpui::WindowBackgroundAppearance, Option<f32>) {
+    use gpui::WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+    let radius = (s.glass && s.blur > 0.0).then_some(s.blur);
+    match (layout_blur, radius) {
+        (true, _) => (Blurred, None),
+        (false, Some(r)) => (Blurred, Some(r)),
+        (false, None) if s.glass => (Transparent, None),
+        (false, None) => (Opaque, None),
     }
 }

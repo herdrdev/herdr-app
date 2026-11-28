@@ -72,6 +72,16 @@ fn c(name: &str) -> Hsla {
     settings::color_or_literal(name)
 }
 
+/// A color the layout paints behind its blocks. A see-through quick terminal
+/// clears the backdrop ones, so only the terminals' own opacity is left
+/// between the text and the desktop; mods and panels keep `c`'s solid colors.
+fn layout_color(name: &str) -> Hsla {
+    if settings::get().glass && matches!(name, "background" | "canvas") {
+        return gpui::transparent_black();
+    }
+    c(name)
+}
+
 fn file(name: &str) -> PathBuf {
     mods::app_dir().join(name)
 }
@@ -150,6 +160,7 @@ const LAYOUTS: &[(&str, &str)] = &[
     ("main", include_str!("../defaults/layouts/main.json")),
     ("terminals", include_str!("../defaults/layouts/terminals.json")),
     ("win98", include_str!("../defaults/layouts/win98.json")),
+    ("dropdown", include_str!("../defaults/layouts/dropdown.json")),
 ];
 
 /// Pictures shipped layouts name as their `preview`, written beside them.
@@ -161,6 +172,14 @@ pub fn shipped_layouts() -> Vec<&'static str> {
 
 fn shipped_layout(name: &str) -> &'static str {
     LAYOUTS.iter().find(|(n, _)| *n == name).unwrap_or(&LAYOUTS[0]).1
+}
+
+/// Whether the layout Herdr starts with is a drop-down (`"dropdown": true` on its root).
+/// Read before the window opens: a window's kind can't change while it's open.
+pub fn starts_dropdown() -> bool {
+    // The same pick as the window's: a layout whose mods are gone starts on main.
+    let Some(name) = mods::shared("layout").and_then(|v| v.as_str().map(str::to_owned)).filter(|n| layout_path(n).exists() && missing_mods(n).is_empty()) else { return false };
+    std::fs::read_to_string(layout_path(&name)).ok().and_then(|text| serde_json::from_str::<Node>(&text).ok()).is_some_and(|n| n.dropdown)
 }
 
 /// A layout as shipped (main for names Herdr doesn't ship).
@@ -473,7 +492,7 @@ pub struct AppWindow {
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
-    blur_applied: bool,
+    blur_applied: (gpui::WindowBackgroundAppearance, Option<f32>),
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
@@ -506,6 +525,10 @@ pub struct AppWindow {
     place_write: Option<Task<()>>,
     /// Tells mods when the window stops or starts being shown (`window().visible`).
     _visibility: Option<Subscription>,
+    /// The quick terminal's `auto_hide` (quick.rs).
+    _quick: Option<Subscription>,
+    /// `window.see_through`: the quick terminal's `opacity` applies (else solid).
+    see_through: bool,
 }
 
 impl AppWindow {
@@ -593,7 +616,7 @@ impl AppWindow {
             drag_from: None,
             titlebar_applied: None,
             // Windows open opaque: leave the platform alone until a layout asks for blur.
-            blur_applied: false,
+            blur_applied: (gpui::WindowBackgroundAppearance::Opaque, None),
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
@@ -615,11 +638,15 @@ impl AppWindow {
             _place: None,
             place_write: None,
             _visibility: None,
+            _quick: None,
+            see_through: true,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
+            } else if crate::quick::on() && crate::quick::resizing() {
+                this.place_write = Some(this.save_quick_height(window, cx));
             }
         }));
         // A hidden window draws no frames, so publish here rather than in render:
@@ -629,6 +656,10 @@ impl AppWindow {
                 this.refresh_snapshot_mods(cx);
             }
         }));
+        if crate::quick::on() {
+            crate::quick::install(window, cx);
+            w._quick = Some(cx.observe_window_activation(window, |_, window, cx| crate::quick::focus_changed(window.is_window_active(), cx)));
+        }
         let closing = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // macOS: the red button hides the app instead, so alerts keep ringing;
@@ -949,16 +980,45 @@ impl AppWindow {
         self.apply_look(window, cx);
     }
 
+    /// The quick terminal moved or resized: once its edge is let go, a new height goes to settings.json (the task replaces the last one, which cancels it).
+    fn save_quick_height(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                if !crate::quick::resizing() {
+                    break;
+                }
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(height) = crate::quick::resized_height() {
+                    this.write_person(|p| p.quick_terminal.get_or_insert_default().height = height, window, cx);
+                }
+                // A drag on the top edge leaves the drop-down off the top of the screen.
+                crate::quick::refit(cx);
+            });
+        })
+    }
+
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
             mods::note_fonts(cx);
         }
-        let s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
-        let problems = s.problems();
+        let mut s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
+        if crate::quick::on() && self.see_through {
+            s = s.in_quick_terminal();
+        }
+        let mut problems = s.problems();
+        if let Err(e) = crate::quick::set_key(s.quick_terminal.as_ref().and_then(|q| q.key.as_deref())) {
+            problems.push(e);
+        }
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
+        }
+        let fit = |s: &settings::Settings| s.quick_terminal.as_ref().map(|q| (q.height, q.fullscreen));
+        if crate::quick::on() && fit(&settings::get()) != fit(&s) {
+            crate::quick::refit(cx);
         }
         if settings::set(s) {
             for term in self.terms.values() {
@@ -1108,6 +1168,11 @@ impl AppWindow {
             self.drop_layout_copies(window, cx);
         }
         self.load_layout(&next);
+        if cfg!(target_os = "macos") && other && self.chrome.dropdown != crate::quick::on() {
+            let title = if self.chrome.dropdown { "The drop-down starts with Herdr" } else { "Back to a normal window when Herdr restarts" };
+            let note = json!({ "kind": "toast", "notification": { "title": title, "body": "A window can't change its kind while it's open: quit and reopen Herdr.", "level": "info", "timeout": 8000 } });
+            self.open_overlay(mods::new_overlay_id(), note, window, cx);
+        }
         #[cfg(target_os = "macos")]
         crate::macos::refresh_menus(cx);
         self.apply_look(window, cx);
@@ -3799,6 +3864,7 @@ impl AppWindow {
                 self.write_person(|p| p.zoom = zoom, window, cx);
             }
             "app.quit" => cx.quit(),
+            "app.toggle" => return self.toggle(window, cx),
             "app.update" => {
                 match crate::update::apply() {
                     Ok(true) => {}
@@ -3813,6 +3879,10 @@ impl AppWindow {
                 cx.quit();
             }
             "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
+            "window.see_through" => {
+                self.see_through = !self.see_through;
+                self.apply_look(window, cx);
+            }
             // Hiding apps is macOS's (bound natively there).
             "app.hide" | "app.hide_others" | "app.show_all" => return,
             other => {
@@ -4214,6 +4284,24 @@ impl AppWindow {
         }
     }
 
+    /// `app.toggle`: the quick terminal drops down or goes up; else the app
+    /// hides or comes to the front.
+    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::quick::on() {
+            crate::quick::toggle(cx);
+        } else if window.is_window_active() {
+            // Only macOS hides an app; elsewhere `hide` does nothing.
+            if cfg!(target_os = "macos") {
+                cx.hide();
+            } else {
+                window.minimize_window();
+            }
+        } else {
+            cx.activate(true);
+            window.activate_window();
+        }
+    }
+
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
@@ -4224,8 +4312,12 @@ impl AppWindow {
         }
         // Herdr was launched again: this window comes to the front instead.
         if cmd.get("raise").is_some() {
-            cx.activate(true);
-            window.activate_window();
+            if crate::quick::on() {
+                crate::quick::show(cx);
+            } else {
+                cx.activate(true);
+                window.activate_window();
+            }
             return json!({ "ok": true });
         }
         if cmd.get("ls").is_some() {
@@ -4847,7 +4939,7 @@ impl AppWindow {
             if top > 0.0
                 && let Some(Paint::Color(background)) = n.children().iter().filter(|child| !child.hidden).nth(index).and_then(|child| child.background.as_ref())
             {
-                sep = sep.bg(c(background));
+                sep = sep.bg(layout_color(background));
             }
             sep = sep.child(separator_line(row, w, color, top));
         }
@@ -5609,7 +5701,7 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     let mut el = el;
     let focus = n.focus.as_ref().filter(|_| focused);
     if let Some(bg) = focus.and_then(|f| f.background.as_ref()) {
-        el = el.bg(c(bg));
+        el = el.bg(layout_color(bg));
     } else if let Some(bg) = &n.background {
         el = paint(el, bg);
     }
@@ -5630,7 +5722,7 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
 /// whatever comes after it (call before adding content).
 fn paint(el: Div, bg: &Paint) -> Div {
     match bg {
-        Paint::Color(name) => el.bg(c(name)),
+        Paint::Color(name) => el.bg(layout_color(name)),
         Paint::Gradient { gradient: [a, b], angle } => el.bg(linear_gradient(*angle, linear_color_stop(c(a), 0.), linear_color_stop(c(b), 1.))),
         Paint::Image { image, fit } => {
             let fit = match fit {
@@ -5685,7 +5777,7 @@ impl Render for AppWindow {
         self.publish_focused_selection(window, cx);
         self.tick_floats(window);
         self.apply_titlebar(window);
-        self.apply_blur(window);
+        self.apply_blur(window, cx);
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
@@ -5710,7 +5802,7 @@ impl Render for AppWindow {
             .key_context(key_context("Herdr", "layout", &self.layout_name))
             .size_full()
             .relative()
-            .bg(c("background"))
+            .bg(layout_color("background"))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
@@ -5841,6 +5933,37 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn the_window_is_blurred_see_through_or_opaque() {
+        use super::titlebar::window_background;
+        use crate::settings::Settings;
+        use gpui::WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+        let glass = |blur| Settings { glass: true, blur, ..Settings::default() };
+        assert_eq!(window_background(false, &Settings::default()), (Opaque, None));
+        assert_eq!(window_background(true, &Settings::default()), (Blurred, None), "the layout's window_blur, the system's radius");
+        assert_eq!(window_background(false, &glass(12.0)), (Blurred, Some(12.0)));
+        assert_eq!(window_background(false, &glass(0.0)), (Transparent, None));
+        assert_eq!(window_background(true, &glass(0.0)), (Blurred, None), "the layout asks for blur");
+    }
+
+    #[test]
+    fn a_see_through_quick_terminal_clears_the_layouts_backdrop_only() {
+        use super::{c, layout_color};
+        use crate::settings::{self, Settings};
+        settings::set(Settings::default());
+        for name in ["background", "canvas", "chrome", "#ff0000"] {
+            assert_eq!(layout_color(name), c(name), "{name} solid without glass");
+        }
+        settings::set(Settings { glass: true, ..Settings::default() });
+        for name in ["background", "canvas"] {
+            assert_eq!(layout_color(name).a, 0.0, "{name} clear with glass");
+            assert_eq!(c(name).a, 1.0, "{name} stays solid for mods and panels");
+        }
+        for name in ["chrome", "surface", "#ff0000"] {
+            assert_eq!(layout_color(name), c(name), "{name} untouched with glass");
+        }
+    }
 
     #[test]
     fn close_only_walks_hidden_children_on_older_cores() {
@@ -7792,6 +7915,26 @@ export default class Probe extends View {
 
     include!("window/pane_size_tests.rs");
 
+    #[test]
+    fn see_through_switches_the_quick_terminals_glass_off_and_on() {
+        in_own_process("see_through_switch");
+    }
+
+    #[gpui::test]
+    fn see_through_switch(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("see_through_switch") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "context", "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            assert!(this.see_through, "see-through from the start");
+            for expected in [false, true] {
+                let out = this.run_as("window.see_through", json!({}), false, window, cx);
+                assert!(out.get("error").is_none(), "{out}");
+                assert_eq!(this.see_through, expected);
+            }
+        });
+    }
+
     /// What a `{"command":"tab.move","args":{"by":-1}}` key runs.
     #[test]
     fn tab_move_by_steps_the_active_tab() {
@@ -8475,6 +8618,11 @@ export default class Probe extends View { render() { return div().child("probe")
         let terminals = super::default_layout("terminals");
         assert!(terminals.find("tabs").is_some());
         assert!(matches!(terminals.find("main").and_then(|n| n.content()), Some(super::Content::Context { .. })));
+        let mut dropdown: serde_json::Value = serde_json::from_str(super::shipped_layout("dropdown")).unwrap();
+        assert_eq!(dropdown["dropdown"], true);
+        dropdown.as_object_mut().unwrap().remove("dropdown");
+        assert_eq!(dropdown, serde_json::from_str::<serde_json::Value>(super::shipped_layout("main")).unwrap(), "the drop-down is Herdr's own layout, dropped down");
+        assert!(super::shipped_layouts().iter().all(|n| (*n == "dropdown") == super::default_layout(n).dropdown), "only the drop-down layout drops down");
     }
 
     #[test]
