@@ -84,6 +84,12 @@ fn attach_console() {
     }
 }
 
+/// `herdr-app <window command> --help` asks for help: without this, `feedback --help`
+/// opened a feedback draft reading "--help", and `do --help` ran a command named "--help".
+fn asks_for_help(rest: &[String]) -> bool {
+    matches!(rest, [flag] if matches!(flag.as_str(), "-h" | "--help"))
+}
+
 fn link_check_path(args: &[String]) -> Option<&std::path::Path> {
     let mut paths = args.iter().filter(|arg| !matches!(arg.as_str(), "--print-spec" | "--watch" | "--dev"));
     let path = paths.next()?;
@@ -119,6 +125,9 @@ fn main() {
         return;
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
+        if asks_for_help(&args[2..]) {
+            return print!("{HELP}");
+        }
         std::process::exit(control::client(&args[1..]));
     }
     // Anything else from a shell answers in the shell; only a bare launch opens the window.
@@ -258,4 +267,27 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the Herdr window");
             cx.activate(true);
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::asks_for_help;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_lone_help_flag_after_a_window_command_asks_for_help() {
+        assert!(asks_for_help(&args(&["--help"])));
+        assert!(asks_for_help(&args(&["-h"])));
+    }
+
+    #[test]
+    fn feedback_text_and_command_arguments_are_not_help() {
+        assert!(!asks_for_help(&args(&[])));
+        assert!(!asks_for_help(&args(&["the sidebar froze"])));
+        assert!(!asks_for_help(&args(&["--help me find the shortcut"])));
+        assert!(!asks_for_help(&args(&["space.select", "--help"])));
+    }
 }
