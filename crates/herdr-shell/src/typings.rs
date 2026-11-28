@@ -3293,6 +3293,10 @@ const BASE: &str = r#"  /** A row. */
     /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
     selected_range(): InputRange;
     set_selected_range(range: InputRange): void;
+    /** The lines the last frame drew (UTF-16 offsets): from the start of the first
+     * visible line, even if partly scrolled off, to the end of the last.
+     * Null until the editor has been painted. */
+    visible_range(): InputRange | null;
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;

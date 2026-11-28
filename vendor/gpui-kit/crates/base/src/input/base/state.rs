@@ -3151,6 +3151,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         (*self.selections.active()).into()
     }
 
+    /// HERDR: the byte range of the lines the last frame drew, from the start
+    /// of the first (even partly) visible line to the end of the last one.
+    /// `None` until the input has been painted.
+    pub fn visible_range(&self) -> Option<Range<usize>> {
+        self.last_layout
+            .as_ref()
+            .map(|layout| layout.visible_range_offset.clone())
+    }
+
     pub fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
         self.selections.remove_all_but_active();
