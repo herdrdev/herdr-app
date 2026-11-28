@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout } from "herdr";
+import { panes, props, run, theme, home, layout, shared } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -42,13 +42,14 @@ export default class Pane extends View {
     return panes().find((p) => p.pane === props()?.pane);
   }
 
-  button(t, id, icon, command, args) {
+  button(t, id, icon, tooltip, command, args) {
     return div()
       .id(id)
       .p(3)
       .rounded(4)
       .text_color(t.dim)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .when(shared("button.tooltips") === true, (el) => el.tooltip(tooltip))
       .on_click((_e, cx) => {
         cx.stop_propagation();
         run(command, args);
@@ -85,9 +86,9 @@ export default class Pane extends View {
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
       .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))
       .when(this.hovered, el => el
-        .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
-        .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
-        .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))
-        .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })));
+        .child(this.button(t, `ph-r-${pane}`, "split-right", "Split right", "pane.split", { direction: "right", pane }))
+        .child(this.button(t, `ph-d-${pane}`, "split-down", "Split down", "pane.split", { direction: "down", pane }))
+        .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", p.zoomed ? "Unzoom" : "Zoom", "pane.zoom", { pane }))
+        .child(this.button(t, `ph-x-${pane}`, "close", "Close pane", "pane.close", { pane })));
   }
 }

@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -560,7 +560,20 @@ export default class Settings extends View {
           this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`, by(-step), by(step)),
         );
       }))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Buttons"))
+      .child(this.buttonTooltipsRow(t));
+  }
+
+  buttonTooltipsRow(t) {
+    const on = shared("button.tooltips") === true;
+    return this.row(
+      t,
+      "Show tooltips",
+      "Name icon buttons, such as + and the sidebar toggle, when you hover them.",
+      this.toggle(t, "st-button-tooltips", on, () => setShared("button.tooltips", !on)),
+    );
   }
 
   keyboard(t) {

@@ -30,12 +30,13 @@ const source = await readFile(new URL("../defaults/mods/tabs/main.js", import.me
 const element = () => new Element();
 const commands: string[] = [];
 const store: Record<string, string> = {};
+const sharedValues: Record<string, unknown> = {};
 const values: Record<string, unknown> = {
   View: class {}, div: element, svg: element, image: element, h_flex: element,
   ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
   spaces: () => [{ id: "s1", active: true, tabs: [{ id: "t1", name: "a" }, { id: "t2", name: "b", active: true }, { id: "t3", name: "c" }] }],
   panes: () => [], run(command: string) { commands.push(command); }, openOverlay() {}, theme: () => ({}),
-  window: () => null, shared: () => null, layout: () => null, settings: () => ({ zoom: 1 }),
+  window: () => null, shared: (key: string) => sharedValues[key] ?? null, layout: () => null, settings: () => ({ zoom: 1 }),
   localStorage: { getItem: (key: string) => store[key] ?? null, setItem(key: string, value: string) { store[key] = value; } },
 };
 const Tabs = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Tabs", "return class Tabs"))(...Object.values(values));
@@ -174,4 +175,22 @@ test("a shell's title never replaces its tab's name", () => {
   expect(label({ name: "", named: false }, shell)).toBe("zsh");
   expect(label({ name: "notes", named: true }, shell)).toBe("notes");
   expect(label({ name: "", named: false }, undefined)).toBe("Terminal");
+});
+
+function findById(root: Element, id: string): Element | undefined {
+  if (root.calls.id?.[0] === id) return root;
+  for (const node of root.nodes) {
+    const found = typeof node === "object" ? findById(node, id) : undefined;
+    if (found) return found;
+  }
+}
+
+test("icon buttons show tooltips only when button.tooltips is on", () => {
+  const view = new Tabs();
+  view.init();
+  expect(findById(view.render() as Element, "tab-new")?.calls.tooltip).toBeUndefined();
+  sharedValues["button.tooltips"] = true;
+  expect(findById(view.render() as Element, "tab-new")?.calls.tooltip).toEqual(["New tab"]);
+  expect(findById(view.render() as Element, "close-t2")?.calls.tooltip).toEqual(["Close tab"]);
+  delete sharedValues["button.tooltips"];
 });
