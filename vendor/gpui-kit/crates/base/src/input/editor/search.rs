@@ -283,18 +283,19 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// An input that is not `searchable` leaves the shortcut to its
     /// ancestors, so a custom search UI can take it.
-    pub(super) fn on_action_search(&mut self, _: &Search, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_action_search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
         if !self.searchable {
             cx.propagate();
             return;
         }
         self.open_search(false, cx);
+        M::search_opened(self, window, cx);
     }
 
     pub(super) fn on_action_replace(
         &mut self,
         _: &Replace,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.searchable {
@@ -302,6 +303,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
         self.open_search(true, cx);
+        M::search_opened(self, window, cx);
     }
 }
 

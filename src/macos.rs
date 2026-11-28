@@ -52,6 +52,8 @@ pub fn dispatch_edit(action: &ShellAction, terminal_focused: bool, window: &mut 
     let action: Box<dyn Action> = match action.id() {
         "terminal.copy" => Box::new(gpui_base::input::Copy),
         "terminal.paste" => Box::new(gpui_base::input::Paste),
+        // Find… opens a focused editor's find bar (#1139).
+        "terminal.search" => Box::new(gpui_base::input::Search),
         _ => return false,
     };
     if !window.is_action_available(action.as_ref(), cx) {

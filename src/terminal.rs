@@ -3403,6 +3403,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn macos_find_menu_opens_a_focused_editors_find_bar(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use gpui_base::input::{Editor, EditorState};
+        use gpui_shell::action::ShellAction;
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            editor: Entity<EditorState>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full()
+                    .on_action(cx.listener(|this, action: &ShellAction, window, cx| {
+                        if !crate::macos::dispatch_edit(action, this.terminal.read(cx).owns_keyboard_focus(window, cx), window, cx) {
+                            this.terminal.update(cx, |terminal, cx| terminal.open_search(window, cx));
+                        }
+                    }))
+                    .child(div().h(px(100.)).child(Editor::new(&self.editor)))
+                    .child(div().h(px(150.)).child(self.terminal.clone()))
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|window, cx| Root {
+            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)),
+            editor: cx.new(|cx| EditorState::new(window, cx)),
+        });
+        cx.update(|window, app| root.update(app, |root, app| root.editor.update(app, |editor, cx| editor.focus(window, cx))));
+        cx.run_until_parked();
+        cx.dispatch_action(ShellAction::new("terminal.search"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            assert!(root.editor.read(app).search_session().open, "Find… opens the focused editor's find bar");
+            assert!(!root.terminal.read(app).search_open, "the terminal behind it keeps its bar closed");
+        });
+
+        cx.update(|window, app| root.update(app, |root, app| root.terminal.update(app, |terminal, cx| terminal.focus_handle().focus(window, cx))));
+        cx.run_until_parked();
+        cx.dispatch_action(ShellAction::new("terminal.search"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| assert!(root.terminal.read(app).search_open, "a focused terminal still gets Find"));
+    }
+
+    #[gpui::test]
     fn macos_edit_menu_follows_keyboard_focus(cx: &mut gpui::TestAppContext) {
         use gpui::*;
         use gpui_base::input::{Input, InputState};
