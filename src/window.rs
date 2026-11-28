@@ -3567,7 +3567,8 @@ impl AppWindow {
                 if order.is_empty() {
                     return;
                 }
-                let current = self.shown_agent().map(|a| self.root_agent(&a));
+                // A sub-agent with a pane has its own place in the order; one without stands at its top agent's.
+                let current = self.shown_agent().map(|a| if order.contains(&a) { a } else { self.root_agent(&a) });
                 let n = order.len();
                 let next = match current.and_then(|c| order.iter().position(|a| *a == c)) {
                     Some(i) if name == "agent.next" => (i + 1) % n,
@@ -7077,6 +7078,59 @@ mod tests {
                 assert!(reply.get("error").is_some(), "{reply}");
                 assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "invalid index {index} leaves focus alone");
             }
+        }));
+    }
+
+    #[test]
+    fn agent_next_reaches_the_parent_of_a_sub_agent_with_a_pane() {
+        in_own_process("agent_next_from_kept_sub_agent");
+    }
+
+    #[gpui::test]
+    fn agent_next_from_kept_sub_agent(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("agent_next_from_kept_sub_agent") {
+            return;
+        }
+        // As the agents mod does: the sub-agent (t3) is drawn under its parent and left out of the order.
+        let (view, cx) = open_window(cx, "order", r#"
+            import { View, div } from "gpui-kit";
+            import { setAgentOrder } from "herdr";
+            export default class Order extends View {
+                render() {
+                    setAgentOrder(["t2", "t1"]);
+                    return div();
+                }
+            }
+        "#, json!({
+            "id": "root", "type": "block", "content": { "mod": "order" }
+        }));
+        cx.update(|_, cx| view.update(cx, |this, _| {
+            this.folders.retain(|id, _| id == "order");
+            this.model = crate::model::Model::default();
+            let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
+            tab.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "split".into());
+            this.model.add_space("sp1", "", "/tmp", tab);
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p3", "t3"));
+            for (address, parent) in [("t1", None), ("t2", None), ("t3", Some("t1"))] {
+                this.live.insert(address.into(), json!({ "address": address, "parent": parent }));
+                this.model.set_word(address, Some("idle".into()), Some("claude".into()), false);
+            }
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p3"), "the sub-agent's pane is focused");
+            let steps = [("agent.next", "p2"), ("agent.next", "p1"), ("agent.next", "p3"), ("agent.prev", "p1"), ("agent.prev", "p2"), ("agent.prev", "p3")];
+            for (command, pane) in steps {
+                this.run(command, json!({}), window, cx);
+                assert_eq!(this.model.focused_pane().as_deref(), Some(pane), "{command}");
+            }
+            // A sub-agent without a pane (t4, started by t2) has no place of its own: it stands at t2's.
+            this.live.insert("t4".into(), json!({ "address": "t4", "parent": "t2" }));
+            this.agent = Some("t4".into());
+            this.run("agent.next", json!({}), window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "after t2 comes t1");
         }));
     }
 
