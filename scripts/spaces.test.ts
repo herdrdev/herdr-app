@@ -287,6 +287,52 @@ test("unexpected transport failures clear the busy state", async () => {
   expect(view.reconnecting.cloud.error).toBe("offline");
 });
 
+test("refreshMachines drops stale reconnecting state when a machine with the same name is re-added or connected", async () => {
+  const stale = {
+    machine: { id: "old-id", name: "jupiter", state: "unreachable", why: 'a different core answers there ("new-id")' },
+    removed: true,
+    busy: false,
+    error: '"jupiter" is already a machine here',
+  };
+  const h = harness(
+    [{ code: 0, stdout: JSON.stringify({ machines: [{ id: "new-id", name: "jupiter", state: "connected" }] }) }],
+    new Map([["machines.reconnecting", JSON.stringify({ jupiter: stale })]]),
+    [{ id: "s1", name: "work", folder: "/work", machine: "jupiter" }],
+  );
+  // Use real init/refreshMachines (harness overrides refreshMachines with a no-op).
+  const SpacesCtor = h.view.constructor as any;
+  const view = new SpacesCtor();
+  view.init({}, h.cx);
+  await Promise.all(h.tasks);
+  expect(view.reconnecting).toEqual({});
+  expect(JSON.parse(h.storage.get("machines.reconnecting")!)).toEqual({});
+  view.shown = new Set(["s1"]);
+  view.git = {};
+  view.born = {};
+  view.ordering = null;
+  const children = view.grouped({}, false);
+  expect(children.length).toBeGreaterThan(2);
+  expect(h.labels).not.toContain("Connect");
+});
+
+test("refreshMachines preserves reconnecting state while the old machine still reports a core mismatch", async () => {
+  const stale = {
+    machine: { id: "old-id", name: "jupiter", state: "unreachable", why: 'a different core answers there ("new-id")' },
+    removed: false,
+    busy: false,
+    error: "no connection",
+  };
+  const h = harness(
+    [{ code: 0, stdout: JSON.stringify({ machines: [stale.machine] }) }],
+    new Map([["machines.reconnecting", JSON.stringify({ jupiter: stale })]]),
+  );
+  const SpacesCtor = h.view.constructor as any;
+  const view = new SpacesCtor();
+  view.init({}, h.cx);
+  await Promise.all(h.tasks);
+  expect(view.reconnecting.jupiter).toEqual(stale);
+});
+
 function orderedHarness(ids: string[]) {
   const h = harness([], new Map(), ids.map(id => ({ id, name: id, folder: "/" + id })));
   h.view.git = {};

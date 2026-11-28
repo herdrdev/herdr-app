@@ -167,9 +167,32 @@ export default class Spaces extends View {
     return [key, ...(repo ? [...keys].filter((k) => this.git[k]?.repo === repo) : [])];
   }
 
+  staleReconnect(repair, live) {
+    if (!repair || repair.busy || !live || this.rebuilt(live)) return false;
+    return live.state === "connected" || Boolean(repair.machine?.id && live.id && live.id !== repair.machine.id) || repair.removed === true;
+  }
+
+  pruneReconnecting() {
+    let changed = false;
+    for (const [name, repair] of Object.entries(this.reconnecting)) {
+      const live = this.machines.find((m) => m.name === name);
+      if (this.staleReconnect(repair, live)) {
+        delete this.reconnecting[name];
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+  }
+
   refreshMachines(cx) {
     cx.spawn(async cx => {
-      try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      try {
+        const r = await hc(["machine", "ls", "--json"]);
+        if (r.code === 0) {
+          this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary);
+          this.pruneReconnecting();
+        }
+      } catch {}
       cx.notify();
     });
   }
@@ -373,8 +396,9 @@ export default class Spaces extends View {
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
-      const repair = this.reconnecting[m];
-      const machine = this.machines.find(k => k.name === m) ?? repair?.machine;
+      const live = this.machines.find(k => k.name === m);
+      const repair = this.staleReconnect(this.reconnecting[m], live) ? undefined : this.reconnecting[m];
+      const machine = live ?? repair?.machine;
       const connected = !m || machine?.state === "connected";
       const rebuilt = this.rebuilt(machine) || !!repair;
       const login = machine?.state === "needs_login" ? `hc machine login ${m}` : null;
