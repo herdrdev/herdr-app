@@ -136,9 +136,9 @@ struct Calls {
 
 fn updates(app: &str, core: &str) -> Value {
     json!({
-        "app": {"version":"0.1.0", "updates":app != "source", "ready": (app == "ready").then_some("0.1.1")},
+        "app": {"version":"0.1.0", "managed": (app == "managed").then_some("nix"), "updates": !matches!(app, "source" | "managed"), "ready": (app == "ready").then_some("0.1.1")},
         "core": {"version":"0.1.5", "ready":(core == "ready").then_some("0.1.6"), "managed":(core == "managed").then_some("homebrew"), "error":(core == "error").then_some("offline"), "updating":core == "updating"},
-        "checked":1700000000, "checks":app != "source", "checking":false
+        "checked":1700000000, "checks": !matches!(app, "source" | "managed"), "checking":false
     })
 }
 
@@ -1341,12 +1341,18 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         p["section"] = json!(section);
         describe(cx, &staged, "frame/settings", true, p, updates("current", "current"), None).unwrap();
     }
-    for app in ["source", "current", "ready"] {
+    for app in ["source", "managed", "current", "ready"] {
         for core in ["current", "ready", "error", "managed", "updating"] {
             let mut p = props();
             p["section"] = json!("updates");
             let tree = describe(cx, &staged, "frame/settings", true, p, updates(app, core), None)
                 .unwrap_or_else(|e| panic!("updates/{app}/{core}: {e:#}"));
+            if app == "managed" {
+                assert!(
+                    tree.contains("Managed by nix: update it there.") && !tree.contains("updates with git") && !tree.contains("check-app"),
+                    "managed app must name its package manager without a check button: {tree}"
+                );
+            }
             if app == "current" && core == "current" {
                 assert!(
                     tree.contains("check-app") && tree.contains("check-core"),
@@ -1375,7 +1381,7 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         }
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
-    eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+    eprintln!("32 settings cases, each twice: {:?}", start.elapsed());
 }
 
 #[gpui::test]

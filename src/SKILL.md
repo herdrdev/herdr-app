@@ -22,7 +22,7 @@ its terminals.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
-Package-managed cores are checked but updated through their package manager.
+Package-managed apps and cores are updated through their package manager; managed cores are still checked.
 Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
 it stays dismissed until the error changes or the update recovers.
 
