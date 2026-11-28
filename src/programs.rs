@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn the_check_runs_in_the_persons_shell_and_falls_back_to_sh_only_when_it_cannot() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let temp = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = temp.join(format!("herdr-other-shell-check-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("rc")).unwrap();
         let script = |name: &str, body: &str| {
