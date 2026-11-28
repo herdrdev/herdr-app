@@ -45,12 +45,16 @@ function wheel() {
   const view = new Tabs();
   view.init();
   // The mod is plain JS: its handler's shape is the documented ScrollWheelEvent listener.
-  const handler = (view.render() as Element).calls.on_scroll_wheel[0] as Handler;
-  return (y: number, touch_phase = "moved", lines?: number, ms = 8) => {
+  const root = view.render() as Element;
+  const handler = root.calls.on_scroll_wheel[0] as Handler;
+  const send = (y: number, touch_phase = "moved", lines?: number, ms = 8) => {
     now += ms;
     setSystemTime(new Date(now));
     handler({ delta: { x: 0, y }, delta_lines: lines === undefined ? undefined : { x: 0, y: lines }, touch_phase });
   };
+  // The pointer moves onto the bar.
+  send.enter = () => { setSystemTime(new Date(now)); (root.calls.on_hover[0] as Handler)(true); };
+  return send;
 }
 beforeEach(() => { commands.length = 0; });
 // Bun runs every test file in one process: give the later ones the real clock.
@@ -98,6 +102,27 @@ test("a pause or a turn starts a new gesture", () => {
   for (let i = 0; i < 4; i++) send(-5);
   for (let i = 0; i < 12; i++) send(6, "moved", undefined, 20);
   expect(commands).toEqual(["tab.next", "tab.next", "tab.prev"]);
+});
+
+test("a scroll that comes onto the bar from a terminal switches nothing until it pauses", () => {
+  const send = wheel();
+  send.enter();
+  // A terminal's up-and-down momentum, still arriving.
+  for (let i = 0; i < 20; i++) send(i % 6 < 3 ? 15 : -15, "moved", undefined, 16);
+  expect(commands).toEqual([]);
+  // After a pause, a swipe on the bar is the tabs' again.
+  send(-6, "moved", undefined, 400);
+  for (let i = 0; i < 11; i++) send(-6);
+  expect(commands).toEqual(["tab.next"]);
+});
+
+test("a new touch on the bar is the tabs' even right after a carried scroll", () => {
+  const send = wheel();
+  send.enter();
+  for (let i = 0; i < 5; i++) send(15);
+  send(-6, "started");
+  for (let i = 0; i < 11; i++) send(-6);
+  expect(commands).toEqual(["tab.next"]);
 });
 
 test("each wheel notch switches one tab", () => {
