@@ -75,6 +75,10 @@ pub fn initial(cx: &App) -> (WindowBounds, Option<DisplayId>) {
 
 /// Notes where the window is now; the place to write if it changed.
 fn note(window: &Window, cx: &App) -> Option<Place> {
+    // Filling the screen (`window.fill`) is for now: keep the place it goes back to.
+    if window.is_simple_fullscreen() {
+        return None;
+    }
     let (state, b): (State, Bounds<Pixels>) = match window.inner_window_bounds() {
         WindowBounds::Windowed(b) => (State::Windowed, b),
         WindowBounds::Maximized(b) => (State::Maximized, b),

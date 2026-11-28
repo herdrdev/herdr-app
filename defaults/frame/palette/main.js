@@ -51,6 +51,7 @@ const NAMED = [
   ["agent.prev", {}, "Agent", "Previous agent", ""],
   ["window.minimize", {}, "Window", "Minimize window", ""],
   ["window.maximize", {}, "Window", "Maximize window", "restore"],
+  ["window.fill", {}, "Window", "Fill screen", "fullscreen notch borderless menu bar dock"],
   ["window.close", {}, "Window", "Close window", "quit"],
   ["app.settings", {}, "App", "Settings", "preferences options config look font theme sound"],
   ["app.help", {}, "App", "Keys", "keybindings shortcuts help"],
@@ -149,7 +150,8 @@ function entries(mods = []) {
   const known = new Map(commands().map((c) => [c.name, c]));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
-    .filter(([n]) => !(mac && n.startsWith("window.")))
+    // macOS has its own window buttons; filling the screen is macOS-only.
+    .filter(([n]) => (n === "window.fill" ? mac : !(mac && n.startsWith("window."))))
     .map(([name, args, group, title, words]) => ({ name, args, group, title, words }));
   const shown = layouts();
   for (const l of shown) {
