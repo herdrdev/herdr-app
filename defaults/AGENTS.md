@@ -253,7 +253,8 @@ Properties any node can have:
   focused pane is inside).
 - `padding`: space inside the node's edge, px: `16` or `[vertical, horizontal]`.
 - row/column: `gap` (px between children), `divider` (`{ "width": 1, "color": "border" }`),
-  `resizable` (default true: drag the boundary). This applies to that row/column only.
+  `resizable` (default true: drag the boundary; double-click it to give that row's or
+  column's weighted children the same size, px-sized ones keep theirs). This applies to that row/column only.
   On a resizable boundary, the divider's optional `hover` color shows while the pointer
   is over it and `active` while dragging (default: `hover`), e.g.
   `{ "width": 1, "color": "#00000000", "hover": "accent" }` shows a line only then.
