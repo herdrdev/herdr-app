@@ -2521,7 +2521,11 @@ impl ShellRuntime {
             policy.clone(),
             application.clone(),
         );
-        let object = match self.construct(view_type) {
+        let constructed = self.construct(view_type);
+        // HERDR: what the constructor queued runs now, under this application,
+        // as for a nested view (#1481).
+        let construction_jobs = scheduler::drain_jobs_transactionally(self, window, cx);
+        let object = match construction_jobs.and(constructed) {
             Ok(object) => object,
             Err(error) => {
                 if let Some(application) = application {
@@ -2545,7 +2549,11 @@ impl ShellRuntime {
         );
         let initialized = self.initialize(&object, None);
         let nested = self.flush_pending_nested_views(window, cx);
-        if let Err(error) = initialized.and(nested) {
+        // HERDR: an async init's continuations run while this view's scope is
+        // installed. Left queued, the next drain runs them, and that drain can
+        // belong to another application: its policy, store and owner (#1481).
+        let init_jobs = scheduler::drain_jobs_transactionally(self, window, cx);
+        if let Err(error) = initialized.and(nested).and(init_jobs) {
             if let Some(application) = application {
                 self.release_application_generation(&application, cx);
             }

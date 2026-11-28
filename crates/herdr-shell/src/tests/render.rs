@@ -6559,7 +6559,9 @@ import { View } from "gpui-kit";
 
 export default class Panel extends View {
   init(_props, cx) {
-    this.task = cx.spawn(async () => {});
+    // HERDR: init's queued jobs now run before instantiate returns (#1481),
+    // so a body that ends at once would already be gone: this one waits.
+    this.task = cx.spawn(async () => { await new Promise(() => {}); });
   }
   render() {
     return "started";
@@ -11150,4 +11152,61 @@ fn a_list_reports_which_item_was_clicked(cx: &mut TestAppContext) {
     // Alternating heights: row 0 covers 0..20, row 1 covers 20..60, row 2
     // covers 60..80.
     assert_a_click_reports_the_row_key(cx, measured_list_source(), 70.);
+}
+
+/// A top-level view's async `init()` continues under its own policy even when
+/// another application's entry point drains the shared job queue first (#1481).
+#[gpui::test]
+fn async_init_continues_under_its_own_policy(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let seen = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+    // Each policy answers `mark()` with its own name, so the answer tells
+    // which policy a call ran under.
+    let policy = |name: &'static str| {
+        let seen = seen.clone();
+        Policy::new()
+            .with_application(name)
+            .with_host_module(HostModule::new("whose").function("mark", move |_| {
+                seen.borrow_mut().push(name);
+                Ok(HostValue::Null)
+            }))
+            .expect("module")
+    };
+    crate::policy::set_default(policy("default"));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let first = runtime
+        .load_source("first.js", r#"
+import { View, div } from "gpui-kit";
+import { mark } from "whose";
+export default class First extends View {
+  async init() {
+    await Promise.resolve();
+    mark();
+  }
+  render() { return div(); }
+}
+"#)
+        .expect("load first");
+    let other = runtime
+        .load_source("other.js", r#"
+import { View, div } from "gpui-kit";
+export default class Other extends View {
+  render() { return div(); }
+}
+"#)
+        .expect("load other");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    context
+        .update(|window, cx| runtime.instantiate_view_with_policy(&first, Rc::new(policy("first")), window, cx))
+        .expect("first");
+    let other = context
+        .update(|window, cx| runtime.instantiate_view_with_policy(&other, Rc::new(policy("other")), window, cx))
+        .expect("other");
+    // The other application renders before the first one: its render drains the queue.
+    draw(&mut context, &other);
+    context.run_until_parked();
+    assert_eq!(*seen.borrow(), ["first"], "init's continuation ran under its own application");
+    crate::policy::set_default(Policy::new());
 }
