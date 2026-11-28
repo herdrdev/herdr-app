@@ -560,7 +560,22 @@ export default class Settings extends View {
           this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`, by(-step), by(step)),
         );
       }))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(div().h(18))
+      .child(this.heading(t, "Mouse"))
+      .child(
+        this.row(
+          t,
+          "Copy on select",
+          "Copies a mouse selection in a terminal to the clipboard when you let go. Off, nothing is copied until you copy it yourself.",
+          this.toggle(t, "st-copy_on_select", p.copy_on_select !== false, (_e, cx) =>
+            this.change((q) => {
+              if (q.copy_on_select === false) delete q.copy_on_select;
+              else q.copy_on_select = false;
+            }, cx),
+          ),
+        ),
+      );
   }
 
   keyboard(t) {

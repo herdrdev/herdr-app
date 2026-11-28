@@ -860,6 +860,7 @@ What's about the user, never a look:
   pastes clipboard text. Middle-click pastes the clipboard on Windows and does
   nothing on macOS. Programs that capture the mouse still receive middle-clicks.
   Hold Shift while dragging in programs that capture the mouse.
+  Settings > Look has it as "Copy on select".
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

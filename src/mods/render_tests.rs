@@ -1332,6 +1332,24 @@ fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn copy_on_select_toggle_shows_the_setting(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("look");
+    for (person, on) in [("{}", true), ("{ copy_on_select: true }", true), ("{ copy_on_select: false }", false)] {
+        // The fixture has no settings.json: keep the window's own load from emptying the person.
+        let setup = format!("this.load = async () => {{}}; this.person = {person};");
+        let tree = describe(cx, &staged, "frame/settings", true, p.clone(), updates("current", "current"), Some(&setup)).unwrap();
+        let fonts = tree.find("Interface font").expect("Interface font");
+        let copy = tree.find("Copy on select").expect("Copy on select");
+        assert!(fonts < copy, "after the font rows");
+        let toggle = tree.lines().skip_while(|l| !l.contains("st-copy_on_select")).take(6).collect::<Vec<_>>().join("\n");
+        assert_eq!(toggle.contains("justify_end"), on, "{person}: {toggle}");
+    }
+}
+
+#[gpui::test]
 fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(herdr_shell::init);
     let start = Instant::now();
