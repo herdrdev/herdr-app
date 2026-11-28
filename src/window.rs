@@ -4566,8 +4566,10 @@ impl AppWindow {
             return out;
         }
         if let Some(p) = &self.focused_pane {
-            // Pane selection survives an input, float or dialog taking the keyboard.
-            if self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
+            // A popup or dialog holding the keyboard is not a text field in the
+            // pane: the person still needs to see which pane commands act on.
+            let overlay_keys = self.overlays.iter().any(|o| o.kind.modal_keys());
+            if !overlay_keys && self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
                 return out;
             }
             if let Some(c) = self.model.active_tab()
@@ -7203,6 +7205,18 @@ mod tests {
             input.focus(window, cx);
             assert!(this.focused_path(window, cx).is_empty());
             assert_eq!(this.focused_pane.as_deref(), Some("pane"));
+            // A popup holding the keyboard keeps the ring on the focused pane.
+            let popup = cx.focus_handle();
+            this.overlays.push(super::Overlay {
+                id: "popup".into(), kind: super::OverlayKind::Popup, slot: "overlay:popup".into(),
+                at: point(px(0.0), px(0.0)), size: gpui::Size { width: 100.0, height: 100.0 }, expires: None,
+                focus: popup.clone(), layout: None, top: None, fit: false, modal: false, bare: false,
+                place: None, key: None, frame: false,
+            });
+            popup.focus(window, cx);
+            assert!(this.focused_path(window, cx).contains("pane"));
+            this.overlays.clear();
+            assert!(this.focused_path(window, cx).is_empty());
             pane.focus(window, cx);
             assert!(this.focused_path(window, cx).contains("pane"));
         }));
