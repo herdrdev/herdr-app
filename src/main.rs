@@ -115,7 +115,7 @@ fn main() {
                 }
             }
         }
-        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        herdr_shell::host::main_with_components(herdr_shell::FrozenComponentRegistry::default());
         return;
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
@@ -140,7 +140,8 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HERDR_APP_LOG")
-                .unwrap_or_else(|_| "warn,herdr_app=info,gpui_shell=info".into()),
+                // Keep gpui_shell=info for JS console logs (SCRIPT_TARGET = "gpui_shell::script").
+                .unwrap_or_else(|_| "warn,herdr_app=info,herdr_shell=info,gpui_shell=info".into()),
         )
         .init();
 
@@ -183,7 +184,7 @@ fn main() {
 
     gpui_platform::application()
         // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
+        .with_assets(herdr_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {

@@ -314,12 +314,13 @@ Select a terminal's whole screen and scrollback (default: the focused one), read
 
 ## `terminal.select`
 
-Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
+Start a terminal selection (default: the focused one), replacing the old selection. at defaults to "cursor" or takes {row, col}: zero-based cells, rows from the top of the history including the active screen. mode is "cell" (default), "word" or "line" (like double/triple click). With to: {row, col}, the endpoints are exact and the view follows to. Line mode with to selects whole screen rows. Mods read the inclusive endpoints from focused().selection or terminals(); selection.end is the moving end.
 
 | Argument | Required |
 |---|---|
 | `terminal` | no |
 | `at` | no |
+| `to` | no |
 | `mode` | no |
 
 ## `terminal.adjust_selection`
@@ -354,6 +355,15 @@ Scroll a terminal's view of its history (default: the focused one). Give exactly
 | `lines` | no |
 | `pages` | no |
 | `to` | no |
+| `terminal` | no |
+
+## `terminal.send_key`
+
+Send one key in keys.json syntax, such as ctrl-b, to a terminal (default: the focused one). It uses the program's current keyboard mode and goes through the same connection as typing. The terminal must have a view.
+
+| Argument | Required |
+|---|---|
+| `keys` | yes |
 | `terminal` | no |
 
 ## `terminal.paste`

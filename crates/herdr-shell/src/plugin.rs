@@ -1374,19 +1374,19 @@ impl ShellRuntime {
         // checking only constructs elements, without laying out their contents.
         struct CheckView {
             runtime: Rc<ShellRuntime>,
-            snapshot: crate::RenderSnapshot,
+            snapshot: Option<crate::RenderSnapshot>,
             result: Option<Result<()>>,
         }
         impl Render for CheckView {
             fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                if self.result.is_none() {
-                    self.result = Some(crate::materialize::try_materialize(&self.runtime, &self.snapshot, window, cx).map(drop));
+                if let Some(snapshot) = self.snapshot.take() {
+                    self.result = Some(crate::materialize::try_materialize(&self.runtime, &snapshot, window, cx).map(drop));
                 }
                 gpui::Empty
             }
         }
         let description = snapshot.debug_tree();
-        let check = window.replace_root(cx, |_, _| CheckView { runtime: self.clone(), snapshot, result: None });
+        let check = window.replace_root(cx, |_, _| CheckView { runtime: self.clone(), snapshot: Some(snapshot), result: None });
         window.draw(cx).clear(cx);
         check.update(cx, |check, _| check.result.take()).context("check view was not rendered")??;
         Ok(description)
@@ -1639,7 +1639,7 @@ fn plugin_roots(directory: &Path) -> Vec<PathBuf> {
 
 /// The platform's per-user data directory.
 ///
-/// Duplicated from `src/bin/gpui-shell.rs` on purpose rather than shared: this
+/// Kept local here rather than shared: this
 /// module owns no file but itself. It belongs in `runtime.rs` so the binary and
 /// the plugin manager cannot disagree about where a user's data is — see the
 /// report accompanying this module.
