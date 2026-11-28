@@ -478,6 +478,8 @@ pub struct AppWindow {
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    /// (New tab, opener) while this window is still showing the tab it opened.
+    tab_opener: Option<(String, String)>,
     /// A terminal block in a window (an overlay's layout) holding the keyboard.
     /// `focused()` reports it like a layout terminal block; the focused pane stays.
     window_terminal: Option<String>,
@@ -597,6 +599,7 @@ impl AppWindow {
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
+            tab_opener: None,
             window_terminal: None,
             tab_shown: true,
             pane_history: Vec::new(),
@@ -1556,6 +1559,17 @@ impl AppWindow {
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A close command and the last shell exiting both reach here before focus is published.
+        if let Some((opened, opener)) = &self.tab_opener
+            && !self.model.active_tab().is_some_and(|tab| tab.id == *opened)
+        {
+            if self.model.tab(opened).is_none()
+                && self.model.active_space().and_then(|s| s.tab(opener)).is_some_and(|tab| tab.settled.is_none())
+            {
+                self.model.select_tab(opener);
+            }
+            self.tab_opener = None;
+        }
         self.enroll_link_handlers();
         self.refresh_link_handlers();
         self.model.order_spaces();
@@ -2754,6 +2768,8 @@ impl AppWindow {
     /// Adds a new tab to its space and shows it, or (focus false) leaves what is shown as it is.
     fn add_new_tab(&mut self, space: &str, tab: Tab, focus: bool) {
         if focus {
+            self.tab_opener = self.model.active_space().filter(|s| s.id == space).and_then(|s| s.active_tab())
+                .map(|opener| (tab.id.clone(), opener.id.clone()));
             self.model.add_tab(space, tab);
             self.model.active = Some(space.to_owned());
         } else {
@@ -7259,6 +7275,45 @@ mod tests {
             assert_eq!(this.model.focused_pane().as_deref(), Some("pb"));
             assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, None), "a zoomed tab isn't veiled");
         }));
+    }
+
+    #[test]
+    fn closing_a_new_tab_returns_to_its_opener_until_you_switch_tabs() {
+        in_own_process("tab_return_on_close");
+    }
+
+    #[gpui::test]
+    fn tab_return_on_close(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("tab_return_on_close") { return; }
+        let (view, cx) = open_window(cx, "board", "", json!({
+            "id": "main", "type": "block", "content": {"tab": "active"}
+        }));
+        view.update_in(cx, |this, window, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s", "space", "", crate::model::Tab::new("a", "A", "pa", "t1"));
+            this.model.add_tab_unselected("s", crate::model::Tab::new("b", "B", "pb", "t2"));
+            let mut run = |name: &str, args| {
+                let result = this.run_as(name, args, false, window, cx);
+                assert!(result.get("error").is_none(), "{name}: {result}");
+                this.model.active_tab().unwrap().id.clone()
+            };
+            let new = run("tab.new", json!({"mod":"board"})); // A, new, B
+            assert_eq!(run("tab.new", json!({"mod":"board", "focus":false})), new);
+            assert_eq!(run("tab.close", json!({})), "a");
+
+            let new = run("tab.new", json!({"mod":"board"}));
+            run("tab.select", json!({"id":"b"}));
+            run("tab.select", json!({"id":new}));
+            assert_eq!(run("tab.close", json!({})), "b", "ordinary close still selects the next tab");
+
+            run("tab.select", json!({"id":"a"}));
+            this.add_new_tab("s", crate::model::Tab::new("shell", "", "temp-pane", "t3"), true);
+            this.sync(window, cx);
+            this.terms["temp-pane"].view.update(cx, |t, _| t.ended = Some("exited".into()));
+            this.terminal_ended("temp-pane", window, cx);
+            assert_eq!(this.model.active_tab().unwrap().id, "a", "last shell exited");
+        });
     }
 
     #[test]
