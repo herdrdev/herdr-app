@@ -4,12 +4,12 @@ import { readFile } from "node:fs/promises";
 const source = (await readFile(new URL("../defaults/mods/agents/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Agents", "class Agents");
 
-function harness(pins: string[], globals: Record<string, unknown> = {}) {
+function harness(pins: string[], globals: Record<string, unknown> = {}, propsValue: unknown = {}) {
   const data = new Map([["pins", JSON.stringify(pins)]]);
   const writes: unknown[] = [];
   const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v), removeItem: (k: string) => data.delete(k) };
   const Agents = new Function("View", "localStorage", "props", "run", ...Object.keys(globals), `${source}; return Agents;`)(
-    class {}, storage, () => ({}), (...args: unknown[]) => writes.push(args),
+    class {}, storage, () => propsValue, (...args: unknown[]) => writes.push(args),
     ...Object.values(globals),
   );
   const agents = new Agents();
@@ -210,7 +210,7 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
 });
 
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
-function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[] } = {}) {
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[], props = {} as Record<string, unknown> } = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
   const status = (address: string) => statuses[address] ?? "working";
   const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: status(address), seq, pinned: pinned.includes(address) });
@@ -225,7 +225,7 @@ function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent
     layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
     theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
     div: element, v_flex: element, h_flex: element, svg: element, image: element,
-  });
+  }, props);
   const ids: string[] = [];
   const clicks = new Map<string, () => void>();
   const texts = new Map<string, string>();
@@ -256,6 +256,30 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent unde
   expect(ids).toContain("sub-t3");
   expect(ids).toContain("sub-t4");
   expect(ids).not.toContain("ag-t4");
+});
+
+// The `ownRows` prop opts a layout out of nesting: each kept sub-agent keeps its own row.
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent nests under its parent unless ownRows is set`, () => {
+  const statuses = { t1: "idle", t3: "blocked" };
+  const nested = keptRender(sort, { statuses });
+  expect(nested.ids).toContain("sub-t3");
+  expect(nested.ids).not.toContain("ag-t3");
+  expect(nested.order).toEqual(["t1"]);
+  const own = keptRender(sort, { statuses, props: { ownRows: true } });
+  expect(own.ids).toContain("ag-t3");
+  expect(own.ids).not.toContain("sub-t3");
+  expect(own.texts.get("ag-t3")).toContain("Task t3");
+  expect(own.order?.length).toBe(2);
+  expect(new Set(own.order)).toEqual(new Set(["t1", "t3"]));
+});
+
+test("a kept sub-agent's status rolls into its parent's section unless ownRows is set", () => {
+  const statuses = { t1: "idle", t3: "blocked" };
+  const section = (ids: string[], row: string) => ids.slice(0, ids.indexOf(row)).reverse().find((id) => id.startsWith("sec-"));
+  expect(section(keptRender("priority", { statuses }).ids, "ag-t1")).toBe("sec-4");
+  const own = keptRender("priority", { statuses, props: { ownRows: true } }).ids;
+  expect(section(own, "ag-t1")).toBe("sec-1");
+  expect(section(own, "ag-t3")).toBe("sec-4");
 });
 
 for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keeps its own row where no tree shows it`, () => {
