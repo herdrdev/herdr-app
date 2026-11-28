@@ -4953,7 +4953,8 @@ impl AppWindow {
             .h_full()
             .w_auto()
             .min_w_full()
-            .flex_none()
+            .flex_grow_1()
+            .flex_shrink_0()
             .child(canvas(move |b, _, _| { bounds_map.borrow_mut().insert(root_id, b); }, |_, _, _, _| {}).absolute().size_full());
 
         for (i, child) in shown.iter().enumerate() {
@@ -4965,7 +4966,7 @@ impl AppWindow {
                     Some(Span::Px { px }) => px.max(min_w),
                     _ => col_w.max(min_w),
                 };
-                slot = slot.flex_none().w(settings::z(w));
+                slot = slot.flex_grow(w).flex_shrink_0().flex_basis(settings::z(w)).min_w(settings::z(w));
             }
             row = row.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
             let has_next = i + 1 < shown.len();
@@ -8852,6 +8853,11 @@ export default class Probe extends View { render() { return div().child("probe")
         );
     }
 
+    #[test]
+    fn canvas_mode() {
+        in_own_process("canvas_mode_adds_resizes_splits_and_scrolls_columns");
+    }
+
     #[gpui::test]
     fn canvas_mode_adds_resizes_splits_and_scrolls_columns(cx: &mut TestAppContext) {
         use serde_json::json;
@@ -8866,14 +8872,13 @@ export default class Probe extends View { render() { return div().child("probe")
                 "type": "block",
                 "content": {
                     "tab": "active",
-                    "canvas": { "column_width": 500.0, "min_width": 240.0 },
+                    "canvas": { "column_width": 800.0, "min_width": 240.0 },
                     "pane": { "gap": 8, "lone": true }
                 }
             }]
         });
         let (view, cx) = open_window(cx, "canvas-test", "", layout);
         cx.update(|window, cx| {
-            window.resize(size(px(800.), px(600.)));
             window.draw(cx).clear(cx);
         });
         view.update_in(cx, |this, _window, cx| {
@@ -8883,14 +8888,34 @@ export default class Probe extends View { render() { return div().child("probe")
                 "/tmp",
                 super::Tab::new("tb1", "1", "p1", "t1"),
             );
-            assert!(this.model.add_canvas_column("p1", super::model::pane("p2", "t2"), 500.0));
-            assert!(this.model.add_canvas_column("p2", super::model::pane("p3", "t3"), 500.0));
+            assert!(this.model.add_canvas_column("p1", super::model::pane("p2", "t2"), 300.0));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |this, _| {
+            let tab = this.model.tab("tb1").unwrap();
+            let vp_b = this.canvas_scroll_for("tb1").bounds();
+            let c1_b = this.bounds.borrow()[&tab.root.children()[1].id];
+            assert!(
+                (f32::from(vp_b.right()) - f32::from(c1_b.right())).abs() <= 16.0,
+                "two narrow columns should expand to fill viewport: vp={vp_b:?}, col1={c1_b:?}"
+            );
+        });
+        view.update_in(cx, |this, _window, cx| {
+            assert!(this.model.add_canvas_column("p2", super::model::pane("p3", "t3"), 800.0));
+            if let Some(col0) = this.model.tab_mut("tb1").unwrap().root.children_mut().and_then(|c| c.get_mut(0)) {
+                col0.size = Some(super::Span::Px { px: 800.0 });
+            }
+            if let Some(col1) = this.model.tab_mut("tb1").unwrap().root.children_mut().and_then(|c| c.get_mut(1)) {
+                col1.size = Some(super::Span::Px { px: 800.0 });
+            }
             // Vertical split inside p2's column keeps 3 top-level columns while adding a nested split.
             assert!(this.model.split("p2", super::Axis::Column, "p4", "t4"));
             let tab = this.model.tab("tb1").unwrap();
             assert_eq!(tab.root.children().len(), 3);
-            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 500.0 }));
-            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 500.0 }));
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 800.0 }));
+            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 800.0 }));
             assert_eq!(tab.root.children()[1].axis(), Some(super::Axis::Column));
             cx.notify();
         });
@@ -8902,7 +8927,7 @@ export default class Probe extends View { render() { return div().child("probe")
             let tab = this.model.tab("tb1").unwrap();
             let col0 = tab.root.children()[0].id.clone();
             let col0_bounds = this.bounds.borrow()[&col0];
-            let target_x = col0_bounds.left() + px(700.0);
+            let target_x = col0_bounds.left() + px(950.0);
             this.drag = Some(super::Drag {
                 container: tab.root.id.clone(),
                 index: 0,
@@ -8913,9 +8938,11 @@ export default class Probe extends View { render() { return div().child("probe")
             this.drag_to(point(target_x, col0_bounds.top() + px(10.0)));
             this.drag = None;
             let tab = this.model.tab("tb1").unwrap();
-            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 700.0 }));
-            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 500.0 }));
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 950.0 }));
+            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 800.0 }));
         });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
 
         // Horizontal wheel scrolling shifts the canvas scroll handle.
         let scroll_pt = gpui::point(px(400.), px(300.));
@@ -8930,11 +8957,11 @@ export default class Probe extends View { render() { return div().child("probe")
 
         // Drag-moving p4 to Left of p1 promotes p4 into its own top-level Canvas column at index 0.
         view.update(cx, |this, _| {
-            assert!(this.model.move_pane_canvas("p4", Some("p1"), Some(crate::layout::Edge::Left), 500.0));
+            assert!(this.model.move_pane_canvas("p4", Some("p1"), Some(crate::layout::Edge::Left), 800.0));
             let tab = this.model.tab("tb1").unwrap();
             assert_eq!(tab.root.children().len(), 4);
             assert_eq!(tab.root.children()[0].id, "p4");
-            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 500.0 }));
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 800.0 }));
             assert_eq!(tab.root.children()[2].id, "p2");
         });
     }
