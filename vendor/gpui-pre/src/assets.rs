@@ -7,7 +7,7 @@ use std::{
     fmt,
     hash::Hash,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering::SeqCst},
     },
 };
@@ -56,6 +56,10 @@ pub struct RenderImage {
     data: SmallVec<[Arc<Frame>; 1]>,
     animation: Option<Animation>,
     _animation_source: Option<Arc<RenderImage>>,
+    pub(crate) svg: Option<(
+        Arc<crate::ParsedSvg>,
+        Mutex<Vec<(Size<DevicePixels>, Arc<RenderImage>)>>,
+    )>,
 }
 
 struct Animation {
@@ -82,6 +86,7 @@ impl RenderImage {
             data: data.into().into_iter().map(Arc::new).collect(),
             animation: None,
             _animation_source: None,
+            svg: None,
         }
     }
 
