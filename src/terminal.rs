@@ -1380,8 +1380,8 @@ fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usi
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
-/// tests`, braille dots) is no part of it, nor braille dots after a short
-/// prefix (`\u{03c0} \u{2839} task`). Herdr draws its own, and a title that
+/// tests`, braille dots) is no part of it, nor braille dots later in it
+/// (`\u{03c0} \u{2839} task`, `herdr \u{2839} task`). Herdr draws its own, and a title that
 /// spins would redraw every mod that shows titles, 10 times a second.
 pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
@@ -1391,21 +1391,25 @@ pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
         matches!(c, '\u{2800}'..='\u{28ff}' | '\u{00b7}' | '\u{2722}' | '\u{2733}' | '\u{2736}' | '\u{273b}' | '\u{273d}' | '\u{25d0}'..='\u{25d3}')
     };
     let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
+    if rest.is_empty() {
+        return Cow::Borrowed(title);
+    }
     let led = title.len() - rest.len();
-    if !rest.is_empty() && title[..led].chars().any(spinner) && title[..led].ends_with(char::is_whitespace) {
+    if title[..led].chars().any(spinner) && title[..led].ends_with(char::is_whitespace) {
         return Cow::Borrowed(rest);
     }
+    // Braille dots as a word of their own later in the title are a frame too,
+    // whatever comes before: a prefix (omp's) or a project name (Codex's).
     let braille = |w: &str| !w.is_empty() && w.chars().all(|c| matches!(c, '\u{2800}'..='\u{28ff}'));
-    let mut words = title.splitn(3, ' ');
-    match (words.next(), words.next()) {
-        (Some(prefix), Some(frame)) if !prefix.is_empty() && prefix.chars().count() <= 3 && !braille(prefix) && braille(frame) => {
-            match words.next().map(str::trim_start).filter(|r| !r.is_empty()) {
-                Some(rest) => Cow::Owned(format!("{prefix} {rest}")),
-                None => Cow::Borrowed(prefix),
-            }
+    let mut at = 0;
+    for word in title.split(' ') {
+        if at > 0 && braille(word) {
+            let (before, after) = (title[..at].trim_end(), title[at + word.len()..].trim_start());
+            return if after.is_empty() { Cow::Borrowed(before) } else { Cow::Owned(format!("{before} {after}")) };
         }
-        _ => Cow::Borrowed(title),
+        at += word.len() + 1;
     }
+    Cow::Borrowed(title)
 }
 
 /// A live macOS screenshot thumbnail, dropped before it saved.
@@ -4601,7 +4605,7 @@ mod tests {
     }
 
     #[test]
-    fn a_spinner_after_a_short_prefix_is_not_part_of_it() {
+    fn a_spinner_later_in_a_title_is_not_part_of_it() {
         use super::shown_title;
         assert_eq!(shown_title("\u{03c0} \u{2839} fix the tests"), "\u{03c0} fix the tests", "omp's");
         assert_eq!(shown_title("\u{03c0} \u{2827} fix the tests"), "\u{03c0} fix the tests", "every frame alike");
@@ -4610,7 +4614,11 @@ mod tests {
         assert_eq!(shown_title("\u{2733} Fix the tests"), "Fix the tests", "Claude Code's");
         assert_eq!(shown_title("repo \u{00b7} branch"), "repo \u{00b7} branch", "a middle dot between words stays");
         assert_eq!(shown_title("\u{03c0} \u{00b7} task"), "\u{03c0} \u{00b7} task", "only braille after a prefix");
-        assert_eq!(shown_title("herdr \u{2839} task"), "herdr \u{2839} task", "a word is no prefix");
+        assert_eq!(shown_title("herdr \u{2839} task"), "herdr task", "codex's, after the project name");
+        assert_eq!(shown_title("herdr \u{2839}"), "herdr", "nothing after it");
+        assert_eq!(shown_title("herdr \u{2839} thread | task"), "herdr thread | task");
+        assert_eq!(shown_title("herdr \u{2713} done"), "herdr \u{2713} done", "a status icon stays");
+        assert_eq!(shown_title("herdr file\u{2839}"), "herdr file\u{2839}", "only a word of its own");
         assert_eq!(shown_title("\u{2839}"), "\u{2839}", "only a spinner: kept");
         assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
     }
