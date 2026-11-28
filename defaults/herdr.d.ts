@@ -5,9 +5,11 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** stdout or stderr went past 8 MiB: the rest was dropped. */
+  truncated: boolean;
 }
 
-/** Runs a program with the user's real environment (HOME, PATH, auth). 8 MiB output.
+/** Runs a program with the user's real environment (HOME, PATH, auth). Keeps 8 MiB of each stream; `truncated` says more was dropped.
  *  `timeout`: milliseconds, defaults to 30,000, capped at 600,000 (10 minutes).
  *  `on`: on that machine (a space's `machine`) through herdr-core, its home by default.
  *  Rejects when it can't start (not installed, no such folder, the machine is unreachable). */

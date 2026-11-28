@@ -917,6 +917,11 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 }
 
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
+    run_local(command, args, cwd, limit).map(|(code, out, err, _)| (code, out, err))
+}
+
+/// `run_blocking`, and whether stdout or stderr went past the 8 MiB kept.
+fn run_local(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String, bool), String> {
     use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
@@ -934,8 +939,8 @@ pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, 
             let mut buf = Vec::new();
             let mut r = r;
             let _ = (&mut r).take(EXEC_OUTPUT).read_to_end(&mut buf);
-            let _ = std::io::copy(&mut r, &mut std::io::sink());
-            String::from_utf8_lossy(&buf).into_owned()
+            let dropped = std::io::copy(&mut r, &mut std::io::sink()).unwrap_or(0);
+            (String::from_utf8_lossy(&buf).into_owned(), dropped > 0)
         })
     };
     let out = drain(Box::new(child.stdout.take().unwrap()));
@@ -953,15 +958,16 @@ pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, 
             Err(e) => return Err(e.to_string()),
         }
     };
-    Ok((status.code().unwrap_or(-1), out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+    let ((out, out_cut), (err, err_cut)) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    Ok((status.code().unwrap_or(-1), out, err, out_cut || err_cut))
 }
 
 /// Runs a program on another machine through the core's exec: its exact output.
 pub fn run_remote(machine: &str, command: &str, args: &[String], cwd: Option<String>) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
-    run_remote_with_limit(machine, command, args, cwd, EXEC_LIMIT)
+    run_remote_with_limit(machine, command, args, cwd, EXEC_LIMIT).map(|(code, out, err, _)| (code, out, err))
 }
 
-fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
+fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, Vec<u8>, Vec<u8>, bool), String> {
     use base64::Engine;
     let mut hc_args: Vec<String> = vec!["exec".into(), "--json".into(), "--on".into(), machine.into(), "--timeout".into(), limit.as_secs_f64().to_string()];
     if let Some(c) = cwd {
@@ -981,7 +987,8 @@ fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Opt
     }
     let bytes = |k: &str| base64::engine::general_purpose::STANDARD.decode(v.get(k).and_then(Value::as_str).unwrap_or_default()).map_err(|e| e.to_string());
     let code = v.get("code").and_then(Value::as_i64).map_or(-1, |c| c as i32);
-    Ok((code, bytes("stdout")?, bytes("stderr")?))
+    let truncated = v.get("truncated").and_then(Value::as_bool) == Some(true);
+    Ok((code, bytes("stdout")?, bytes("stderr")?, truncated))
 }
 
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
@@ -1130,8 +1137,8 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     let (tx, rx) = async_channel::bounded(1);
     let run = move || {
         let r = match on {
-            Some(m) => run_remote_with_limit(&m, &command, &args, cwd, limit).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
-            None => run_blocking(&command, &args, cwd, limit),
+            Some(m) => run_remote_with_limit(&m, &command, &args, cwd, limit).map(|(c, o, e, t)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned(), t)),
+            None => run_local(&command, &args, cwd, limit),
         };
         let _ = tx.send_blocking(r);
     };
@@ -1142,8 +1149,8 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     #[cfg(test)]
     run();
     async move {
-        let (code, stdout, stderr) = rx.recv().await.map_err(|_| HostError::new("the command was lost"))?.map_err(HostError::new)?;
-        Ok(HostObject::new().field("code", code as f64).field("stdout", stdout).field("stderr", stderr).into())
+        let (code, stdout, stderr, truncated) = rx.recv().await.map_err(|_| HostError::new("the command was lost"))?.map_err(HostError::new)?;
+        Ok(HostObject::new().field("code", code as f64).field("stdout", stdout).field("stderr", stderr).field("truncated", HostValue::Bool(truncated)).into())
     }
 }
 
@@ -1872,12 +1879,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn exec_reports_output_past_the_cap() {
+        let run = |script: String| run_local("sh", &["-c".into(), script], None, Duration::from_secs(10)).unwrap();
+        let (_, out, _, truncated) = run(format!("head -c {EXEC_OUTPUT} /dev/zero"));
+        assert_eq!((out.len() as u64, truncated), (EXEC_OUTPUT, false));
+        let (code, out, _, truncated) = run(format!("head -c {} /dev/zero", EXEC_OUTPUT + 1));
+        assert_eq!((code, out.len() as u64, truncated), (0, EXEC_OUTPUT, true));
+        let (_, _, err, truncated) = run(format!("head -c {} /dev/zero >&2", EXEC_OUTPUT + 1));
+        assert_eq!((err.len() as u64, truncated), (EXEC_OUTPUT, true));
+    }
+
+    #[cfg(unix)]
     #[gpui::test]
     async fn exec_returns_real_output_and_errors_under_the_test_scheduler(_cx: &mut gpui::TestAppContext) {
         let result = exec_future("sh".into(), vec!["-c".into(), "printf out; printf err >&2; exit 7".into()], None, None, EXEC_LIMIT).await.unwrap();
         assert!(matches!(result.get("code"), Some(HostValue::Number(7.0))));
         assert!(matches!(result.get("stdout"), Some(HostValue::Str(s)) if s == "out"));
         assert!(matches!(result.get("stderr"), Some(HostValue::Str(s)) if s == "err"));
+        assert!(matches!(result.get("truncated"), Some(HostValue::Bool(false))));
         assert!(exec_future("herdr_test_missing_command_638".into(), vec![], None, None, EXEC_LIMIT).await.is_err());
         let error = exec_future("sh".into(), vec!["-c".into(), "sleep 0.15; printf late".into()], None, None, Duration::from_millis(30)).await.unwrap_err();
         assert!(error.to_string().contains("0.03 s"), "{error}");
