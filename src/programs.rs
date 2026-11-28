@@ -320,7 +320,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
+        && (argv[2].contains("\"$@\"") || argv[2].starts_with("command $argv[2..]; "))
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -451,6 +451,7 @@ mod tests {
         // macOS starts agents from a login shell (`-lic`, then `exec fish -li`).
         assert_eq!(key(None, &["/bin/zsh", "-lic", "\"$@\"; exec \"$0\" -li", "/bin/zsh", "cursor-agent"]), "cursor");
         assert_eq!(key(None, &["/opt/homebrew/bin/fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "/opt/homebrew/bin/fish", "cursor-agent"]), "cursor");
+        assert_eq!(key(None, &["/usr/bin/fish", "-ic", &crate::remote_shell::fish_agent("-i"), "/usr/bin/fish", "vi", "x"]), "vim");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
         assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoExit", "-Command", &line]), "codex");

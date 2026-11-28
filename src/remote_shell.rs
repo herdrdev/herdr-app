@@ -6,7 +6,20 @@ pub fn check(commands: &[String]) -> Vec<String> {
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
-    in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
+    in_shell(&posix_agent("-li"), &fish_agent("-li"), "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
+}
+
+/// Runs the agent (`"$@"`), then the person's shell (`"$0" flags`) in its
+/// pane. Ctrl+Z stops the agent as a job of this shell, which a shell exec'd
+/// in its place would not know: a shell opens on top, and exiting it brings
+/// the agent back.
+pub fn posix_agent(flags: &str) -> String {
+    format!("\"$@\"; while jobs %1 >/dev/null 2>&1; do printf '\\n%s is stopped: exit this shell to resume it.\\n' \"$1\"; \"$0\" {flags}; fg %1; done; exec \"$0\" {flags}")
+}
+
+/// [`posix_agent`] for fish (`$argv[1]` is the shell, the agent follows).
+pub fn fish_agent(flags: &str) -> String {
+    format!("command $argv[2..]; while jobs -q; printf '\\n%s is stopped: exit this shell to resume it.\\n' $argv[2]; $argv[1] {flags}; fg; end; exec $argv[1] {flags}")
 }
 
 /// Select the shell there, not the viewer's shell. The core may have started
@@ -114,6 +127,91 @@ mod tests {
         let out = home.run(launch(cmd), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
         assert!(stdout.contains("<loaded>\n<a 'quoted' task; $(not-a-command)\nnext line>\n<>\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Ctrl+Z on the agent (here it stops itself), then exit the shell that
+    /// opens: the agent comes back, and once it ends the pane keeps a shell.
+    fn resumes_a_stopped_agent(shell: &str) {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let home = Home::new();
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }, 0);
+        let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        let agent = "kill -TSTP $$; printf 'resumed: '; read a; echo \"got $a\"";
+        let argv = launch(vec!["sh".into(), "-c".into(), agent.into()]);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .env_clear()
+            .env("HOME", &home.0)
+            .env("ZDOTDIR", &home.0)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("TERM", "dumb")
+            .env("SHELL", shell)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn().unwrap();
+        drop(cmd);
+        let fd = master.as_raw_fd();
+        unsafe { libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK) };
+        let mut pty = std::fs::File::from(master);
+        let mut seen = String::new();
+        let wait_for = |pty: &mut std::fs::File, want: &str, seen: &mut String| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !seen.contains(want) {
+                assert!(std::time::Instant::now() < end, "no {want:?} in {seen:?}");
+                let mut buf = [0u8; 4096];
+                match pty.read(&mut buf) {
+                    Ok(n) if n > 0 => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(e) if e.kind() != std::io::ErrorKind::WouldBlock => panic!("{e}"),
+                    _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+                }
+            }
+            *seen = seen.split_once(want).unwrap().1.to_owned();
+        };
+        wait_for(&mut pty, "sh is stopped: exit this shell to resume it.", &mut seen);
+        wait_for(&mut pty, "rc greeting", &mut seen);
+        pty.write_all(b"exit\n").unwrap();
+        wait_for(&mut pty, "resumed: ", &mut seen);
+        pty.write_all(b"hi\n").unwrap();
+        wait_for(&mut pty, "got hi", &mut seen);
+        wait_for(&mut pty, "rc greeting", &mut seen);
+        pty.write_all(b"echo still-$((40+2))\n").unwrap();
+        wait_for(&mut pty, "still-42", &mut seen);
+        pty.write_all(b"exit\n").unwrap();
+        // Keep reading: a shell whose output nobody reads blocks before it exits.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(std::time::Instant::now() < end, "the shell didn't exit");
+            let _ = pty.read(&mut [0u8; 4096]);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(status.success());
+    }
+
+    #[test]
+    fn bash_resumes_a_stopped_agent_after_its_shell_exits() {
+        resumes_a_stopped_agent("/bin/bash");
+    }
+
+    #[test]
+    fn zsh_resumes_a_stopped_agent_after_its_shell_exits() {
+        if std::path::Path::new("/bin/zsh").exists() {
+            resumes_a_stopped_agent("/bin/zsh");
+        }
     }
 
     #[test]
