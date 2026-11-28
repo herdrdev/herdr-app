@@ -50,7 +50,16 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
         }
         Err(e) => json!({ "error": format!("bad request: {e}") }),
     };
-    let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
+    send_reply(&stream, &reply);
+}
+
+/// A non-blocking socket takes one send buffer's worth (8 KiB on macOS) and
+/// refuses the rest, which cut a large `ls` reply short mid-JSON.
+fn send_reply(stream: &UnixStream, reply: &Value) {
+    let _ = stream.set_nonblocking(false);
+    if let Err(e) = (&*stream).write_all(format!("{reply}\n").as_bytes()) {
+        tracing::warn!("control reply not sent whole: {e}");
+    }
 }
 
 /// One Herdr per home: a second launch brings the running window to the
@@ -96,7 +105,7 @@ pub fn client(args: &[String]) -> i32 {
         },
         _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),
     };
-    let mut stream = match UnixStream::connect(socket()) {
+    let stream = match UnixStream::connect(socket()) {
         Ok(s) => s,
         Err(_) if args.first().is_some_and(|v| v == "feedback") => {
             let body = crate::feedback::draft(&args[1], "", 0, "agent", "other");
@@ -106,12 +115,10 @@ pub fn client(args: &[String]) -> i32 {
         }
         Err(e) => return fail(&format!("no Herdr window at {}: {e}", socket().display())),
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(35)));
-    let mut line = String::new();
-    if stream.write_all(format!("{cmd}\n").as_bytes()).is_err() || BufReader::new(&stream).read_line(&mut line).is_err() {
-        return fail("the window hung up");
-    }
-    let reply: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+    let reply = match exchange(stream, &cmd, Some(Duration::from_secs(35))) {
+        Ok(reply) => reply,
+        Err(e) => return fail(&e),
+    };
     if args.first().is_some_and(|v| v == "shot") {
         if let Some(error) = reply.get("error") {
             return fail(error.as_str().unwrap_or("screenshot failed"));
@@ -124,6 +131,18 @@ pub fn client(args: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
     }
     if reply.get("error").is_some() { 1 } else { 0 }
+}
+
+/// Sends one request line and reads the reply line. A window that closes the
+/// socket without a line, or answers with something that isn't JSON, is an error,
+/// never a `null` reply.
+fn exchange(mut stream: UnixStream, cmd: &Value, timeout: Option<Duration>) -> Result<Value, String> {
+    let _ = stream.set_read_timeout(timeout);
+    let mut line = String::new();
+    if stream.write_all(format!("{cmd}\n").as_bytes()).is_err() || BufReader::new(&stream).read_line(&mut line).map_or(true, |n| n == 0) {
+        return Err("the window hung up".into());
+    }
+    serde_json::from_str(&line).map_err(|e| format!("bad reply from the window: {e}"))
 }
 
 /// `--name api --argv '["pi"]'` (values that parse as JSON are JSON), or one JSON object.
@@ -184,6 +203,45 @@ fn fail(message: &str) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// `herdr-app ls` once printed `null` for a reply that wasn't a whole JSON
+    /// line: an empty or non-JSON reply is an error instead.
+    #[test]
+    fn a_reply_that_is_not_json_is_an_error_not_null() {
+        let answer = |reply: &'static [u8]| {
+            let (client, server) = UnixStream::pair().unwrap();
+            let window = std::thread::spawn(move || {
+                BufReader::new(&server).read_line(&mut String::new()).unwrap();
+                (&server).write_all(reply).unwrap();
+            });
+            let got = exchange(client, &json!({ "ls": true }), Some(Duration::from_secs(5)));
+            window.join().unwrap();
+            got
+        };
+        assert_eq!(answer(b""), Err("the window hung up".into()));
+        assert!(answer(b"{\"spaces\":[").unwrap_err().starts_with("bad reply from the window"));
+        assert_eq!(answer(b"{\"spaces\":[]}\n"), Ok(json!({ "spaces": [] })));
+    }
+
+    /// An `ls` reply larger than the socket's send buffer once stopped at
+    /// exactly 8 KiB: the server writes it whole even to a non-blocking socket.
+    #[test]
+    fn a_reply_larger_than_the_send_buffer_arrives_whole() {
+        let (client, server) = UnixStream::pair().unwrap();
+        (&client).write_all(b"{\"ls\":true}\n").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let (tx, rx) = async_channel::unbounded();
+        let served = std::thread::spawn(move || serve(server, tx));
+        let Ok(Request::Control { reply, .. }) = rx.recv_blocking() else { panic!("no control request") };
+        let big = json!({ "spaces": "x".repeat(4 << 20) });
+        reply.send(big.clone()).unwrap();
+        // Let the server fill the buffer before anything drains it.
+        std::thread::sleep(Duration::from_millis(200));
+        let mut line = String::new();
+        BufReader::new(&client).read_line(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), big);
+        served.join().unwrap();
+    }
 
     #[test]
     fn flag_values_that_parse_as_json_are_json() {
