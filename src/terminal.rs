@@ -1585,20 +1585,23 @@ fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, mods: Modifiers, x: f32, y
 /// moves: they add up to a line before one scrolls (as in Zed), and each
 /// gesture starts from nothing. Kept under a screen, so turning back is quick.
 fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) -> i32 {
-    match phase {
+    let apply_delta = match phase {
         TouchPhase::Started => {
             *scrolled = 0.0;
-            0
+            // On Wayland, GPUI includes the movement that started the pan.
+            cfg!(target_os = "linux")
         }
-        TouchPhase::Moved => {
-            let before = scrolled.trunc() as i32;
-            *scrolled += lines;
-            let after = scrolled.trunc() as i32;
-            *scrolled %= rows.max(1.0);
-            after - before
-        }
-        _ => 0,
+        TouchPhase::Moved => true,
+        _ => false,
+    };
+    if !apply_delta {
+        return 0;
     }
+    let before = scrolled.trunc() as i32;
+    *scrolled += lines;
+    let after = scrolled.trunc() as i32;
+    *scrolled %= rows.max(1.0);
+    after - before
 }
 
 /// Lines for a macOS mouse wheel event, as Ghostty scrolls them. macOS reports
@@ -4748,6 +4751,17 @@ mod tests {
         assert_eq!(steps(Moved, -9.0, -19.0), point(0, 0));
         assert_eq!(steps(Moved, -2.0, -2.0), point(-1, -1));
         assert_eq!(steps(Ended, 100.0, 100.0), point(0, 0));
+    }
+
+    #[test]
+    fn first_touch_scroll_delta_is_applied_on_linux() {
+        use gpui::{point, px, size, ScrollDelta, TouchPhase};
+        let mut scrolled = point(0.0, -0.75);
+        let cell = size(px(10.0), px(20.0));
+        let mut steps = |phase, y| super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(0.0), px(y))), phase, cell, 80, 24, 1.0);
+        let expected = point(0, i32::from(cfg!(target_os = "linux")));
+        assert_eq!(steps(TouchPhase::Started, 30.0), expected);
+        assert_eq!(steps(TouchPhase::Moved, 10.0), expected);
     }
 
     #[test]

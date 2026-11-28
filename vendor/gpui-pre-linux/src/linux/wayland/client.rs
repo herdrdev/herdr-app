@@ -38,7 +38,7 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     protocol::{
         wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
-        wl_shm_pool, wl_surface,
+        wl_shm_pool, wl_surface, wl_touch,
     },
 };
 use wayland_protocols::wp::pointer_gestures::zv1::client::{
@@ -81,6 +81,7 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
 
 use super::{
     display::WaylandDisplay,
+    touch::{TouchState, TouchUpdate},
     window::{ImeInput, WaylandWindowStatePtr},
 };
 
@@ -354,10 +355,13 @@ pub(crate) struct WaylandClientState {
     pub gpu_context: GpuContext,
     pub compositor_gpu: Option<CompositorGpuHint>,
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
+    seat_capabilities: wl_seat::Capability,
     wl_pointer: Option<wl_pointer::WlPointer>,
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
     pinch_scale: f32,
     wl_keyboard: Option<wl_keyboard::WlKeyboard>,
+    wl_touch: Option<wl_touch::WlTouch>,
+    touch: TouchState<ObjectId>,
     cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     data_device: Option<wl_data_device::WlDataDevice>,
     primary_selection: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
@@ -389,7 +393,8 @@ pub(crate) struct WaylandClientState {
     horizontal_modifier: f32,
     scroll_event_received: bool,
     enter_token: Option<()>,
-    button_pressed: Option<MouseButton>,
+    // Distinct evdev buttons can map to the same GPUI button.
+    pressed_buttons: SmallVec<[u32; 3]>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
     keyboard_focused_window: Option<WaylandWindowStatePtr>,
     loop_handle: LoopHandle<'static, ()>,
@@ -759,14 +764,52 @@ impl WaylandClientStatePtr {
         }
     }
 
+    fn dispatch_touch_updates(
+        client: &RefCell<WaylandClientState>,
+        updates: impl IntoIterator<Item = TouchUpdate<ObjectId>>,
+    ) {
+        for update in updates {
+            let delivery = {
+                let mut state = client.borrow_mut();
+                // A preceding callback in this frame may have closed the window.
+                if let TouchUpdate::Down { surface, .. } = &update
+                    && !state.windows.contains_key(surface)
+                {
+                    continue;
+                }
+                state.touch.apply(update).and_then(|(surface, event)| {
+                    Some((state.windows.get(&surface)?.clone(), event))
+                })
+            };
+            // Input handlers can re-enter the platform, for example to set the clipboard.
+            if let Some((window, event)) = delivery {
+                window.handle_input(PlatformInput::Touch(event));
+            }
+        }
+    }
+
+    fn cancel_touches(client: &RefCell<WaylandClientState>) {
+        // Release the client borrow before calling back into GPUI.
+        let cancelled = client.borrow_mut().touch.cancel().collect::<SmallVec<[_; 8]>>();
+        for (surface, event) in cancelled {
+            let window = client.borrow().windows.get(&surface).cloned();
+            if let Some(window) = window {
+                window.handle_input(PlatformInput::Touch(event));
+            }
+        }
+    }
+
     pub fn drop_window(&self, surface_id: &ObjectId) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         let closed_window = state.windows.remove(surface_id).unwrap();
-        if let Some(window) = state.mouse_focused_window.take()
-            && !window.ptr_eq(&closed_window)
-        {
-            state.mouse_focused_window = Some(window);
+        state.touch.forget_surface(surface_id);
+        if let Some(window) = state.mouse_focused_window.take() {
+            if window.ptr_eq(&closed_window) {
+                state.pressed_buttons.clear();
+            } else {
+                state.mouse_focused_window = Some(window);
+            }
         }
         if let Some(window) = state.keyboard_focused_window.take()
             && !window.ptr_eq(&closed_window)
@@ -1024,8 +1067,11 @@ impl WaylandConnection {
             gpu_context,
             compositor_gpu,
             wl_seat: seat,
+            seat_capabilities: wl_seat::Capability::empty(),
             wl_pointer: None,
             wl_keyboard: None,
+            wl_touch: None,
+            touch: TouchState::new(),
             pinch_gesture: None,
             pinch_scale: 1.0,
             cursor_shape_device: None,
@@ -1078,7 +1124,7 @@ impl WaylandConnection {
             discrete_scroll_delta: None,
             vertical_modifier: -1.0,
             horizontal_modifier: -1.0,
-            button_pressed: None,
+            pressed_buttons: SmallVec::new(),
             mouse_focused_window: None,
             keyboard_focused_window: None,
             loop_handle: handle.clone(),
@@ -1159,7 +1205,16 @@ impl WaylandConnection {
         client.register_source(
             handle.insert_source(WaylandSource::new(conn, event_queue), {
                 let mut client = pointer;
-                move |_, queue, _| queue.dispatch_pending(&mut client)
+                move |_, queue, _| {
+                    let dispatched = queue.dispatch_pending(&mut client)?;
+                    // Mutter and Weston can omit the frame after a release.
+                    // Wait until the queue is drained so a queued cancel wins.
+                    if let Some(state) = client.try_get_client() {
+                        let releases = state.borrow_mut().touch.take_unframed_releases();
+                        WaylandClientStatePtr::dispatch_touch_updates(&state, releases);
+                    }
+                    Ok(dispatched)
+                }
             }),
             "failed to register Wayland connection source",
         )?;
@@ -1394,7 +1449,7 @@ impl WaylandConnection {
             state.clipboard.set_primary(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
-                    "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
+                    "Skipping Wayland primary selection ownership request because no eligible input serial has been received"
                 );
                 return;
             };
@@ -1419,7 +1474,7 @@ impl WaylandConnection {
             state.clipboard.set(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
-                    "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
+                    "Skipping Wayland clipboard ownership request because no eligible input serial has been received"
                 );
                 return;
             };
@@ -1898,7 +1953,12 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
         {
             let client = state.get_client();
             let mut state = client.borrow_mut();
-            if capabilities.contains(wl_seat::Capability::Keyboard) {
+            let added = capabilities - state.seat_capabilities;
+            state.seat_capabilities = capabilities;
+
+            // Seat announcements list every available device. Keep existing
+            // pointer grabs and IME composition intact on touch-only changes.
+            if added.contains(wl_seat::Capability::Keyboard) {
                 let keyboard = seat.get_keyboard(qh, ());
 
                 if let Some(text_input) = state.text_input.take() {
@@ -1919,7 +1979,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
 
                 state.wl_keyboard = Some(keyboard);
             }
-            if capabilities.contains(wl_seat::Capability::Pointer) {
+            if added.contains(wl_seat::Capability::Pointer) {
                 let pointer = seat.get_pointer(qh, ());
 
                 if let Some(cursor_shape_device) = state.cursor_shape_device.take() {
@@ -1943,7 +2003,75 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                 }
 
                 state.wl_pointer = Some(pointer);
+            } else if !capabilities.contains(wl_seat::Capability::Pointer) {
+                state.pressed_buttons.clear();
             }
+            if capabilities.contains(wl_seat::Capability::Touch) {
+                if state.wl_touch.is_none() {
+                    state.wl_touch = Some(seat.get_touch(qh, ()));
+                }
+            } else if let Some(touch) = state.wl_touch.take() {
+                touch.release();
+                drop(state);
+                Self::cancel_touches(&client);
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_touch::WlTouch, ()> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        touch: &wl_touch::WlTouch,
+        event: wl_touch::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        if state.wl_touch.as_ref() != Some(touch) {
+            return;
+        }
+
+        match event {
+            wl_touch::Event::Down {
+                serial,
+                surface,
+                id,
+                x,
+                y,
+                ..
+            } => {
+                let surface = surface.id();
+                // A tap synthesizes a mouse-up in GPUI. Suppress contacts
+                // that begin during a real button grab to preserve that grab.
+                if state.pressed_buttons.is_empty() && state.windows.contains_key(&surface) {
+                    state.serial_tracker.update(SerialKind::TouchDown, serial);
+                    // Wayland coordinates are already logical, like pointer coordinates.
+                    state.touch.push(TouchUpdate::Down {
+                        id,
+                        surface,
+                        position: point(px(x as f32), px(y as f32)),
+                    });
+                }
+            }
+            wl_touch::Event::Motion { id, x, y, .. } => state.touch.push(TouchUpdate::Motion {
+                id,
+                position: point(px(x as f32), px(y as f32)),
+            }),
+            wl_touch::Event::Up { id, .. } => state.touch.push(TouchUpdate::Up { id }),
+            wl_touch::Event::Frame => {
+                let updates = state.touch.take_frame();
+                drop(state);
+
+                Self::dispatch_touch_updates(&client, updates);
+            }
+            wl_touch::Event::Cancel => {
+                drop(state);
+                Self::cancel_touches(&client);
+            }
+            _ => {}
         }
     }
 }
@@ -2325,7 +2453,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 let position = point(px(surface_x as f32), px(surface_y as f32));
                 state.serial_tracker.update(SerialKind::MouseEnter, serial);
                 state.mouse_location = Some(position);
-                state.button_pressed = None;
+                state.pressed_buttons.clear();
 
                 if let Some(window) = get_window(&mut state, &surface.id()) {
                     state.mouse_focused_window = Some(window.clone());
@@ -2363,12 +2491,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 if let Some(focused_window) = state.mouse_focused_window.clone() {
                     let input = PlatformInput::MouseExited(MouseExitEvent {
                         position: state.mouse_location.unwrap(),
-                        pressed_button: state.button_pressed,
+                        pressed_button: state
+                            .pressed_buttons
+                            .last()
+                            .copied()
+                            .and_then(linux_button_to_gpui),
                         modifiers: state.modifiers,
                     });
                     state.mouse_focused_window = None;
                     state.mouse_location = None;
-                    state.button_pressed = None;
+                    state.pressed_buttons.clear();
                     state.cursor_hidden_window = None;
 
                     drop(state);
@@ -2422,7 +2554,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                     }
                     let input = PlatformInput::MouseMove(MouseMoveEvent {
                         position: state.mouse_location.unwrap(),
-                        pressed_button: state.button_pressed,
+                        pressed_button: state
+                            .pressed_buttons
+                            .last()
+                            .copied()
+                            .and_then(linux_button_to_gpui),
                         modifiers: state.modifiers,
                     });
                     drop(state);
@@ -2431,7 +2567,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
             }
             wl_pointer::Event::Button {
                 serial,
-                button,
+                button: raw_button,
                 state: WEnum::Value(button_state),
                 ..
             } => {
@@ -2440,13 +2576,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 if button_state == wl_pointer::ButtonState::Pressed {
                     state.serial_tracker.update(SerialKind::MousePress, serial);
                 }
-                let button = linux_button_to_gpui(button);
-                let Some(button) = button else { return };
+                let Some(button) = linux_button_to_gpui(raw_button) else {
+                    return;
+                };
                 if state.mouse_focused_window.is_none() {
                     return;
                 }
                 match button_state {
                     wl_pointer::ButtonState::Pressed => {
+                        if !state.pressed_buttons.contains(&raw_button) {
+                            state.pressed_buttons.push(raw_button);
+                        }
+                        // The physical press takes precedence over an unfinished
+                        // touch, even if the button is released before the finger.
+                        drop(state);
+                        Self::cancel_touches(&client);
+                        state = client.borrow_mut();
+                        if state.mouse_focused_window.is_none() {
+                            return;
+                        }
+
                         if let Some(window) = state.keyboard_focused_window.clone() {
                             if state.composing && state.text_input.is_some() {
                                 drop(state);
@@ -2485,8 +2634,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         state.click.last_mouse_button = Some(button);
                         state.click.last_location = state.mouse_location.unwrap();
 
-                        state.button_pressed = Some(button);
-
                         if let Some(window) = state.mouse_focused_window.clone() {
                             let input = PlatformInput::MouseDown(MouseDownEvent {
                                 button,
@@ -2500,7 +2647,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                         }
                     }
                     wl_pointer::ButtonState::Released => {
-                        state.button_pressed = None;
+                        state.pressed_buttons.retain(|pressed| *pressed != raw_button);
 
                         if let Some(window) = state.mouse_focused_window.clone() {
                             let input = PlatformInput::MouseUp(MouseUpEvent {

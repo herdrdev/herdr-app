@@ -1557,9 +1557,17 @@ impl WaylandWindowStatePtr {
         }
     }
 
-    pub fn handle_input(&self, input: PlatformInput) {
+    pub fn handle_input(&self, mut input: PlatformInput) {
         if self.is_blocked() {
-            return;
+            // A dialog may block the window during a contact. Let GPUI unwind
+            // that contact without allowing a click or a scroll on the parent.
+            let PlatformInput::Touch(touch) = &mut input else {
+                return;
+            };
+            if touch.phase == gpui::TouchPhase::Started {
+                return;
+            }
+            touch.phase = gpui::TouchPhase::Cancelled;
         }
         let callback = self.callbacks.borrow_mut().input.take();
         if let Some(mut fun) = callback {

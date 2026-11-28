@@ -542,6 +542,22 @@ impl Drop for LinuxPlatform {
     }
 }
 
+#[cfg(feature = "wayland")]
+struct WaylandTouchGestures;
+
+#[cfg(feature = "wayland")]
+impl gpui::PlatformGestures for WaylandTouchGestures {
+    fn tuning(&self) -> gpui::GestureTuning {
+        // GPUI flings target a window position, which can end up over a
+        // different terminal after a tab switch. A fling also consumes the
+        // next tap anywhere in the window.
+        gpui::GestureTuning {
+            min_fling_velocity: f32::INFINITY,
+            ..gpui::GestureTuning::default()
+        }
+    }
+}
+
 impl Platform for LinuxPlatform {
     fn background_executor(&self) -> BackgroundExecutor {
         self.with_common(|common| common.background_executor.clone())
@@ -631,6 +647,15 @@ impl Platform for LinuxPlatform {
 
     fn request_windowing(&self, request: WindowingRequest) -> Task<anyhow::Result<()>> {
         self.request_mode(request)
+    }
+
+    #[cfg(feature = "wayland")]
+    fn gestures(&self) -> Option<Rc<dyn gpui::PlatformGestures>> {
+        if matches!(&*self.connection.borrow(), DisplayConnection::Wayland(_)) {
+            Some(Rc::new(WaylandTouchGestures))
+        } else {
+            None
+        }
     }
 
     fn compositor_name(&self) -> &'static str {
