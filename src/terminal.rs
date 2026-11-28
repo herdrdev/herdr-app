@@ -2008,6 +2008,16 @@ fn text_origin(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics) -
     origin + point(metrics.glyph_x, metrics.baseline - gpui_baseline)
 }
 
+/// How many cells of composing text come before a UTF-16 offset in it: where
+/// the input method's candidate window goes after wide characters.
+fn marked_cells_before(text: &str, utf16: usize) -> usize {
+    vt::cell_clusters(text)
+        .into_iter()
+        .take_while(|(range, _)| text[..range.start].encode_utf16().count() < utf16)
+        .map(|(_, w)| usize::from(w))
+        .sum()
+}
+
 fn paint_cell_text(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window, cx: &mut App) {
     let origin = text_origin(line, origin, metrics);
     let _ = line.paint(origin, metrics.size.height, TextAlign::Left, None, window, cx);
@@ -2418,21 +2428,28 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // What an input method is composing, at the cursor (hidden or not):
     // underlined, on the terminal's background so the cells under it don't
     // show through.
+    // Each character goes in its own cells, as it will once committed (#1140).
     if let (Some((cx_, cy_)), Some(text)) = (frame.cursor_cell, marked.filter(|t| !t.is_empty())) {
         let p = at(cx_ as usize, cy_ as usize);
         let fg = hsla(vt::theme().fg);
-        let run = TextRun {
-            len: text.len(),
-            font: cell_font(false, false),
-            color: fg,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
-        window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
-        paint_cell_text(&line, p, metrics, window, cx);
-        let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(line.width, metrics.underline_thickness));
+        let clusters = vt::cell_clusters(&text);
+        let width = cell.width * clusters.iter().map(|(_, w)| f32::from(*w)).sum::<f32>();
+        window.paint_quad(fill(snap_box(Bounds::new(p, size(width, cell.height))), hsla(frame.bg)));
+        let mut col = 0usize;
+        for (range, w) in clusters {
+            let run = TextRun {
+                len: range.len(),
+                font: cell_font(false, false),
+                color: fg,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(text[range].to_owned().into(), px(crate::settings::font_size()), &[run], None);
+            paint_cell_text(&line, at(cx_ as usize + col, cy_ as usize), metrics, window, cx);
+            col += usize::from(w);
+        }
+        let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(width, metrics.underline_thickness));
         window.paint_quad(fill(snap_box(underline), fg));
     }
     {
@@ -2519,7 +2536,8 @@ impl EntityInputHandler for TerminalView {
     fn bounds_for_range(&mut self, range: std::ops::Range<usize>, _element: Bounds<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let g = self.grid.borrow();
         let at = g.cursor_at?;
-        Some(Bounds::new(at.origin + point(g.cell.width * range.start as f32, px(0.0)), at.size))
+        let cells = marked_cells_before(g.marked.as_deref().unwrap_or(""), range.start);
+        Some(Bounds::new(at.origin + point(g.cell.width * cells as f32, px(0.0)), at.size))
     }
 
     fn character_index_for_point(&mut self, _point: Point<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
@@ -5059,6 +5077,17 @@ mod tests {
     /// Every row is what Ghostty sends for that key in that mode. A change in
     /// how we describe keys to libghostty shows up here, not in someone's
     /// editor.
+    #[test]
+    fn the_candidate_window_follows_composing_text_by_cells() {
+        assert_eq!(super::marked_cells_before("abc", 2), 2);
+        assert_eq!(super::marked_cells_before("かなa", 1), 2);
+        assert_eq!(super::marked_cells_before("かなa", 2), 4);
+        assert_eq!(super::marked_cells_before("かなa", 3), 5);
+        // An emoji is two UTF-16 units and two cells.
+        assert_eq!(super::marked_cells_before("\u{1f600}x", 2), 2);
+        assert_eq!(super::marked_cells_before("", 3), 0);
+    }
+
     #[test]
     fn keys_send_what_ghostty_sends() {
         #[cfg(target_os = "macos")]
