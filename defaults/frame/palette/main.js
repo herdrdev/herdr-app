@@ -9,7 +9,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exists, readdir, readFile } from "fs/promises";
-import { appHome, commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { appHome, commands, layout, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -71,6 +71,11 @@ const HIDDEN = new Set([
   "tab.settle", "tab.unsettle",
   "app.palette", "app.hide", "app.hide_others", "app.show_all", "app.theme", "app.settings",
 ]);
+
+// Whether the layout tree has a part with this id.
+function hasPart(node, id) {
+  return node?.id === id || (node?.children ?? []).some((child) => hasPart(child, id));
+}
 
 function titleOf(name) {
   const [noun, verb] = name.split(".");
@@ -155,6 +160,10 @@ function entries(mods = []) {
   for (const l of shown) {
     const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
+  }
+  // A key hides the sidebar, so the palette must be able to bring it back (where the layout has one).
+  if (known.has("layout.toggle") && hasPart(layout(), "sidebar")) {
+    list.push({ name: "layout.toggle", args: { id: "sidebar" }, group: "Layout", title: "Toggle sidebar", words: "hide show panel spaces agents" });
   }
   // `app.theme` sets the half of its theme's lightness, so only the themes
   // that can show now are offered: dark ones in a dark window, light ones in a

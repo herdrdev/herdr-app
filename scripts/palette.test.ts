@@ -23,6 +23,7 @@ const element = () => new Element();
 let platform = "linux";
 const icons: string[] = [];
 let dark = true;
+let shownLayout: any = { id: "root", children: [{ id: "sidebar" }, { id: "main" }] };
 const home = "/home/app";
 let disk: Record<string, string> = {};
 const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
@@ -35,7 +36,8 @@ const values = {
     { name: "tab.rename", args: [{ name: "id", required: false }, { name: "name", required: true }], about: "Rename a tab." },
     { name: "layout.resize", args: [{ name: "id", required: true }, { name: "px", required: false }], about: "Resize." },
     { name: "tab.new", args: [{ name: "name", required: false }], about: "New tab." },
-  ], layouts: () => ["main", "win98"], shared: () => "main",
+    { name: "layout.toggle", args: [{ name: "id", required: true }], about: "Toggle a part." },
+  ], layout: () => shownLayout, layouts: () => ["main", "win98"], shared: () => "main",
   themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
   appHome: () => home,
   readdir: async (path: string) => {
@@ -114,6 +116,21 @@ test("palette offers only the themes that can show in the current appearance", (
   dark = false;
   // win98 is the Herdr 98 layout's own theme, so it isn't offered here.
   expect(offered()).toEqual(["paper", "mine-light"]);
+});
+
+test("palette toggles the sidebar only in a layout that has one, with its key", () => {
+  const toggles = () => {
+    const view = new Palette();
+    view.query = ""; view.recent = [];
+    return view.rows().map((r: any) => r.e).filter((e: any) => e.name === "layout.toggle");
+  };
+  const [entry, ...rest] = toggles();
+  expect(rest).toEqual([]);
+  expect(entry).toMatchObject({ args: { id: "sidebar" }, group: "Layout", title: "Toggle sidebar" });
+  expect(keyOf(entry, [{ section: "global", keys: "cmd-b", action: "layout.toggle:sidebar" }])).toBe("cmd-b");
+  shownLayout = { id: "root", children: [{ id: "main" }] };
+  expect(toggles()).toEqual([]);
+  shownLayout = { id: "root", children: [{ id: "sidebar" }, { id: "main" }] };
 });
 
 // Entries from the mods' mod.json files, as the palette lists them.
