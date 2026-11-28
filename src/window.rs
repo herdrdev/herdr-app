@@ -4275,10 +4275,10 @@ impl AppWindow {
             out.sort();
             out
         };
-        let terminal = |pane: &str, addr: &str| {
+        let terminal = |pane: &Node, addr: &str| {
             let rec = self.live.get(addr);
             json!({
-                "terminal": addr, "pane": pane, "status": m.status(addr),
+                "terminal": addr, "pane": pane.id, "pane_name": pane.title, "status": m.status(addr),
                 "app": m.agents.get(addr).and_then(|a| a.app.clone()),
                 "name": rec.and_then(|r| r.get("name")).cloned(),
                 "sub_agents": children(addr),
@@ -4293,7 +4293,7 @@ impl AppWindow {
                     .tabs
                     .iter()
                     .map(|c| {
-                        let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
+                        let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(n, n.terminal()?))).collect();
                         json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
                     })
                     .collect();
@@ -7168,12 +7168,23 @@ mod tests {
             this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
             this.documents.entry(String::new()).or_default().available = true;
             this.sync(window, cx);
+            this.live.insert("t1".into(), json!({ "name": "backend" }));
+            this.live.insert("t2".into(), json!({ "parent": "t1" }));
+            let listed_terminal = |this: &mut super::AppWindow, window: &mut Window, cx: &mut Context<super::AppWindow>| {
+                this.control(json!({ "ls": true }), window, cx)["spaces"][0]["tabs"][0]["terminals"][0].clone()
+            };
+            assert_eq!(listed_terminal(this, window, cx).get("pane_name"), Some(&serde_json::Value::Null));
             let title = |this: &super::AppWindow| this.model.tab("tb1").and_then(|c| c.root.find("p1")).and_then(|n| n.title.clone());
             let r = this.run_as("pane.rename", json!({ "pane": "p1", "name": "  server  " }), false, window, cx);
             assert!(r.get("error").is_none(), "{r}");
             assert_eq!(title(this).as_deref(), Some("server"), "trimmed");
+            assert_eq!(listed_terminal(this, window, cx), json!({
+                "terminal": "t1", "pane": "p1", "pane_name": "server", "status": this.model.status("t1"),
+                "app": null, "name": "backend", "sub_agents": ["t2"],
+            }));
             assert!(this.run_as("pane.rename", json!({ "name": "" }), false, window, cx).get("error").is_none());
             assert_eq!(title(this), None, "empty: unnamed again (default: the focused pane)");
+            assert_eq!(listed_terminal(this, window, cx).get("pane_name"), Some(&serde_json::Value::Null));
             assert!(this.run_as("pane.rename", json!({ "pane": "nope", "name": "x" }), false, window, cx).get("error").is_some());
             assert!(this.run_as("pane.rename", json!({ "pane": "p1" }), false, window, cx).get("error").is_some(), "scripts get no prompt");
             this.run("pane.rename", json!({}), window, cx);

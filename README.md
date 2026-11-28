@@ -114,6 +114,8 @@ herdr-app commands
 ```
 
 The first two inspect the open window. The command list also works without one.
+Each terminal in `herdr-app ls` includes its pane ID (`pane`) and custom pane name
+(`pane_name`, null when unnamed). `name` is the core terminal name.
 See the [command reference](docs/commands.md) for arguments.
 
 ## Build from source
