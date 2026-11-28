@@ -1060,6 +1060,13 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Option<isize> {
+        // HERDR: resize-border hit tests are handled by DefWindowProcW's modal
+        // resize loop, which swallows the matching button-up. Dispatching a GPUI
+        // MouseDown here would start/clear a TextView selection and leave
+        // is_selecting stuck, so skip GPUI entirely for those codes.
+        if is_resize_border_hit_test(wparam.0 as u32) {
+            return None;
+        }
         if let Some(mut func) = self.state.callbacks.input.take() {
             let scale_factor = self.state.scale_factor.get();
             let mut cursor_point = POINT {
@@ -1184,17 +1191,7 @@ impl WindowsWindowInner {
 
     fn handle_set_cursor(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
         if unsafe { !IsWindowEnabled(handle).as_bool() }
-            || matches!(
-                lparam.loword() as u32,
-                HTLEFT
-                    | HTRIGHT
-                    | HTTOP
-                    | HTTOPLEFT
-                    | HTTOPRIGHT
-                    | HTBOTTOM
-                    | HTBOTTOMLEFT
-                    | HTBOTTOMRIGHT
-            )
+            || is_resize_border_hit_test(lparam.loword() as u32)
         {
             return None;
         }
@@ -1696,6 +1693,14 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
     )
 }
 
+/// HERDR: windows resize-border hit-test codes handled by DefWindowProcW.
+fn is_resize_border_hit_test(hit_test: u32) -> bool {
+    matches!(
+        hit_test,
+        HTLEFT | HTRIGHT | HTTOP | HTTOPLEFT | HTTOPRIGHT | HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT
+    )
+}
+
 #[cfg(test)]
 mod dead_key_tests {
     use super::parse_normal_key;
@@ -2027,5 +2032,36 @@ fn notify_frame_changed(handle: HWND) {
                 | SWP_NOZORDER,
         )
         .log_err();
+    }
+}
+
+#[cfg(test)]
+mod resize_border_hit_test_tests {
+    use super::is_resize_border_hit_test;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    #[test]
+    fn resize_border_codes() {
+        for code in [
+            HTLEFT,
+            HTRIGHT,
+            HTTOP,
+            HTTOPLEFT,
+            HTTOPRIGHT,
+            HTBOTTOM,
+            HTBOTTOMLEFT,
+            HTBOTTOMRIGHT,
+        ] {
+            assert!(
+                is_resize_border_hit_test(code),
+                "expected true for {code:?}"
+            );
+        }
+        for code in [HTCLIENT, HTCAPTION, HTMINBUTTON, HTMAXBUTTON, HTCLOSE] {
+            assert!(
+                !is_resize_border_hit_test(code),
+                "expected false for {code:?}"
+            );
+        }
     }
 }
