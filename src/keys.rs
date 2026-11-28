@@ -117,12 +117,18 @@ pub fn path() -> std::path::PathBuf {
 /// it would beat `layout:` (same depth, added earlier) and only lose to
 /// `terminal` and `mod:` by order.
 fn tab(section: &str) -> Result<KeyBindingContextPredicate, String> {
-    use KeyBindingContextPredicate::{Equal, Identifier};
+    use KeyBindingContextPredicate::{Descendant, Equal, Identifier};
     match section {
         "global" => Ok(Identifier("Herdr".into())),
         "terminal" => Ok(Identifier("Terminal".into())),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
-            (Some(p), _) if !p.is_empty() => Ok(Equal("mod".into(), p.to_owned().into())),
+            // At the mod's ShellRoot, not its outer block: the kit binds tab and shift-tab
+            // (focus traversal) on ShellRoot, a deeper context that would outrank `mod == p`.
+            // At the same depth the section wins, bound after the kit's keys.
+            (Some(p), _) if !p.is_empty() => Ok(Descendant(
+                Box::new(Equal("mod".into(), p.to_owned().into())),
+                Box::new(Identifier("ShellRoot".into())),
+            )),
             // While layouts/<name>.json is shown (the window's tab says which).
             (_, Some(l)) if !l.is_empty() => Ok(Equal("layout".into(), l.to_owned().into())),
             _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
