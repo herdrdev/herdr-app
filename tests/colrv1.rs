@@ -701,6 +701,91 @@ fn emoji_only_face_is_allowed_in_fallback_chain_not_as_primary() {
     assert!(system.font_id(&gpui::font("Noto Color Emoji")).is_err());
 }
 
+const TEXT_EMOJI: &[u8] = include_bytes!("../vendor/gpui-pre-wgpu/test-assets/TextEmojiProbe.ttf");
+
+#[test]
+fn emoji_presentation_picks_color_font_before_text_fallbacks() {
+    let system = system();
+    // TextEmojiProbe is named like a Unix fallback font that cosmic-text tries
+    // before Noto Color Emoji, in regular and bold.
+    system
+        .add_fonts(vec![
+            Cow::Borrowed(TEXT_EMOJI),
+            Cow::Borrowed(include_bytes!(
+                "../vendor/gpui-pre-wgpu/test-assets/TextEmojiProbeBold.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../vendor/gpui-pre-wgpu/test-assets/StaticBoldProbe.ttf"
+            )),
+            Cow::Borrowed(COLOR),
+        ])
+        .unwrap();
+    let bold = gpui::Font {
+        weight: gpui::FontWeight::BOLD,
+        ..gpui::font("Static Bold Probe")
+    };
+    for (font, text, color) in [
+        (gpui::font("Geist"), "🚀", true),
+        (gpui::font("Geist"), "🚀\u{fe0e}", false),
+        (gpui::font("Geist"), "❤", false),
+        (gpui::font("Geist"), "❤\u{fe0f}", true),
+        (gpui::font("Noto Sans Symbols2"), "🚀", false),
+        (gpui::font("Noto Sans Symbols2"), "🚀\u{fe0f}", true),
+        // A static bold face: only the monochrome fallback has its weight.
+        (bold, "🚀", true),
+    ] {
+        let id = system.font_id(&font).unwrap();
+        let line = system.layout_line(
+            text,
+            px(14.0),
+            &[FontRun {
+                len: text.len(),
+                font_id: id,
+            }],
+        );
+        let glyph = &line.runs[0].glyphs[0];
+        assert_ne!(glyph.id, GlyphId(0), "{}: {text:?}", font.family);
+        assert_eq!(glyph.is_emoji, color, "{}: {text:?}", font.family);
+    }
+}
+
+#[test]
+fn emoji_presentation_skips_color_faces_drawn_as_outlines() {
+    // CBDT is drawn in color only for Noto Color Emoji; under another name its
+    // glyphs would render blank.
+    let mut cbdt =
+        include_bytes!("../vendor/ghostty/src/font/res/NotoColorEmoji.ttf").to_vec();
+    rename_font(&mut cbdt, "Noto Color Emoji", "Fail Color Emoji");
+    rename_font(&mut cbdt, "NotoColorEmoji", "FailColorEmoji");
+    let system = system();
+    system
+        .add_fonts(vec![Cow::Borrowed(TEXT_EMOJI), Cow::Owned(cbdt)])
+        .unwrap();
+    let line = layout(&system, "🚀");
+    let run = &line.runs[0];
+    assert_eq!(
+        system.advance(run.font_id, run.glyphs[0].id).unwrap().width,
+        600.0,
+        "drawn from the text probe"
+    );
+}
+
+#[test]
+fn emoji_presentation_keeps_the_color_face_over_a_same_named_duplicate() {
+    let duplicate: &[u8] =
+        include_bytes!("../vendor/gpui-pre-wgpu/test-assets/TextEmojiDuplicate.ttf");
+    // Both load orders: a family/style request can't tell the two faces apart.
+    for fonts in [[duplicate, COLOR], [COLOR, duplicate]] {
+        let system = system();
+        system
+            .add_fonts(fonts.into_iter().map(Cow::Borrowed).collect())
+            .unwrap();
+        let line = layout(&system, "🚀");
+        let glyph = &line.runs[0].glyphs[0];
+        assert!(glyph.is_emoji && glyph.id != GlyphId(0));
+    }
+}
+
 #[test]
 fn valid_transparent_composite_does_not_trigger_font_replacement() {
     let system = system();
