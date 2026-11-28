@@ -210,7 +210,7 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
 });
 
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
-function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[] } = {}) {
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[], records = {} as Record<string, unknown> } = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
   const status = (address: string) => statuses[address] ?? "working";
   const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: status(address), seq, pinned: pinned.includes(address) });
@@ -219,7 +219,7 @@ function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent
   const orders: string[][] = [];
   const { agents, writes } = harness([], {
     agents: () => list,
-    terminals: () => [live("t1", null), ...others.map(a => live(a, null)), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
+    terminals: () => [{ ...live("t1", null), records }, ...others.map(a => live(a, null)), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
     panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
     spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
     layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
@@ -343,4 +343,23 @@ test("a title's leading emoji stays, a status glyph before it goes", () => {
   // An emoji is a name a person chose: alone, or beside the program's name, it is the row's name.
   expect(row("🔴")).toBe("🔴");
   expect(row("🔴 claude")).toBe("🔴 claude");
+});
+
+test("an idle agent with only ended records stays Idle, not Needs you", () => {
+  // pi-subagents keeps a failed run as an error record, and a finished one as done.
+  const ended = keptRender("priority", { kept: [], statuses: { t1: "idle" }, records: { a: { state: "error" }, b: { state: "done" } } });
+  expect(ended.ids).toContain("sec-1");
+  expect(ended.ids).not.toContain("sec-4");
+  expect(ended.texts.get("ag-t1")).not.toContain("Needs you");
+  const working = keptRender("priority", { kept: [], statuses: { t1: "idle" }, records: { a: { state: "error" }, b: { state: "working" } } });
+  expect(working.ids).toContain("sec-2");
+  expect(working.ids).not.toContain("sec-1");
+});
+
+test("only working and blocked records count as work", () => {
+  const recordStatus = new Function("View", "localStorage", "props", "run", `${source}; return recordStatus;`)(class {}, {}, () => ({}), () => {});
+  expect(recordStatus({ records: { a: { state: "working" }, b: { state: "error" }, c: { state: "done" }, d: { state: "blocked" }, e: { state: "queued" }, f: {} } })).toEqual(["working", "idle", "idle", "blocked", "idle", "idle"]);
+  expect(recordStatus({ records: {} })).toEqual([]);
+  expect(recordStatus({})).toEqual([]);
+  expect(recordStatus(undefined)).toEqual([]);
 });
