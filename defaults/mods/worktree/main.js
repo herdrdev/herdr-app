@@ -59,14 +59,16 @@ async function checkouts(repo, on) {
   return out.sort((a, b) => b.main - a.main || b.at - a.at);
 }
 
+// Where each space on the machine is now: [space, folder]. Read once per render, not per row.
+const placed = (on, spaceList, paneList) => spaceList
+  .filter((s) => (s.machine ?? null) === (on ?? null))
+  .map((s) => [s, place(s, paneList)?.replace(/\\/g, "/")]);
+
 // The space showing a checkout: its first terminal is in it (the deepest checkout wins).
-function spaceOf(path, all, on, spaceList, paneList) {
+function spaceOf(path, all, where) {
   const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
-  return spaceList.find((s) => (s.machine ?? null) === (on ?? null) && (() => {
-    const at = place(s, paneList)?.replace(/\\/g, "/");
-    if (!at || !inside(at, path)) return false;
-    return !all.some((c) => c.path !== path && c.path.length > path.length && inside(at, c.path));
-  })());
+  return where.find(([, at]) => at && inside(at, path)
+    && !all.some((c) => c.path !== path && c.path.length > path.length && inside(at, c.path)))?.[0];
 }
 
 async function git(cwd, args, on, timeout) {
@@ -223,7 +225,7 @@ export default class Worktree extends View {
   open(c) {
     if (!c) return;
     this.close();
-    const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
+    const s = spaceOf(c.path, this.list, placed(this.on, spaces(), panes()));
     if (s) run("space.select", { id: s.id });
     else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
@@ -281,11 +283,10 @@ export default class Worktree extends View {
     const r = this.repo;
     const rows = this.shown();
     const all = this.list ?? [];
-    const spaceList = spaces();
-    const paneList = panes();
+    const where = placed(this.on, spaces(), panes());
     const row = (c, i) => {
       const on = i === this.at;
-      const there = spaceOf(c.path, all, this.on, spaceList, paneList);
+      const there = spaceOf(c.path, all, where);
       return v_flex()
         .id(`wt-${i}`)
         .flex_none()
