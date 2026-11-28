@@ -1,8 +1,8 @@
 // How notifications look. Anything can post one with notify({ title, body,
 // level, icon, action }); replace this mod to restyle them all. Click to
-// run its action (e.g. go to the agent) and dismiss it.
+// run its action (e.g. go to the agent) and dismiss it; the × only dismisses.
 
-import { View, div, image } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { props, closeOverlay, run, theme } from "herdr";
 
@@ -43,7 +43,10 @@ export default class Toast extends View {
             .child(div().id("toast-login-copy").flex_none().px(6).py(3).rounded(4).bg(t.raised)
               .text_size(12).text_color(t.foreground).cursor_pointer().hover(s => s.bg(t.hover))
               .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(command); this.copied = true; cx.notify(); })
-              .child(this.copied ? "Copied" : "Copy")))),
-      );
+              .child(this.copied ? "Copied" : "Copy")))))
+      .child(div().id("toast-close").flex_none().size(20).rounded(4).flex().items_center().justify_center()
+        .cursor_pointer().hover(s => s.bg(t.raised))
+        .on_click((_e, cx) => { cx.stop_propagation(); closeOverlay(p.overlay); })
+        .child(svg("mods/pane/close.svg").size(12).text_color(t.muted)));
   }
 }
