@@ -307,13 +307,13 @@ mod tests {
     #[test]
     fn seen_attention_survives_a_screen_restart_but_not_a_new_word() {
         let mut m = model();
-        m.set_word("t1", Some("done".into()), None, false);
+        m.set_word("t1", Some("done".into()), None, false, false);
         m.agents.get_mut("t1").unwrap().seen = false;
         let saved = View::capture(&m);
         m.agents.clear();
         saved.apply_machine(&mut m, None);
         assert!(!m.agents["t1"].seen);
-        m.set_word("t1", Some("working".into()), None, false);
+        m.set_word("t1", Some("working".into()), None, false, false);
         saved.apply_machine(&mut m, None);
         assert!(m.agents["t1"].seen);
     }

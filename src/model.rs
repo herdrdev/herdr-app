@@ -67,6 +67,9 @@ pub struct Agent {
     pub word: Option<String>,
     /// The agent's name from its 7501 report (`app`), e.g. "claude-code".
     pub app: Option<String>,
+    /// Core's `reported`: the program sent a 7501 status at least once. It is
+    /// an agent between turns too, when it has no status right now (#1132).
+    pub reported: bool,
     /// Whether the person has seen it since it last stopped working.
     pub seen: bool,
     /// Core's turn counter: goes up each time it stops working.
@@ -528,11 +531,14 @@ impl Model {
     }
 
     /// Applies a status word from core (Herdr's seen rules).
-    pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, looking: bool) -> bool {
+    pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, reported: bool, looking: bool) -> bool {
         let a = self.agents.entry(address.to_owned()).or_insert_with(|| Agent { seen: true, ..Default::default() });
         a.app = app.or(a.app.take());
+        // A program that starts or stops reporting is news even with the same
+        // word: it joins or leaves the agents list.
+        let reported_changed = std::mem::replace(&mut a.reported, reported) != reported;
         if a.word == word {
-            return false;
+            return reported_changed;
         }
         let was_busy = matches!(a.word.as_deref(), Some("working" | "blocked"));
         match word.as_deref() {
@@ -597,9 +603,15 @@ impl Model {
     /// What the UI shows: working, blocked, done (finished, unseen), idle, or None (not an agent).
     pub fn status(&self, address: &str) -> Option<&'static str> {
         let a = self.agents.get(address)?;
-        Some(match a.word.as_deref()? {
-            "working" => "working",
-            "blocked" | "error" => "blocked",
+        let word = a.word.as_deref();
+        // No status now and the program never reported one: not an agent. One
+        // that reported before stays an agent between turns, at its prompt.
+        if word.is_none() && !a.reported {
+            return None;
+        }
+        Some(match word {
+            Some("working") => "working",
+            Some("blocked" | "error") => "blocked",
             _ if a.seen_turn.map_or(!a.seen, |s| a.turn > s) => "done",
             _ => "idle",
         })
@@ -1046,41 +1058,69 @@ mod tests {
     #[test]
     fn finishes_you_did_not_watch_are_done_until_seen() {
         let mut m = model_with_one();
-        m.set_word("t1", Some("working".into()), Some("claude".into()), false);
+        m.set_word("t1", Some("working".into()), Some("claude".into()), false, false);
         assert_eq!(m.status("t1"), Some("working"));
-        m.set_word("t1", Some("idle".into()), None, false);
+        m.set_word("t1", Some("idle".into()), None, false, false);
         assert_eq!(m.status("t1"), Some("done"));
         assert_eq!(m.rollup(&m.all_addresses()), Some("done"));
         m.mark_seen(&["t1".into()]);
         assert_eq!(m.status("t1"), Some("idle"));
         // Watching it finish: straight to idle.
-        m.set_word("t1", Some("working".into()), None, true);
-        m.set_word("t1", Some("done".into()), None, true);
+        m.set_word("t1", Some("working".into()), None, false, true);
+        m.set_word("t1", Some("done".into()), None, false, true);
         assert_eq!(m.status("t1"), Some("idle"));
-        m.set_word("t1", Some("blocked".into()), None, true);
+        m.set_word("t1", Some("blocked".into()), None, false, true);
         assert_eq!(m.rollup(&m.all_addresses()), Some("blocked"));
+    }
+
+    #[test]
+    fn a_program_that_reported_is_an_agent_between_turns() {
+        let mut m = model_with_one();
+        // A program that never sent 7501 is no agent, whatever else it does.
+        m.set_word("t1", None, None, false, false);
+        assert_eq!(m.status("t1"), None);
+        assert_eq!(m.rollup(&m.all_addresses()), None);
+        // One that did, then cleared its word (an agent at its prompt), keeps
+        // its place: #1132 showed such terminals as 0 agents with `app` set.
+        m.set_word("t1", Some("working".into()), Some("claude-code".into()), true, true);
+        assert_eq!(m.status("t1"), Some("working"));
+        assert!(m.set_word("t1", None, None, true, true));
+        assert_eq!(m.status("t1"), Some("idle"));
+        assert_eq!(m.agents["t1"].app.as_deref(), Some("claude-code"));
+        // A turn another client hasn't seen is still done, with no word.
+        m.set_word("t1", Some("working".into()), None, true, false);
+        m.set_turn("t1", 3, Some(2));
+        m.set_word("t1", None, None, true, false);
+        assert_eq!(m.status("t1"), Some("done"));
+        m.set_turn("t1", 3, Some(3));
+        assert_eq!(m.status("t1"), Some("idle"));
+        // A program that stops reporting leaves the list; starting again is news.
+        assert!(m.set_word("t1", None, None, false, false));
+        assert_eq!(m.status("t1"), None);
+        assert!(m.set_word("t1", None, None, true, false));
+        assert_eq!(m.status("t1"), Some("idle"));
     }
 
     #[test]
     fn a_shared_seen_turn_decides_over_this_screen() {
         let mut m = model_with_one();
-        m.set_word("t1", Some("working".into()), None, true);
-        m.set_word("t1", Some("idle".into()), None, true);
+        m.set_word("t1", Some("working".into()), None, false, true);
+        m.set_word("t1", Some("idle".into()), None, false, true);
         assert_eq!(m.status("t1"), Some("idle"));
         // Another client hasn't seen turn 3 (marked unread): done, though we watched.
         assert!(m.set_turn("t1", 3, Some(2)));
         assert_eq!(m.status("t1"), Some("done"));
         assert!(!m.set_turn("t1", 3, Some(2)));
         // Seen elsewhere: idle, though we didn't watch.
-        m.set_word("t1", Some("working".into()), None, false);
-        m.set_word("t1", Some("idle".into()), None, false);
+        m.set_word("t1", Some("working".into()), None, false, false);
+        m.set_word("t1", Some("idle".into()), None, false, false);
         m.set_turn("t1", 4, Some(4));
         assert_eq!(m.status("t1"), Some("idle"));
         // Needing you or working beats seen.
-        m.set_word("t1", Some("blocked".into()), None, false);
+        m.set_word("t1", Some("blocked".into()), None, false, false);
         assert_eq!(m.status("t1"), Some("blocked"));
         // No label: this screen's own rule.
-        m.set_word("t1", Some("idle".into()), None, false);
+        m.set_word("t1", Some("idle".into()), None, false, false);
         m.set_turn("t1", 5, None);
         assert_eq!(m.status("t1"), Some("done"));
     }
