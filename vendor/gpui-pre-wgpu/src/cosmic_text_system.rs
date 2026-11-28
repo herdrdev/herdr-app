@@ -23,6 +23,20 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
 
+/// The fonts this text system can use. On Linux fontconfig's cache answers in
+/// milliseconds, where scanning the font directories reads every font file
+/// (`linux_fonts`); anywhere else, or if `fc-list` is unavailable, keep the
+/// scan.
+#[cfg(target_os = "linux")]
+fn system_font_system() -> FontSystem {
+    crate::linux_fonts::font_system().unwrap_or_else(FontSystem::new)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_font_system() -> FontSystem {
+    FontSystem::new()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FontKey {
     family: SharedString,
@@ -144,7 +158,7 @@ impl CosmicTextSystem {
     }
 
     pub fn new(system_font_fallback: &str) -> Self {
-        let font_system = FontSystem::new();
+        let font_system = system_font_system();
 
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
@@ -1325,7 +1339,8 @@ fn alpha_bitmap<'a>(
     let locations = font.table(swash::tag_from_bytes(b"EBLC"))?;
     let data = font.table(swash::tag_from_bytes(b"EBDT"))?;
     let locations = ttf_parser::cblc::Table::parse(locations)?;
-    ttf_parser::cbdt::Table::parse(locations, data)?.get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
+    ttf_parser::cbdt::Table::parse(locations, data)?
+        .get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
 }
 
 #[inline(always)]

@@ -1,5 +1,7 @@
 mod colr;
 mod cosmic_text_system;
+#[cfg(target_os = "linux")]
+mod linux_fonts;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;
