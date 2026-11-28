@@ -444,6 +444,9 @@ export interface OverlaySpec {
   modal?: boolean;
   /** "none": no border, rounded corners, shadow or background around it; the mod draws its own. */
   frame?: "none";
+  /** `kind: "window"`: keep the selected pane's `focus` look (its frame border) while this window
+   *  holds the keyboard. Ignored for dialogs, popups and toasts. */
+  keep_pane_focus?: boolean;
   /** A window's name: it remembers where it was dropped and opens there next time; opening the
    *  same key again replaces the open one, in its place. */
   key?: string;
