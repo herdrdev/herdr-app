@@ -2197,6 +2197,8 @@ impl CodeBlock {
     ) -> AnyElement {
         let style = &node_cx.style;
         let leaf_key = self.span.map(|span| TextLeafKey::block(span.start));
+        // HERDR: these sizes don't follow the surrounding text, so they take the zoom here.
+        let zoom = style.scale();
         // The language sits quietly in the top-right corner, where custom
         // actions go instead when the caller provides them; the top padding
         // keeps the first line clear of it. Like the actions, it stays out of
@@ -2207,11 +2209,11 @@ impl CodeBlock {
             .map(|lang| {
                 div()
                     .absolute()
-                    .top(px(7.))
+                    .top(px(7.) * zoom)
                     .right_3()
                     .font_family(cx.theme().tokens.typography.sans.clone())
-                    .text_size(cx.theme().tokens.typography.xs.size)
-                    .line_height(px(16.))
+                    .text_size(cx.theme().tokens.typography.xs.size * zoom)
+                    .line_height(px(16.) * zoom)
                     .text_color(style.muted_foreground())
                     .child(lang)
             });
@@ -2224,13 +2226,13 @@ impl CodeBlock {
                 px(28.)
             } else {
                 px(14.)
-            })
-            .pb(px(14.))
+            } * zoom)
+            .pb(px(14.) * zoom)
             .bg(style.code_background())
             .border_1()
             .border_color(style.border())
             .font_family(cx.theme().tokens.typography.mono.clone())
-            .text_size(cx.theme().tokens.typography.mono_md.size)
+            .text_size(cx.theme().tokens.typography.mono_md.size * zoom)
             .line_height(relative(1.6))
             .relative()
             .refine_style(&style.code_block())
