@@ -32,6 +32,7 @@ mod shader_compilation {
         let modules = [
             "quad",
             "plain_quad",
+            "rounded_quad",
             "shadow",
             "path_rasterization",
             "path_sprite",

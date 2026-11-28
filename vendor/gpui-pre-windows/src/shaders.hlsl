@@ -584,6 +584,96 @@ float4 plain_quad_fragment(PlainQuadFragmentInput input): SV_Target {
     return input.color;
 }
 
+// HERDR: a quad with a solid background and rounded corners but no border
+// (cards, pills, buttons). `quad_fragment` with all border widths 0, minus
+// the gradient, border and dash code, so the pixels are the same. WARP runs
+// every instruction of a pixel shader for every pixel.
+struct RoundedQuadVertexOutput {
+    float4 position: SV_Position;
+    nointerpolation float4 background_color: COLOR0;
+    nointerpolation float4 border_color: COLOR1;
+    nointerpolation float4 bounds: COLOR2;
+    nointerpolation float4 corner_radii: COLOR3;
+    float4 clip_distance: SV_ClipDistance;
+};
+
+struct RoundedQuadFragmentInput {
+    float4 position: SV_Position;
+    nointerpolation float4 background_color: COLOR0;
+    nointerpolation float4 border_color: COLOR1;
+    nointerpolation float4 bounds: COLOR2;
+    nointerpolation float4 corner_radii: COLOR3;
+};
+
+RoundedQuadVertexOutput rounded_quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    Quad quad = quads[batch_start_index + instance_id];
+    RoundedQuadVertexOutput output;
+    output.position = to_device_position(unit_vertex, quad.bounds);
+    output.background_color = hsla_to_rgba(quad.background.solid);
+    output.border_color = hsla_to_rgba(quad.border_color);
+    output.bounds = float4(quad.bounds.origin, quad.bounds.size);
+    output.corner_radii = float4(quad.corner_radii.top_left, quad.corner_radii.top_right,
+        quad.corner_radii.bottom_right, quad.corner_radii.bottom_left);
+    output.clip_distance = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    return output;
+}
+
+float4 rounded_quad_fragment(RoundedQuadFragmentInput input): SV_Target {
+    float4 background_color = input.background_color;
+    float2 size = input.bounds.zw;
+    float2 half_size = size / 2.;
+    float2 the_point = input.position.xy - input.bounds.xy;
+    float2 center_to_point = the_point - half_size;
+    const float antialias_threshold = 0.5;
+
+    float corner_radius = center_to_point.x < 0.
+        ? (center_to_point.y < 0. ? input.corner_radii.x : input.corner_radii.w)
+        : (center_to_point.y < 0. ? input.corner_radii.y : input.corner_radii.z);
+
+    // Every border width is 0, so `quad_fragment`'s reduced border is
+    // -antialias_threshold on both axes.
+    float2 reduced_border = float2(-antialias_threshold, -antialias_threshold);
+    float2 corner_to_point = abs(center_to_point) - half_size;
+    float2 corner_center_to_point = corner_to_point + corner_radius;
+    bool is_near_rounded_corner =
+        corner_center_to_point.x >= 0.0 &&
+        corner_center_to_point.y >= 0.0;
+    float2 straight_border_inner_corner_to_point = corner_to_point + reduced_border;
+    bool is_beyond_inner_straight_border =
+        straight_border_inner_corner_to_point.x > 0.0 ||
+        straight_border_inner_corner_to_point.y > 0.0;
+    bool is_within_inner_straight_border =
+        straight_border_inner_corner_to_point.x < -antialias_threshold &&
+        straight_border_inner_corner_to_point.y < -antialias_threshold;
+    if (is_within_inner_straight_border && !is_near_rounded_corner) {
+        return background_color;
+    }
+
+    float outer_sdf = quad_sdf_impl(corner_center_to_point, corner_radius);
+    float inner_sdf = 0.0;
+    if (corner_center_to_point.x <= 0.0 || corner_center_to_point.y <= 0.0) {
+        inner_sdf = -max(straight_border_inner_corner_to_point.x,
+                        straight_border_inner_corner_to_point.y);
+    } else if (is_beyond_inner_straight_border) {
+        inner_sdf = -1.0;
+    } else {
+        // `quad_fragment`'s circular inner edge: both reduced borders match.
+        inner_sdf = -(outer_sdf + reduced_border.x);
+    }
+
+    float border_sdf = max(inner_sdf, outer_sdf);
+    float4 color = background_color;
+    if (border_sdf < antialias_threshold) {
+        // A 0-width border still tints the antialiased edge with its color.
+        float4 blended_border = over(background_color, input.border_color);
+        color = lerp(background_color, blended_border,
+                    saturate(antialias_threshold - inner_sdf));
+    }
+
+    return color * float4(1.0, 1.0, 1.0, saturate(antialias_threshold - outer_sdf));
+}
+
 float4 quad_fragment(QuadFragmentInput input): SV_Target {
     Quad quad = quads[input.quad_id];
     float4 background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
