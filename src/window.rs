@@ -2642,9 +2642,8 @@ impl AppWindow {
     /// The folder new terminals in `space` start in: where its shown tab's focused
     /// pane is now (Herdr's "follow"), else the folder the space was made in.
     fn folder_for(&self, space: &str) -> String {
-        let p = self.model.space(space);
-        let here = p.and_then(|p| p.active_tab()).and_then(|c| c.focused_pane()).and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a).cloned());
-        here.or_else(|| p.map(|p| p.folder.clone())).unwrap_or_else(home)
+        let here = self.model.live_folder(space, &self.cwds);
+        here.or_else(|| self.model.space(space).map(|p| p.folder.clone())).unwrap_or_else(home)
     }
 
     /// The machine a space's terminals run on, None for this one.
