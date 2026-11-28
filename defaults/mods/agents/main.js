@@ -238,9 +238,17 @@ export default class Agents extends View {
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
+    // Hold the rank of the agent you're on: looking turns done into idle, and
+    // resorting under your own click is jarring. It settles when you move on.
+    this.seenDone ??= {};
+    for (const a of list) {
+      if (a.status === "done") this.seenDone[a.address] = true;
+      else if (a.status !== "idle") delete this.seenDone[a.address];
+    }
+    const held = (a) => a.focused && a.status === "idle" && this.seenDone[a.address];
     // A helper's done is its own row's news: it doesn't pull a working parent out of Working.
     const kidRank = (k) => { const s = kidStatus(k, this.listed); return RANK[s === "done" ? "idle" : s] ?? 0; };
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => kidRank(s.t)))]));
+    const urgency = new Map(list.map((a) => [a.address, Math.max(held(a) ? RANK.done : 0, this.rank(a), ...this.tree(all, a.address).map((s) => kidRank(s.t)))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
