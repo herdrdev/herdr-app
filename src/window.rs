@@ -3832,15 +3832,18 @@ impl AppWindow {
 
     /// The nearest visible pane, also considering focusable mods for `pane.go`.
     fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
-        let bounds = self.bounds.borrow();
-        let cur = *bounds.get(from)?;
+        let painted = self.bounds.borrow();
+        // Panes take their place from the layout: right after a split they aren't painted yet.
+        let panes = self.model.active_tab().and_then(|tab| self.laid_out(tab, tab.shown())).unwrap_or_default();
+        let place = |id: &str| panes.iter().find(|(pane, _)| pane == id).map(|(_, b)| *b).or_else(|| painted.get(id).copied());
+        let cur = place(from)?;
         let mut candidates: Vec<String> = self.model.active_tab().into_iter()
             .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
             .collect();
         if use_history {
             candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
         }
-        let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), *bounds.get(&id)?)));
+        let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), place(&id)?)));
         nearest(cur, dir, candidates, if use_history { &self.pane_history } else { &[] })
     }
 
@@ -7883,6 +7886,45 @@ export default class Probe extends View {
             assert_eq!(tab.zoomed, None);
             assert_eq!(tab.focused.as_deref(), Some("c"));
             assert!(this.terms["c"].focus.is_focused(window));
+        });
+    }
+
+    /// A script that splits a pane and then moves by direction doesn't wait for a frame.
+    #[test]
+    fn directions_work_right_after_a_split() {
+        in_own_process("directions_after_split");
+    }
+
+    #[gpui::test]
+    fn directions_after_split(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("directions_after_split") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("space", "test", "/", super::Tab::new("tab", "", "a", "term-a"));
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let order = |this: &super::AppWindow| this.model.active_tab().unwrap().root.panes().iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+        view.update_in(cx, |this, window, cx| {
+            // Nothing is painted after a split: "b" has no bounds, and "a" still has the whole tab's.
+            assert!(this.model.split("a", super::Axis::Row, "b", "term-b"));
+            this.model.focus_pane("b");
+            assert_eq!(this.swap_pane("b", false, "left"), Ok(()));
+            assert_eq!(order(this), ["b", "a"]);
+            assert!(this.model.split("b", super::Axis::Row, "c", "term-c"));
+            this.model.focus_pane("c");
+            this.run("pane.go", json!({"direction": "left"}), window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("b"));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |this, _| {
+            // "b" was painted next to "c": the new "d" between them is its neighbour now.
+            assert!(this.model.split("b", super::Axis::Row, "d", "term-d"));
+            assert_eq!(this.swap_pane("b", true, "right"), Ok(()));
+            assert_eq!(order(this), ["d", "b", "c", "a"]);
         });
     }
 
