@@ -470,6 +470,22 @@ Hide a layout node.
 |---|---|
 | `id` | yes |
 
+## `layout.detach`
+
+Show a mod block of the layout in its own OS window, for example on another monitor. The block leaves the layout and its window opens again, in the same place, when Herdr starts or you switch back to the layout. Closing the window or layout.attach puts the block back for good.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+
+## `layout.attach`
+
+Close a detached block's window and show the block in the layout again; it is not opened again.
+
+| Argument | Required |
+|---|---|
+| `id` | yes |
+
 ## `layout.resize`
 
 Size a layout node.
