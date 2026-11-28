@@ -593,3 +593,29 @@ test("space rows keep the full label and omit matching git details after an emoj
   expect(rowLabels("✌🏻 topic")).toEqual(["✌🏻", "✌🏻 topic", "herdr-app", "↑2"]);
   expect(rowLabels("🐼 topic", "└─")).toEqual(["🐼 topic", "↑2"]);
 });
+
+test("the space menu is handed the checkout the sidebar knows, and asks itself when unsure", () => {
+  const opened: any[] = [];
+  const saved = (globalThis as any).openOverlay;
+  (globalThis as any).openOverlay = (o: unknown) => opened.push(o);
+  try {
+    const h = harness();
+    const at = (folder: string, machine: string | null = "remote") => ({ id: folder, name: folder, folder, machine });
+    const key = (w: Space) => JSON.stringify([w.machine ?? null, w.folder]);
+    const [main, linked, plain, failed, unchecked] = ["/a", "/b", "/c", "/d", "/e"].map((f) => at(f));
+    Object.assign(h.view, {
+      git: { [key(main)]: { linked: false }, [key(linked)]: { linked: true }, [key(plain)]: null, [key(failed)]: null },
+      unsure: new Set([key(failed)]),
+    });
+    for (const w of [main, linked, plain, failed, unchecked]) h.view.menu(w);
+    expect(opened.map((o) => o.props)).toEqual([
+      { tab: "space", target: { id: "/a" }, git: "main" },
+      { tab: "space", target: { id: "/b" }, git: "linked" },
+      { tab: "space", target: { id: "/c" }, git: null },
+      { tab: "space", target: { id: "/d" } },
+      { tab: "space", target: { id: "/e" } },
+    ]);
+  } finally {
+    (globalThis as any).openOverlay = saved;
+  }
+});

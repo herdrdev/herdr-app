@@ -301,8 +301,14 @@ export default class Spaces extends View {
   }
 
   menu(w) {
+    // Hand the menu this space's checkout when it is known, so its worktree
+    // items show at once instead of after two git runs (on another machine,
+    // two round trips). An unsure or unchecked place is left to the menu.
+    const key = where(w, panes());
+    const g = key in this.git && !this.unsure.has(key) ? this.git[key] : undefined;
+    const git = g === undefined ? {} : { git: g ? (g.linked ? "linked" : "main") : null };
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id }, ...git } });
   }
 
   orderingDue(now) {
