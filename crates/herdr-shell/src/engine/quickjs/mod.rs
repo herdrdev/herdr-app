@@ -1367,6 +1367,14 @@ fn queue_component_app_effect(
     true
 }
 
+/// The share of the memory limit past which a collection always comes
+/// next (see [`ShellRuntime::keep_collecting`]).
+const GC_CEILING_SHARE: f64 = 0.875;
+/// How far past a heap above the ceiling the next collection comes.
+const GC_STEP: usize = 8 * 1024 * 1024;
+/// How close to the memory limit the next collection may come at most.
+const GC_MARGIN: usize = 4 * 1024 * 1024;
+
 pub struct ShellRuntime {
     /// Declared first because fields drop in declaration order and every
     /// `Persistent` handle must be released while the context still exists.
@@ -1442,6 +1450,10 @@ pub struct ShellRuntime {
     /// that frame returns, so nothing can read it after the borrow it names has
     /// ended.
     active_context: Cell<Option<std::ptr::NonNull<rquickjs::qjs::JSContext>>>,
+    /// The heap's size after the last collection [`Self::keep_collecting`] ran
+    /// itself, or less once the heap was smaller: it runs one again only after
+    /// the heap grew.
+    forced_gc_at: Cell<usize>,
     // Cached exports must drop before the context, without retaining a copy's policy.
     code_cache: RefCell<BTreeMap<[u8; 32], Vec<Rc<code_cache::CachedCode>>>>,
     source_revision: RefCell<Option<Box<dyn Fn(&Path) -> Option<u64>>>>,
@@ -1873,6 +1885,7 @@ impl ShellRuntime {
             next_nested_view_token: Cell::new(0),
             panel_scripts: RefCell::new(HashMap::new()),
             active_context: Cell::new(None),
+            forced_gc_at: Cell::new(0),
             code_cache: RefCell::new(BTreeMap::new()),
             source_revision: RefCell::new(None),
             terminal_job_error: RefCell::new(None),
@@ -2163,6 +2176,55 @@ impl ShellRuntime {
     pub fn memory_share(&self) -> f64 {
         let used = self.js_runtime.memory_usage().malloc_size.max(0) as f64;
         used / sandbox::memory_limit_bytes() as f64
+    }
+
+    /// Keeps QuickJS collecting reference cycles before the memory limit.
+    ///
+    /// Reference counting frees most values at once; values in a reference cycle
+    /// wait for a collection, which QuickJS starts when an object allocation
+    /// takes the heap past its threshold. After each collection it sets the next
+    /// threshold at 1.5 times the heap then, regardless of the memory limit, and
+    /// an allocation over the limit fails without collecting. So once a
+    /// collection runs with more than two thirds of the limit live, the next
+    /// threshold lies past the limit, no collection runs again, and cyclic
+    /// garbage stays until the app restarts: scripts run out of memory with most
+    /// of the heap garbage.
+    ///
+    /// Called after every drain, this lowers a threshold above
+    /// [`GC_CEILING_SHARE`] of the limit to that share, or to [`GC_STEP`] past
+    /// the heap when more is live, never closer to the limit than
+    /// [`GC_MARGIN`]. It never raises the threshold. QuickJS then collects at
+    /// most once a turn: its next threshold is past the limit again until the
+    /// next drain. So with the heap within [`GC_MARGIN`] of the limit, this
+    /// collects itself, letting the next turn start from its live data: at most
+    /// once per [`GC_STEP`] / 8 of growth since its last collection, as a heap
+    /// that hasn't grown since holds little new garbage.
+    /// Reading the threshold is cheap; the heap's size, which walks every
+    /// object, is read only when the threshold is above the ceiling.
+    pub(crate) fn keep_collecting(&self) {
+        let limit = sandbox::memory_limit_bytes();
+        let ceiling = (limit as f64 * GC_CEILING_SHARE) as usize;
+        // SAFETY: the context's runtime is this runtime, alive for `self`; reading
+        // its threshold has no other effect. Called outside any other `with`.
+        let threshold = self.context.with(|ctx| unsafe {
+            rquickjs::qjs::JS_GetGCThreshold(rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()))
+        }) as usize;
+        if threshold <= ceiling {
+            return;
+        }
+        let room = limit.saturating_sub(GC_MARGIN);
+        let mut used = self.js_runtime.memory_usage().malloc_size.max(0) as usize;
+        let forced_at = self.forced_gc_at.get().min(used);
+        self.forced_gc_at.set(forced_at);
+        if used > room && used >= forced_at + GC_STEP / 8 {
+            self.js_runtime.run_gc();
+            used = self.js_runtime.memory_usage().malloc_size.max(0) as usize;
+            self.forced_gc_at.set(used);
+        }
+        let cap = ceiling.max(used + GC_STEP).min(room);
+        if threshold > cap {
+            self.js_runtime.set_gc_threshold(cap);
+        }
     }
 
     pub(crate) fn global(cx: &App) -> Option<Rc<Self>> {
