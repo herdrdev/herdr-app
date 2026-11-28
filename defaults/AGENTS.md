@@ -864,6 +864,8 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `shortcut_hints`: `false` keeps keys out of button tooltips (default `true`;
+  Settings → Look). Tooltips made with `withShortcut()` then show only their label.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
@@ -1095,6 +1097,9 @@ Rules:
   running; don't start new long-lived work in `close`. This is best-effort,
   not a guarantee after a crash or forced termination.
 - Use `theme()` colors so the mod follows the user's theme.
+- Give every button a tooltip: `.tooltip(withShortcut("Split right", "pane.split:right"))`.
+  It adds the key bound to that action, read from keys.json, unless the person
+  turned `shortcut_hints` off. Give a key only when the button does exactly what it does.
 - **Animate natively, never with a timer.** Every redraw of a mod redraws
   the whole window, so `cx.timer.every(90, () => cx.notify())` for a
   spinner costs real battery. Use `.frames(["⠋", "⠙", …], 90)` (shows
@@ -1214,7 +1219,8 @@ All of it is in `herdr.d.ts`. In short:
   accent_foreground, solid and solid_foreground (a primary button),
   selection, working, blocked, done, idle, unknown, ansi0..15; light and
   dark themes name the same ones), `settings()` (with `dark`: the
-  appearance now), `keys()`, `commands()` (every app
+  appearance now), `keys()`, `withShortcut(label, action)` (a tooltip
+  with the bound key), `commands()` (every app
   command, its arguments and what it does), `layouts()` (the layout names).
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal

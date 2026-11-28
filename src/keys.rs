@@ -108,6 +108,74 @@ pub fn listing() -> Vec<(String, String, String)> {
     out
 }
 
+type Listing = Vec<(String, String, String)>;
+
+/// `listing()`, read again only when keys.json changes: tooltips ask for it on every render.
+pub fn listing_cached() -> Rc<Listing> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<(std::time::SystemTime, Rc<Listing>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let modified = std::fs::metadata(path()).and_then(|m| m.modified()).ok();
+    CACHE.with_borrow_mut(|cache| {
+        if let (Some(now), Some((then, list))) = (modified, cache.as_ref())
+            && now == *then
+        {
+            return list.clone();
+        }
+        let list = Rc::new(listing());
+        *cache = modified.map(|m| (m, list.clone()));
+        list
+    })
+}
+
+/// `label` and the key bound to `action`, for a tooltip: "Split right  ⌘D".
+/// The shown layout's section wins over `global`; unbound, just `label`.
+pub fn with_shortcut(listing: &[(String, String, String)], label: &str, action: &str, layout: Option<&str>, mac: bool) -> String {
+    let in_section = |section: &str| listing.iter().find(|(s, k, a)| s == section && a == action && !k.trim().is_empty());
+    let bound = layout.and_then(|name| in_section(&format!("layout:{name}"))).or_else(|| in_section("global"));
+    match bound {
+        Some((_, keys, _)) => format!("{label}  {}", display(keys, mac)),
+        None => label.to_owned(),
+    }
+}
+
+/// How a binding reads: `cmd-shift-d` is ⌘⇧D on macOS, `ctrl-shift-d` is Ctrl+Shift+D elsewhere.
+pub fn display(keys: &str, mac: bool) -> String {
+    const ORDER: [&str; 5] = ["ctrl", "alt", "shift", "cmd", "fn"];
+    let names: [&str; 5] = if mac { ["⌃", "⌥", "⇧", "⌘", "fn"] } else { ["Ctrl", "Alt", "Shift", "Super", "Fn"] };
+    keys.split_whitespace()
+        .map(|stroke| {
+            let (held, key) = match stroke.strip_suffix("--") {
+                Some(held) => (held, "-"),
+                None => stroke.rsplit_once('-').filter(|(_, k)| !k.is_empty()).unwrap_or(("", stroke)),
+            };
+            let mut on: Vec<&str> = held
+                .split('-')
+                .filter(|m| !m.is_empty())
+                .map(|m| match m.to_ascii_lowercase().as_str() {
+                    "secondary" if mac => "cmd",
+                    "secondary" => "ctrl",
+                    "super" | "win" | "cmd" => "cmd",
+                    "option" | "alt" => "alt",
+                    "control" | "ctrl" => "ctrl",
+                    "shift" => "shift",
+                    "fn" => "fn",
+                    _ => "",
+                })
+                .collect();
+            if key.len() == 1 && key.chars().all(|c| c.is_ascii_uppercase()) {
+                on.push("shift");
+            }
+            let mut chars = key.chars();
+            let key: String = chars.next().map(|first| first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect()).unwrap_or_default();
+            let mut parts: Vec<String> = ORDER.iter().zip(names).filter(|(m, _)| on.contains(m)).map(|(_, n)| n.to_owned()).collect();
+            parts.push(key);
+            parts.join(if mac { "" } else { "+" })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn path() -> std::path::PathBuf {
     crate::mods::app_dir().join("keys.json")
 }
@@ -427,5 +495,36 @@ mod tests {
         for keys in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
             assert_eq!(super::parse(keys).err(), None);
         }
+    }
+
+    #[test]
+    fn bindings_read_as_each_platform_writes_them() {
+        use super::display;
+        for (keys, mac, linux) in [
+            ("cmd-shift-d", "⇧⌘D", "Shift+Super+D"),
+            ("ctrl-shift-t", "⌃⇧T", "Ctrl+Shift+T"),
+            ("cmd--", "⌘-", "Super+-"),
+            ("shift-f2", "⇧F2", "Shift+F2"),
+            ("cmd-shift-enter", "⇧⌘Enter", "Shift+Super+Enter"),
+            ("ctrl-k ctrl-t", "⌃K ⌃T", "Ctrl+K Ctrl+T"),
+            ("secondary-t", "⌘T", "Ctrl+T"),
+            ("SUPER-Shift-t", "⇧⌘T", "Shift+Super+T"),
+            ("T", "⇧T", "Shift+T"),
+            ("-", "-", "-"),
+        ] {
+            assert_eq!(display(keys, true), mac, "{keys} on macOS");
+            assert_eq!(display(keys, false), linux, "{keys} elsewhere");
+        }
+    }
+
+    #[test]
+    fn a_tooltip_shows_the_key_the_shown_layout_uses() {
+        use super::with_shortcut;
+        let row = |s: &str, k: &str, a: &str| (s.to_owned(), k.to_owned(), a.to_owned());
+        let listing = [row("global", "ctrl-shift-d", "pane.split:right"), row("layout:terminals", "ctrl-alt-d", "pane.split:right"), row("terminal", "ctrl-shift-z", "pane.zoom")];
+        assert_eq!(with_shortcut(&listing, "Split right", "pane.split:right", Some("main"), false), "Split right  Ctrl+Shift+D");
+        assert_eq!(with_shortcut(&listing, "Split right", "pane.split:right", Some("terminals"), false), "Split right  Ctrl+Alt+D");
+        assert_eq!(with_shortcut(&listing, "Split down", "pane.split:down", Some("main"), false), "Split down");
+        assert_eq!(with_shortcut(&listing, "Zoom", "pane.zoom", None, false), "Zoom", "a terminal-only key is not the button's");
     }
 }

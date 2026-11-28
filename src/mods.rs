@@ -1357,6 +1357,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let list: Vec<Value> = crate::keys::listing().into_iter().map(|(s, k, a)| json!({ "section": s, "keys": k, "action": a })).collect();
             Ok(to_host(&Value::Array(list)))
         })
+        .function("withShortcut", |a| {
+            let label = a.string(0)?;
+            if !crate::settings::get().shortcut_hints {
+                return Ok(label.into());
+            }
+            let layout = with_shared(|s| s.values.get("layout").and_then(Value::as_str).map(str::to_owned));
+            Ok(crate::keys::with_shortcut(&crate::keys::listing_cached(), label, a.string(1)?, layout.as_deref(), cfg!(target_os = "macos")).into())
+        })
         .function("openOverlay", |a| {
             let mut spec = from_host(a.value(0)?);
             if spec.get("mod").is_none()

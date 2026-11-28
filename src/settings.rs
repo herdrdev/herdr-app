@@ -407,6 +407,9 @@ pub struct Person {
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
+    /// Button tooltips name the key bound to what they do.
+    #[serde(skip_serializing_if = "is_true")]
+    pub shortcut_hints: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -476,6 +479,7 @@ impl Default for Person {
             clipboard_write: true,
             copy_on_select: true,
             pane_scrollbars: true,
+            shortcut_hints: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -518,6 +522,8 @@ pub struct Settings {
     pub colors: BTreeMap<String, String>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     pub pane_scrollbars: bool,
+    /// Button tooltips name the key bound to what they do.
+    pub shortcut_hints: bool,
     /// Space between a terminal's edge and its text, in px: [x, y].
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
@@ -568,6 +574,7 @@ impl Default for Settings {
             dark: true,
             colors: BTreeMap::new(),
             pane_scrollbars: true,
+            shortcut_hints: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
@@ -612,6 +619,7 @@ impl Settings {
             dark,
             colors,
             pane_scrollbars: person.pane_scrollbars,
+            shortcut_hints: person.shortcut_hints,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
@@ -1070,6 +1078,16 @@ mod tests {
         let off: Person = serde_json::from_str(r#"{"clipboard_write":false}"#).unwrap();
         assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).clipboard_write);
         assert_eq!(serde_json::to_value(off).unwrap()["clipboard_write"], false);
+    }
+
+    #[test]
+    fn shortcut_hints_default_on_and_can_be_disabled() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.shortcut_hints);
+        assert!(Settings::default().shortcut_hints);
+        let off: Person = serde_json::from_str(r#"{"shortcut_hints":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).shortcut_hints);
+        assert_eq!(serde_json::to_value(off).unwrap()["shortcut_hints"], false);
     }
 
     #[test]

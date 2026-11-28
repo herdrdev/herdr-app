@@ -425,6 +425,12 @@ export function settings(): Record<string, unknown>;
 /** Every key binding: { section, keys, action }. */
 export function keys(): { section: string; keys: string; action: string }[];
 
+/** A button's tooltip: `label` and the key bound to `action`, written as in keys.json
+ *  (`"pane.split:right"`): "Split right  ⌘D" on macOS, "Split right  Ctrl+Shift+D" elsewhere.
+ *  The shown layout's section wins over `global`. Only `label` when no key does `action` or the
+ *  person set `shortcut_hints` to false. Live, like keys(). */
+export function withShortcut(label: string, action: string): string;
+
 export interface OverlaySpec {
   /** One mod, or `layout`. */
   mod?: string;
