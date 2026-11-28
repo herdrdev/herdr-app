@@ -5353,10 +5353,14 @@ fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, b
     if on.is_none() && cwd == home {
         return (none, false);
     }
+    // The C locale: in another, git's "not a git repository" below is translated.
     let args = ["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"].map(str::to_owned);
     let ran = match on {
-        Some(m) => mods::run_remote(m, "git", &args, None).ok().map(|(code, out, err)| (code == 0, out, err)),
-        None => crate::spawn::command("git").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
+        Some(m) => {
+            let args: Vec<String> = ["LC_ALL=C".to_owned(), "git".to_owned()].into_iter().chain(args).collect();
+            mods::run_remote(m, "env", &args, None).ok().map(|(code, out, err)| (code == 0, out, err))
+        }
+        None => crate::spawn::command("git").env("LC_ALL", "C").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
     };
     let Some((true, out, _)) = ran else {
         // Only git's own "no" means no repo; a failed run, a repo without commits
