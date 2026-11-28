@@ -2,7 +2,7 @@ use crate::input::EditorMode;
 use anyhow::Result;
 use gpui::{App, Context, EntityInputHandler, Pixels, Task, Window, px};
 use lsp_types::{
-    CompletionContext, CompletionItem, CompletionResponse, InlineCompletionContext,
+    CompletionContext, CompletionResponse, InlineCompletionContext,
     InlineCompletionItem, InlineCompletionResponse, InlineCompletionTriggerKind,
     request::Completion,
 };
@@ -10,6 +10,11 @@ use ropey::Rope;
 use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
 
 use crate::input::{InputBaseState, ShowCompletions};
+
+/// What a completion's word is made of.
+pub(crate) fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
 
 /// Default debounce duration for inline completions.
 const DEFAULT_INLINE_COMPLETION_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -151,24 +156,7 @@ impl InputBaseState<EditorMode> {
             return;
         }
 
-        // `trigger_start_offset` latches where the word a menu was opened for
-        // begins, so later keystrokes refine the same query instead of starting
-        // over at each character. It only describes this edit while the edit
-        // continues that word: the document between the latch and the edit
-        // must still read as a prefix of the last query. Deleting back into
-        // the word keeps it; typing somewhere else, or into a document that
-        // has since been replaced, starts a new query at this edit instead of
-        // handing the provider text the user never typed as a prefix.
-        let completion = &self.extras.context_menu_content.completion;
-        let latched = completion.trigger_start_offset.filter(|&latched| {
-            latched <= start
-                && start <= latched + completion.query.len()
-                && self.text.is_char_boundary(latched)
-                && self.text.is_char_boundary(start)
-                && completion
-                    .query
-                    .starts_with(self.text.slice(latched..start).to_string().as_str())
-        });
+        let latched = self.completion_word_start(start);
         let start_offset = latched.unwrap_or(start);
         if new_offset < start_offset {
             return;
@@ -183,6 +171,11 @@ impl InputBaseState<EditorMode> {
             )
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
+        let completion = &mut self.extras.context_menu_content.completion;
+        if latched.is_some() && completion.open && !completion.is_incomplete {
+            completion.query = query;
+            return;
+        }
         self.request_completions(
             provider,
             start_offset,
@@ -229,14 +222,7 @@ impl InputBaseState<EditorMode> {
         };
 
         let offset = self.cursor();
-        let word_len: usize = self
-            .text
-            .chars_at(offset)
-            .reversed()
-            .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
-            .map(char::len_utf8)
-            .sum();
-        let start_offset = offset - word_len;
+        let start_offset = self.completion_word_range().start;
         let query = self.text.slice(start_offset..offset).to_string();
 
         self.hide_context_menu(cx);
@@ -254,6 +240,64 @@ impl InputBaseState<EditorMode> {
             window,
             cx,
         );
+    }
+
+    /// Where the word the last completion request was for begins, if an edit
+    /// at `at` continues it.
+    ///
+    /// `trigger_start_offset` latches where the word a menu was opened for
+    /// begins, so later keystrokes refine the same query instead of starting
+    /// over at each character. It only describes an edit while the edit
+    /// continues that word: the document between the latch and the edit
+    /// must still read as a prefix of the last query. Deleting back into
+    /// the word keeps it; typing somewhere else, or into a document that
+    /// has since been replaced, starts a new query at the edit instead of
+    /// handing the provider text the user never typed as a prefix.
+    fn completion_word_start(&self, at: usize) -> Option<usize> {
+        let completion = &self.extras.context_menu_content.completion;
+        completion.trigger_start_offset.filter(|&latched| {
+            latched <= at
+                && at <= latched + completion.query.len()
+                && self.text.is_char_boundary(latched)
+                && self.text.is_char_boundary(at)
+                && completion
+                    .query
+                    .starts_with(self.text.slice(latched..at).to_string().as_str())
+        })
+    }
+
+    /// HERDR: whether typing `text` over `range` (pre-edit offsets) extends the
+    /// word the open menu is for. Such a keystroke leaves the menu up, its
+    /// items filtered by the longer word, so it doesn't blink out at every key
+    /// while the next answer is on its way.
+    pub(crate) fn typing_extends_completion(&self, range: &Range<usize>, text: &str) -> bool {
+        self.extras.context_menu_content.completion.open
+            && self.ime_marked_range.is_none()
+            && self.selections.is_single()
+            && range.is_empty()
+            && range.start == self.cursor()
+            && !text.is_empty()
+            && text.chars().all(is_word_char)
+            && self.completion_word_start(range.start).is_some()
+    }
+
+    /// The word around the caret: what completion filters by and replaces.
+    pub fn completion_word_range(&self) -> Range<usize> {
+        let cursor = self.cursor();
+        let before: usize = self
+            .text
+            .chars_at(cursor)
+            .reversed()
+            .take_while(|&ch| is_word_char(ch))
+            .map(char::len_utf8)
+            .sum();
+        let after: usize = self
+            .text
+            .chars_at(cursor)
+            .take_while(|&ch| is_word_char(ch))
+            .map(char::len_utf8)
+            .sum();
+        cursor - before..cursor + after
     }
 
     /// Record the word a menu is for and ask `provider` about the caret.
@@ -283,13 +327,11 @@ impl InputBaseState<EditorMode> {
         let provider_responses =
             provider.completions(&self.text, new_offset, completion_context, window, cx);
         self.extras.context_menu_task = cx.spawn_in(window, async move |editor, cx| {
-            let mut completions: Vec<CompletionItem> = vec![];
-            if let Some(provider_responses) = provider_responses.await.ok() {
-                match provider_responses {
-                    CompletionResponse::Array(items) => completions.extend(items),
-                    CompletionResponse::List(list) => completions.extend(list.items),
-                }
-            }
+            let (completions, is_incomplete) = match provider_responses.await.ok() {
+                Some(CompletionResponse::Array(items)) => (items, false),
+                Some(CompletionResponse::List(list)) => (list.items, list.is_incomplete),
+                None => (Vec::new(), false),
+            };
 
             editor
                 .update_in(cx, |editor, window, cx| {
@@ -303,9 +345,11 @@ impl InputBaseState<EditorMode> {
                         return;
                     }
 
-                    editor.extras.context_menu_content.completion.open = !completions.is_empty();
-                    editor.extras.context_menu_content.completion.items = completions;
-                    editor.extras.context_menu_content.completion.bump();
+                    let completion = &mut editor.extras.context_menu_content.completion;
+                    completion.open = !completions.is_empty();
+                    completion.items = completions;
+                    completion.is_incomplete = is_incomplete;
+                    completion.bump();
                     cx.notify();
                 })
                 .ok();

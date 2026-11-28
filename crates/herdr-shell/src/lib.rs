@@ -66,6 +66,8 @@ pub use input_tokens::{
     inline_token_hover_data, input_token_state_methods, textarea_token_state_methods,
 };
 pub(crate) mod dependencies;
+mod editor_language;
+mod editor_popups;
 pub mod dock;
 mod drag_paths;
 pub use drag_paths::DraggedPaths;

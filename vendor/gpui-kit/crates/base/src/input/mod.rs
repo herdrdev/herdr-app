@@ -107,11 +107,11 @@ pub(crate) use language_config::LanguageConfig;
 pub use language_config::{AutoClosingPair, BracketPair, IndentationRules};
 pub use lsp::{
     CodeActionItem, CodeActionMenuState, CodeActionProvider, CompletionMenuOptions,
-    CompletionMenuState, CompletionProvider, DefinitionProvider, DocumentColorProvider,
+    CompletionInsert, CompletionMenuState, CompletionProvider, DefinitionProvider, DocumentColorProvider,
     DocumentRangeSemanticTokensProvider, HoverPopoverState, HoverProvider, InputOverlayKind, Lsp,
-    ShowDocumentHandler,
+    OverlappingEdits, ShowDocumentHandler,
 };
-pub use lsp_types::Position;
+pub use lsp_types::{self, Position};
 pub use mask_pattern::MaskPattern;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]

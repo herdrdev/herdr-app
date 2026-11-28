@@ -123,6 +123,14 @@ impl InputModeKind for EditorMode {
         state.is_context_menu_open(cx)
     }
 
+    fn typing_extends_completion(
+        state: &InputBaseState<Self>,
+        range: &std::ops::Range<usize>,
+        text: &str,
+    ) -> bool {
+        state.typing_extends_completion(range, text)
+    }
+
     fn handle_context_menu_action(
         state: &mut InputBaseState<Self>,
         action: Box<dyn gpui::Action>,

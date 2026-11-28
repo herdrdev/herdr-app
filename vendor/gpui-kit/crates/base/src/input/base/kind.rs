@@ -289,6 +289,16 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
         false
     }
 
+    /// Whether typing `text` over `range` continues the open completion menu's
+    /// word, so the edit leaves the menu up instead of closing it.
+    fn typing_extends_completion(
+        _state: &InputBaseState<Self>,
+        _range: &std::ops::Range<usize>,
+        _text: &str,
+    ) -> bool {
+        false
+    }
+
     /// Lets an open menu consume the action first. Returns true when it did.
     fn handle_context_menu_action(
         _state: &mut InputBaseState<Self>,

@@ -10,7 +10,19 @@ pub struct CompletionMenuState {
     pub trigger_start_offset: Option<usize>,
     pub query: String,
     pub items: Vec<CompletionItem>,
+    /// HERDR: LSP's `isIncomplete`. A complete answer already holds every item
+    /// for a longer word, so typing on narrows it instead of asking again.
+    pub is_incomplete: bool,
     revision: u64,
+}
+
+/// HERDR: how an accepted completion treats the rest of the word after the caret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionInsert {
+    /// Leave it: LSP's `insert` range, Enter in IntelliJ.
+    Insert,
+    /// Overwrite it: LSP's `replace` range, Tab in IntelliJ.
+    Replace,
 }
 
 impl CompletionMenuState {
@@ -163,31 +175,50 @@ impl InputBaseState<EditorMode> {
         }
     }
 
+    /// Insert `item` over the word at the caret, or over the item's own range.
     pub fn insert_completion(
         &mut self,
         item: &CompletionItem,
-        fallback_range: Range<usize>,
+        how: CompletionInsert,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut range = fallback_range;
-        let mut new_text = item.label.clone();
-        if let Some(edit) = item.text_edit.as_ref() {
-            match edit {
-                lsp_types::CompletionTextEdit::Edit(edit) => {
-                    new_text.clone_from(&edit.new_text);
-                    range = self.text.position_to_offset(&edit.range.start)
-                        ..self.text.position_to_offset(&edit.range.end);
-                }
-                lsp_types::CompletionTextEdit::InsertAndReplace(edit) => {
-                    new_text.clone_from(&edit.new_text);
-                    range = self.text.position_to_offset(&edit.replace.start)
-                        ..self.text.position_to_offset(&edit.replace.end);
-                }
+        let cursor = self.cursor();
+        let offsets = |state: &Self, range: &lsp_types::Range| {
+            state.text.position_to_offset(&range.start)..state.text.position_to_offset(&range.end)
+        };
+        let (mut range, new_text) = match &item.text_edit {
+            Some(lsp_types::CompletionTextEdit::Edit(edit)) => {
+                (offsets(self, &edit.range), edit.new_text.clone())
             }
-        } else if let Some(insert_text) = item.insert_text.as_ref() {
-            new_text.clone_from(insert_text);
-            range = range.end..range.end;
+            Some(lsp_types::CompletionTextEdit::InsertAndReplace(edit)) => {
+                let range = match how {
+                    CompletionInsert::Insert => &edit.insert,
+                    CompletionInsert::Replace => &edit.replace,
+                };
+                (offsets(self, range), edit.new_text.clone())
+            }
+            None => {
+                let word = self.completion_word_range();
+                let range = match how {
+                    CompletionInsert::Insert => word.start..cursor,
+                    CompletionInsert::Replace => word,
+                };
+                let text = item.insert_text.as_ref().unwrap_or(&item.label);
+                (range, text.clone())
+            }
+        };
+        // HERDR: the item may answer for fewer keys than were typed since, and
+        // those keys belong to the word it replaces.
+        if range.start <= range.end
+            && range.end < cursor
+            && self
+                .text
+                .slice(range.end..cursor)
+                .chars()
+                .all(is_word_char)
+        {
+            range.end = cursor;
         }
         self.completion_inserting = true;
         let range = self.range_to_utf16(&range);

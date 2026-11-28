@@ -225,6 +225,36 @@ impl DiagnosticSet {
         }
     }
 
+    // HERDR: the server answers a while after the edit, so until it does the
+    // squiggles follow the text they were reported on instead of vanishing.
+    // A diagnostic the edit deleted entirely is dropped; the server's own
+    // `range` is kept as reported, since that is what it matches a code action
+    // request against.
+    pub fn adjust_for_edit(&mut self, edited: &Range<usize>, inserted_len: usize, text: &Rope) {
+        self.text = text.clone();
+        let mut adjusted = SumTree::new(&());
+        for entry in self.diagnostics.iter() {
+            let deleted = if entry.range.is_empty() {
+                edited.start < entry.range.start && entry.range.start < edited.end
+            } else {
+                edited.start <= entry.range.start && entry.range.end <= edited.end
+            };
+            if deleted {
+                continue;
+            }
+            let range =
+                super::decorations::adjust_range_for_edit(&entry.range, edited, inserted_len);
+            adjusted.push(
+                DiagnosticEntry {
+                    range,
+                    diagnostic: entry.diagnostic.clone(),
+                },
+                &(),
+            );
+        }
+        self.diagnostics = adjusted;
+    }
+
     pub fn len(&self) -> usize {
         self.diagnostics.summary().count
     }

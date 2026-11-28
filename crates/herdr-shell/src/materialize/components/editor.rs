@@ -38,6 +38,7 @@ pub(in crate::materialize) fn editor(
     let font_size = font_size
         .map(crate::value::scaled_px)
         .unwrap_or(typography.mono_md.size);
+    let popups = runtime.entities().editor_popups(handle);
     let focus_target = state.clone();
     let mut frame = InputBase::new(("gpui-shell-editor", handle))
         .flex()
@@ -54,5 +55,8 @@ pub(in crate::materialize) fn editor(
     frame.extend(children);
     let frame = with_hover(frame, &states);
     let frame = with_active_and_focus(frame, &states);
-    frame.child(Editor::new(&state)).into_any_element()
+    frame
+        .child(Editor::new(&state))
+        .children(popups)
+        .into_any_element()
 }

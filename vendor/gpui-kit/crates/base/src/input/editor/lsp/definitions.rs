@@ -107,6 +107,11 @@ impl InputBaseState<EditorMode> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.go_to_definition_at_cursor(window, cx);
+    }
+
+    /// Follow the symbol at the caret, without needing a keybinding.
+    pub fn go_to_definition_at_cursor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let offset = self.cursor();
         // A keyboard action must also work before the symbol has been hovered.
         let Some(provider) = self.extras.lsp.definition_provider.clone() else {
@@ -177,23 +182,31 @@ impl InputBaseState<EditorMode> {
 
         // Give the host a chance to show the document first (window/showDocument),
         // e.g. to open virtual/external documents (stdlib docs) in an app window.
+        let params = lsp_types::ShowDocumentParams {
+            uri: location.target_uri.clone(),
+            external: Some(external),
+            take_focus: Some(true),
+            selection: Some(location.target_selection_range),
+        };
         if let Some(handler) = self.extras.lsp.show_document.clone() {
-            let params = lsp_types::ShowDocumentParams {
-                uri: location.target_uri.clone(),
-                external: Some(external),
-                take_focus: Some(true),
-                selection: Some(location.target_selection_range),
-            };
             if handler(&params, window, cx) {
                 return;
             }
         }
+        self.show_document_default(&params, cx);
+    }
 
-        if external {
-            cx.open_url(&location.target_uri.to_string());
-        } else {
-            // Move to the location.
-            let target_range = location.target_selection_range;
+    /// What Go to Definition does when no host hook has shown the document:
+    /// `external` URIs open in the browser, anything else jumps within this
+    /// document.
+    pub fn show_document_default(
+        &mut self,
+        params: &lsp_types::ShowDocumentParams,
+        cx: &mut Context<Self>,
+    ) {
+        if params.external == Some(true) {
+            cx.open_url(&params.uri.to_string());
+        } else if let Some(target_range) = params.selection {
             let start = self.text.position_to_offset(&target_range.start);
             let end = self.text.position_to_offset(&target_range.end);
 
@@ -213,7 +226,12 @@ impl InputBaseState<EditorMode> {
             return None;
         };
 
-        let mut highlight_style = editor.editor_style.highlight_styles.style("link_text")?;
+        // HERDR: a palette needn't name this; the underline is what says clickable.
+        let mut highlight_style = editor
+            .editor_style
+            .highlight_styles
+            .style("link_text")
+            .unwrap_or_default();
 
         highlight_style.underline = Some(UnderlineStyle {
             thickness: px(1.),

@@ -1194,6 +1194,24 @@ indent and the spacing of the indent guides. Set `hard_tabs: true` to insert
 literal tabs. The text renderer chooses the displayed width of tab characters.
 Once a file's style is known, call `state.set_tab_size(4, false)`.
 A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+A code editor's language features are the mod's to answer, in LSP's own JSON, so
+a language server's responses pass through unchanged:
+`EditorState.new({ lsp: { hover, completion, completion_triggers,
+completion_accepted, definition, code_actions, perform_code_action, show_document } })`.
+Each handler is `(params, cx)` and returns the answer or a promise of it; `params`
+are the request's without `textDocument`. The editor draws the hover and the menus
+(up, down; enter keeps the rest of the word after the caret, tab replaces it, as
+LSP's `insert` and `replace` ranges do; ctrl+. or cmd+. for code actions) and
+follows definitions (ctrl- or cmd-click). A complete completion list
+(`isIncomplete: false`) is filtered as the word grows without asking again, so
+advertise `insertReplaceSupport` and return `isIncomplete` as the server does.
+The state also has `set_diagnostics(list)`,
+`set_semantic_tokens([{ range, type }])`, `apply_edits(edits)`, `cursor()`,
+`selection()`, `set_cursor(position)`, `set_selection(range)`,
+`on("cursor", ({ position, selection }, cx) => …)`, and for your own keys
+`show_completions()`, `show_code_actions()`, `go_to_definition()`. Positions count
+code points, LSP's `utf-32`: ask the server for it in `general.positionEncodings`.
+Don't advertise `snippetSupport`: the editor inserts text as it comes.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

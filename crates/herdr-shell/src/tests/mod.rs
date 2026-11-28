@@ -8,6 +8,7 @@
 
 mod benchmark;
 mod dock;
+mod editor_lsp;
 mod fs;
 mod host_api;
 mod http_request;

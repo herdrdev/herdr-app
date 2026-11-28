@@ -427,7 +427,7 @@ impl<T: TrackedDecoration> DecorationCollections<T> {
     }
 }
 
-fn adjust_range_for_edit(
+pub(super) fn adjust_range_for_edit(
     range: &Range<usize>,
     edited_range: &Range<usize>,
     inserted_len: usize,

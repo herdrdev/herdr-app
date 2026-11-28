@@ -955,6 +955,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.mode.ensure_highlighter_factory(factory);
     }
 
+    /// The style painting uses now, with unset colours resolved from the palette.
+    pub fn editor_style(&self) -> &InputEditorStyle {
+        &self.editor_style
+    }
+
     pub fn set_editor_style(&mut self, style: InputEditorStyle) {
         self.editor_style = style.clone();
         self.projected_editor_style = style;
@@ -985,6 +990,13 @@ impl<M: InputModeKind> InputBaseState<M> {
     #[inline]
     pub fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
         self.mode.diagnostics_mut()
+    }
+
+    fn adjust_diagnostics(&mut self, edited: &Range<usize>, inserted_len: usize) {
+        let text = self.text.clone();
+        if let Some(diagnostics) = self.mode.diagnostics_mut() {
+            diagnostics.adjust_for_edit(edited, inserted_len, &text);
+        }
     }
 
     /// Set placeholder
@@ -3571,10 +3583,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if M::is_context_menu_open(self, cx) {
-            return;
-        }
-
+        // HERDR: no early return for an open menu, which assumed the menu takes
+        // the keyboard. Herdr's popups never do, so a blur means the person left.
         M::hide_context_menu(self, cx);
         self.undo_manager.break_transaction_coalescing();
 
@@ -3865,6 +3875,20 @@ impl<M: InputModeKind> InputBaseState<M> {
         // Every edit invalidates provider responses for the previous document,
         // including deletion and indentation which do not trigger completion.
         M::hide_context_menu(self, cx);
+        self.apply_text_edits(edits, window, cx);
+    }
+
+    /// HERDR: [`Self::replace_text_in_ranges`] without closing the context
+    /// menu, for a keystroke that extends the completion menu's word.
+    fn apply_text_edits(
+        &mut self,
+        edits: &[(Range<usize>, String)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_editable() || edits.is_empty() {
+            return;
+        }
         M::clear_inline_completion(self, cx);
 
         // Sort descending by start so applying front-of-vec first edits the
@@ -3934,6 +3958,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             self.text.replace(range.clone(), new_text);
 
             M::adjust_annotations(self, range, new_text.len());
+            self.adjust_diagnostics(range, new_text.len());
             recorded |= self.push_history(
                 &old_text,
                 range,
@@ -3990,9 +4015,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
 
         // One observable update per batch instead of one per edit.
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
         M::refresh_language_features(self, window, cx);
         self.update_search(cx);
 
@@ -4253,6 +4275,10 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                         vec![selection_before],
                         self.selections.iter().copied().collect(),
                     );
+                } else if !self.silent_replace_text
+                    && M::typing_extends_completion(self, &range, new_text)
+                {
+                    self.apply_text_edits(&[(range.clone(), new_text.to_string())], window, cx);
                 } else {
                     self.replace_text_in_ranges(
                         &[(range.clone(), new_text.to_string())],
@@ -4312,8 +4338,12 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             // Masking rewrites the whole document, so ranges recorded against
             // the old text no longer point at anything.
             M::reset_annotations(self);
+            if let Some(diagnostics) = self.mode.diagnostics_mut() {
+                diagnostics.reset(&self.text)
+            }
         } else {
             M::adjust_annotations(self, &range, new_text.len());
+            self.adjust_diagnostics(&range, new_text.len());
         }
         if mask_changed {
             // A segment-based history entry no longer matches the masked
@@ -4336,9 +4366,6 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                 selection_before,
                 None,
             );
-        }
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
         }
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
@@ -4455,9 +4482,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         }
 
         M::adjust_annotations(self, &range, new_text.len());
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
+        self.adjust_diagnostics(&range, new_text.len());
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
