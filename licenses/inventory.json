@@ -3,6 +3,9 @@
     "Cargo.lock",
     "Cargo.toml",
     "crates/ghostty-sys/Cargo.toml",
+    "crates/herdr-shell/Cargo.toml",
+    "crates/herdr-shell/LICENSE-APACHE",
+    "crates/herdr-shell/rquickjs-compat/Cargo.toml",
     "defaults/icons/LICENSES.md",
     "vendor/gpui-kit/Cargo.toml",
     "vendor/gpui-kit/LICENSE-APACHE",
@@ -11,8 +14,6 @@
     "vendor/gpui-kit/crates/base/examples/native/Cargo.toml",
     "vendor/gpui-kit/crates/base/examples/wasm/Cargo.toml",
     "vendor/gpui-kit/crates/fps/Cargo.toml",
-    "vendor/gpui-kit/crates/shell/Cargo.toml",
-    "vendor/gpui-kit/crates/shell/rquickjs-compat/Cargo.toml",
     "vendor/gpui-pre-apple/Cargo.toml",
     "vendor/gpui-pre-apple/LICENSE-APACHE",
     "vendor/gpui-pre-linux/Cargo.toml",
@@ -49,6 +50,13 @@
       "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a",
       "files": [
         "vendor/ghostty/LICENSE"
+      ]
+    },
+    {
+      "name": "gpui-kit shell (origin of crates/herdr-shell)",
+      "source": "https://github.com/longbridge/gpui-kit/tree/1ccf011/crates/shell",
+      "files": [
+        "crates/herdr-shell/LICENSE-APACHE"
       ]
     },
     {

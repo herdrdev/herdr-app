@@ -77,7 +77,10 @@ export function playSound(sound: string): null;
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
- *   terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *   terminal.send_key {keys: string, terminal?} (one key in keys.json syntax, default: focused terminal, encoded in its current keyboard mode).
+ *   terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *     With to, the view follows the exact moving end. Line mode with to covers whole screen rows,
+ *     including blank and soft-wrapped rows. Without to, word and line act like double and triple click.
  *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
  *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
@@ -185,6 +188,10 @@ export interface AgentInfo {
   /** "done" means it finished while you weren't looking; it becomes "idle" once you look
    *  (here or on another Herdr client). */
   status: Status;
+  /** Epoch milliseconds when the agent's reported state last changed.
+   *  Looking at a done agent leaves this alone. Null if the core omits the initial
+   *  time (as with older cores for remote agents). */
+  since: number | null;
   /** What the agent reported (OSC 7501 `app`), e.g. "claude-code", "pi", "codex". */
   app: string | null;
   program: Program;
@@ -259,6 +266,16 @@ export function setAgentOrder(addresses: string[]): null;
  *  not on cursor motion or output. Start at the cursor with terminal.select and read selection.end. Live. */
 export function terminals(): (Record<string, any> & TerminalSelectionState)[];
 
+/** Reads up to 128 rows from an attached terminal view, or returns null without a view.
+ *  from and count are nonnegative whole numbers. Row numbers match TerminalCell.
+ *  total includes the active screen. wrapped means the row wraps onto the next.
+ *  Empty cells have text ""; wide graphemes occupy two columns. Wide-character spacer
+ *  cells are omitted. Reads do not subscribe to output. */
+export function terminalRows(terminal: string, from: number, count: number): {
+  total: number;
+  rows: { cells: { text: string; wide: boolean }[]; wrapped: boolean }[];
+} | null;
+
 /** Zero-based cells. Rows count from the oldest retained history through the active screen.
  *  Output preserves positions until history is pruned or the grid reflows. */
 export interface TerminalCell { row: number; col: number; }
@@ -314,7 +331,7 @@ export function window(): {
   fullscreen: boolean;
   active: boolean;
   visible: boolean;
-};
+} | null;
 
 /** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
  *  call wins, whichever mod made it; null restores "Herdr". It doesn't outlive the app, so set it

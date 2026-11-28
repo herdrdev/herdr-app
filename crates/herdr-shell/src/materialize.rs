@@ -2825,6 +2825,12 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_window_mouse_up_middle" => {
                     behavior.on_window_mouse_up.push((MouseButton::Middle, *id))
                 }
+                "on_window_mouse_up_back" => behavior
+                    .on_window_mouse_up
+                    .push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_window_mouse_up_forward" => behavior
+                    .on_window_mouse_up
+                    .push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
