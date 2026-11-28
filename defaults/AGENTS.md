@@ -1167,6 +1167,13 @@ Positions are in window pixels, with `local_position` relative to the
 element's box. Track a left drag while `pressed_button === "left"`. If it
 ends outside the window without a release event, cancel on the next move
 that reports no left button.
+`.on_modifiers_changed` fires only on the keyboard focus path, which a
+terminal usually holds. To react to a held modifier anywhere in the window
+(show the numbers for `cmd-1`…`cmd-9` while Cmd is held), use
+`.on_window_modifiers_changed((e, cx) => …)` on a plain layout element.
+`e.modifiers` has `platform` (Cmd on macOS), `control`, `alt`, `shift` and
+`function`. When the window loses focus with modifiers held, it reports
+none held, since the release happens in another app.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text states (`InputState`, `TextareaState`, `EditorState`) take the

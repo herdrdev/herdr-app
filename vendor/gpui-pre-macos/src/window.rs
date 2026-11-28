@@ -3150,11 +3150,14 @@ extern "C" fn window_did_change_screen(this: &Object, _: Sel, _: id) {
 extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
-    let lock = window_state.lock();
+    let mut lock = window_state.lock();
     let is_active = unsafe { lock.native_window.isKeyWindow() == YES };
 
     // AppKit also unhides the cursor on activation changes, so mirror that here.
     lock.cursor_visible.store(true, Ordering::Relaxed);
+    // Modifier changes while the window isn't key never reach it, so the next
+    // change must not be compared against a stale one (Cmd-Tab away and back).
+    lock.previous_modifiers_changed_event = None;
 
     // When opening a pop-up while the application isn't active, Cocoa sends a spurious
     // `windowDidBecomeKey` message to the previous key window even though that window

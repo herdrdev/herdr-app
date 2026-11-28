@@ -1110,7 +1110,7 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     on: boolean;
   }
 
-  /** What an `on_modifiers_changed` handler receives. */
+  /** What an `on_modifiers_changed` or `on_window_modifiers_changed` handler receives. */
   export interface ModifiersChangedEvent {
     modifiers: Modifiers;
     capslock: Capslock;
@@ -1449,6 +1449,15 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_key_up<Self extends Element>(this: Self, handler: (event: KeyEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_modifiers_changed`, on the keyboard focus path. */
     on_modifiers_changed<Self extends Element>(this: Self,
+      handler: (event: ModifiersChangedEvent, cx: Context) => void,
+    ): Self;
+    /**
+     * Every modifier change in the window, whatever has keyboard focus,
+     * including while a terminal is typed in. When the window loses focus with
+     * modifiers held, reports none held. Passive observer. Use on div, h_flex,
+     * or v_flex.
+     */
+    on_window_modifiers_changed<Self extends Element>(this: Self,
       handler: (event: ModifiersChangedEvent, cx: Context) => void,
     ): Self;
     /**
@@ -4154,6 +4163,7 @@ mod tests {
         "on_key_down",
         "on_key_up",
         "on_modifiers_changed",
+        "on_window_modifiers_changed",
         "on_mouse_down",
         "on_mouse_up",
         "on_window_mouse_up",

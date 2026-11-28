@@ -609,6 +609,85 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn window_modifier_changes_reach_a_mod_while_another_element_has_focus(cx: &mut TestAppContext) {
+    use gpui::{FocusHandle, InteractiveElement as _, Modifiers, ParentElement as _, Styled as _, px};
+
+    // Like a terminal: it holds keyboard focus and stops modifier changes on the focus path.
+    struct FocusedTerminal(FocusHandle, gpui::Entity<ShellRoot>);
+
+    impl Render for FocusedTerminal {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full()
+                .child(self.1.clone())
+                .child(gpui::div().size_full().track_focus(&self.0)
+                    .on_modifiers_changed(|_, _, cx| cx.stop_propagation()))
+        }
+    }
+
+    cx.update(herdr_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { note } from "fixture";
+const held = (m) => ["control", "alt", "shift", "platform"].filter((k) => m[k]).join("+") || "none";
+export default class extends View {
+  render() {
+    const hint = div().id("hint").w(100).h(30)
+      .on_modifiers_changed((e) => note(`focus path ${held(e.modifiers)}`));
+    return this.done ? hint : hint.on_window_modifiers_changed((e, cx) => {
+      note(held(e.modifiers));
+      if (e.modifiers.shift) {
+        this.done = true;
+        cx.notify();
+      }
+    });
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let calls = log.clone();
+    herdr_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        let root = runtime.try_load(&fixture.0, window, cx).unwrap();
+        FocusedTerminal(cx.focus_handle(), root)
+    });
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.simulate_resize(gpui::size(px(400.), px(400.)));
+    visual.update(|window, cx| {
+        window.activate_window();
+        let focus = window.root::<FocusedTerminal>().flatten().unwrap().read(cx).0.clone();
+        window.focus(&focus, cx);
+    });
+    let draw = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+    };
+    draw(&mut visual);
+
+    let cmd = Modifiers { platform: true, ..Default::default() };
+    visual.simulate_modifiers_change(cmd);
+    visual.simulate_modifiers_change(Modifiers::default());
+    visual.simulate_modifiers_change(cmd);
+    // Cmd-Tab: the release happens in another app.
+    visual.deactivate_window();
+    assert_eq!(*log.borrow(), ["platform", "none", "platform", "none"]);
+    visual.update(|window, _| window.activate_window());
+    visual.run_until_parked();
+    // Already reported: no repeat.
+    visual.simulate_modifiers_change(Modifiers::default());
+    visual.simulate_modifiers_change(Modifiers { control: true, alt: true, ..Default::default() });
+    visual.simulate_modifiers_change(Modifiers { shift: true, ..Default::default() });
+    draw(&mut visual);
+    visual.simulate_modifiers_change(cmd);
+
+    assert_eq!(*log.borrow(), ["platform", "none", "platform", "none", "control+alt", "shift"]);
+}
+
+#[gpui::test]
 fn mod_run_rejects_unknown_arguments_before_queueing_a_command(cx: &mut TestAppContext) {
     cx.update(herdr_shell::init);
     let fixture = Fixture::new(r#"
