@@ -8472,6 +8472,8 @@ impl ShellRuntime {
                     ("on_mouse_down", "forward") => "on_mouse_down_forward",
                     ("on_mouse_up", "back") => "on_mouse_up_back",
                     ("on_mouse_up", "forward") => "on_mouse_up_forward",
+                    ("on_window_mouse_up", "back") => "on_window_mouse_up_back",
+                    ("on_window_mouse_up", "forward") => "on_window_mouse_up_forward",
                     (_, other) => {
                         return Err(Exception::throw_type(
                             ctx,

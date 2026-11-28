@@ -126,6 +126,8 @@ the highlighted line shows where it will land.
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
+  The + menu opens agents in unnamed tabs. The tab bar follows the
+  agent and shows the shell again after exit. Double-click a tab to set its name.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
@@ -628,7 +630,8 @@ The main ones:
   the nearest border along that axis by px, default 40, as a drag would; a keyboard
   resize mode is a mod that runs it on h/j/k/l).
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
-  selected); on the zoomed pane it unzooms and focus stays.
+  selected); on the zoomed pane it unzooms and focus stays. A tab with one
+  pane doesn't zoom, and a zoom ends when its tab is back to one pane.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
@@ -645,6 +648,8 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
   Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
   children and keeps children started with `--outlive-parent` running.
+  On cores older than 0.1.13, Herdr ends hidden children too, stopping at
+  children with a pane or `herdr.space` label.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
@@ -661,6 +666,9 @@ The main ones:
   Windows, clipboard text is pasted; otherwise Ctrl+V goes to the program, which
   reads the clipboard itself). TIFF and BMP clipboard
   images are converted to PNG before sending,
+  `terminal.send_key {keys, terminal?}` (one key in keys.json syntax, defaulting to
+  the focused terminal; requires an attached view and uses the terminal's current
+  keyboard mode and typing connection),
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu),
@@ -668,8 +676,11 @@ The main ones:
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
   there is no history, so nothing moves),
-  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
-  (replaces the selection, at the program's cursor by default; word/line act like double/triple click),
+  `terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"}`
+  replaces the selection, starting at the program's cursor by default.
+  With `to`, the view follows the exact moving end. Line mode with `to` covers whole screen
+  rows, including blank and soft-wrapped rows. Without `to`, word and line still act like
+  double and triple click.
   `terminal.adjust_selection {terminal?, direction}` (left, right, up, down, page_up, page_down,
   home, end, line_start, line_end; moves the selection's end and follows it in the view;
   fails with no selection), `terminal.clear_selection {terminal?}`.
@@ -690,6 +701,7 @@ The main ones:
   releasing stops it. Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). A drag stays with the terminal where it
   started, including its release outside the pane; other panes don't receive it.
+  Shift+click with a selection moves its end to the clicked cell, keeping its start.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
@@ -987,8 +999,10 @@ names the clicked terminal and its machine, cwd, pane, tab and space.
 `link.raw` keeps the original text or the OSC 8 destination. `link.path` is
 null for remote, unresolved or non-UTF-8 paths. Plain paths can carry a
 `:line` or `:line:column` suffix, exposed as optional 1-based `link.line` and
-`link.column`. A column needs a valid line. Herdr keeps a verified literal
-filename intact and can report coordinates even when `link.path` is null.
+`link.column`. Line ranges (`:5-12`, `#L5-L12`, `#L5-12`) and anchors (`#L5`)
+set `link.line` to the first line. A column needs a valid line. Herdr keeps a
+verified literal filename intact and can report coordinates even when
+`link.path` is null.
 File URIs have no coordinates. Herdr can verify their local paths when the
 host is empty or `localhost`. A link handler starts without opening a view
 and shares `localStorage` with views of the same mod with null props.
@@ -1190,9 +1204,10 @@ All of it is in `herdr.d.ts`. In short:
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
-  `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
-  once someone looks at it on any Herdr client), `terminals()`
-  (every core terminal), `focused()`, `layout()`, `theme()` (every color by
+  `agents()` (status, app, space, tab, pinned, focused and `since`, which is
+  null when the initial time is unknown and stays the same when looking at a
+  "done" agent on any Herdr client turns it "idle"), `terminals()` (every core
+  terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
   input (a stronger border), foreground, muted, dim, accent,
@@ -1208,6 +1223,9 @@ All of it is in `herdr.d.ts`. In short:
   the keyboard is reported the same way; pane commands without a `pane` still act on
   the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
+  `terminalRows(terminal, from, count)` reads up to 128 terminal rows with their cell
+  text, widths and wraps for copy-mode motions and searches, or returns null without
+  an attached view. Reading rows does not subscribe to terminal output.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
 - Floating: `placement()` (null unless this copy floats).
