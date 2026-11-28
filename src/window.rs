@@ -2293,10 +2293,16 @@ impl AppWindow {
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
-        view.update(cx, |v, _| {
+        let program = self.live.get(addr).and_then(|r| r.pointer("/program/key")).and_then(Value::as_str).unwrap_or_default().to_owned();
+        view.update(cx, |v, cx| {
             v.cwd = cwd;
             v.link_handlers = self.link_handlers.clone();
             v.right_click_to_program = to_program;
+            // `program:<key>` key sections follow it: redraw so the key context does too.
+            if v.program != program {
+                v.program = program;
+                cx.notify();
+            }
         });
     }
 

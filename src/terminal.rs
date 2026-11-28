@@ -57,6 +57,17 @@ pub(crate) fn grid_size(bounds: Size<Pixels>, cell: Size<Pixels>) -> (u16, u16) 
     (cols, rows)
 }
 
+/// `Terminal program = <key>`, built rather than parsed (a key like `a.b` would hang
+/// gpui's parser). Without a key yet, plain `Terminal`.
+fn key_context(program: &str) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add("Terminal");
+    if !program.is_empty() {
+        context.set("program", program.to_owned());
+    }
+    context
+}
+
 pub fn hsla(c: Rgb) -> Hsla {
     Rgba { r: c.0 as f32 / 255.0, g: c.1 as f32 / 255.0, b: c.2 as f32 / 255.0, a: 1.0 }.into()
 }
@@ -169,6 +180,8 @@ pub struct TerminalView {
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
+    /// What runs in it now, as programs.json names it (`nvim`): `program:<key>` key sections.
+    pub program: String,
     /// Files on their way to this terminal's machine for over a second: what
     /// the pane says meanwhile, by send.
     sending: Vec<(u64, &'static str)>,
@@ -321,6 +334,7 @@ impl TerminalView {
             link_handlers: Rc::default(),
             link: None,
             right_click_to_program: false,
+            program: String::new(),
             sending: Vec::new(),
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
@@ -2577,7 +2591,7 @@ impl Render for TerminalView {
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
             .track_focus(&self.focus)
-            .key_context("Terminal")
+            .key_context(key_context(&self.program))
             .size_full()
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
