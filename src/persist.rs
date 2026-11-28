@@ -21,6 +21,12 @@ pub(crate) fn resolve_target(path: &Path) -> std::io::Result<PathBuf> {
     Err(std::io::Error::other("Too many symlinks"))
 }
 
+/// The text without a leading UTF-8 byte-order mark, which some Windows
+/// editors write. JSON parsers reject the mark.
+pub(crate) fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 pub fn write_atomic(path: &Path, body: impl AsRef<[u8]>) -> std::io::Result<()> {
     let target = resolve_target(path)?;
     let path = target.as_path();
