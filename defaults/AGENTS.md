@@ -424,6 +424,10 @@ The tab block says how each pane of the shown tab is wrapped:
   mod keeps its divider on the terminal-facing edge and reads the frame
   position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
+  Set `"focus_lone": false` in the pane frame to keep the regular border
+  when the tab has one pane or a pane is zoomed. The header and the rest
+  of the frame still show. By default the focus line shows whenever a
+  framed pane has the keyboard.
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
 

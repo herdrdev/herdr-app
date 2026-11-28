@@ -12,8 +12,28 @@ pub(super) fn padding(n: &Node) -> (f32, f32) {
     n.padding.map_or((0.0, 0.0), |p| p.axes())
 }
 
-pub(super) fn frame_border(frame: &PaneFrame, focused: bool) -> Option<&Line> {
-    if focused { frame.focus.as_ref().or(frame.border.as_ref()) } else { frame.border.as_ref() }
+#[derive(Clone, Copy)]
+pub(super) struct TabFrame<'a> {
+    pub(super) style: &'a PaneFrame,
+    show_focus: bool,
+}
+
+impl<'a> TabFrame<'a> {
+    pub(super) fn new(style: &'a PaneFrame, panes: usize, shown: &Node) -> Option<Self> {
+        let split = panes > 1;
+        (style.lone || split).then_some(Self {
+            style,
+            show_focus: style.focus_lone.unwrap_or(true) || (split && !shown.is_pane()),
+        })
+    }
+
+    pub(super) fn border(self, focused: bool) -> Option<&'a Line> {
+        if focused && self.show_focus {
+            self.style.focus.as_ref().or(self.style.border.as_ref())
+        } else {
+            self.style.border.as_ref()
+        }
+    }
 }
 
 pub(super) fn header_height(header: &Header) -> f32 {
@@ -117,17 +137,84 @@ fn block_bounds(n: &Node, bounds: Bounds<Pixels>, target: &str, frame: Option<&P
     }
 }
 
-fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
-    let bounds = block_bounds(n, Bounds::new(Point::default(), size), target, frame, focused, zoom)?;
+fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<TabFrame<'_>>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+    let bounds = block_bounds(n, Bounds::new(Point::default(), size), target, frame.map(|f| f.style), focused, zoom)?;
     let n = n.find(target)?;
     let (y, x) = padding(n);
     let mut size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
     if let Some(frame) = frame.filter(|_| n.is_pane()) {
-        let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
-        let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
+        let border = frame.border(focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+        let header = frame.style.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
         size = inset(size, 2.0 * border, 2.0 * border + header);
     }
     Some(size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TabFrame, pane_size};
+    use crate::layout::{Axis, Content, Line, Node, PaneFrame};
+    use crate::model::Tab;
+    use gpui::px;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    #[test]
+    fn a_single_pane_uses_the_resting_border_and_keeps_its_header() {
+        let mut style: PaneFrame = serde_json::from_value(json!({
+            "lone": true,
+            "focus_lone": false,
+            "focus": { "width": 3, "color": "accent" },
+            "header": { "height": 10, "content": { "mod": "pane" } }
+        })).unwrap();
+        let tab = Tab::new("tab", "", "a", "t1");
+        let size = gpui::size(px(100.), px(80.));
+        let focused = HashSet::from(["a".into()]);
+        let inner = |frame: TabFrame<'_>| pane_size(&tab.root, size, "a", Some(frame), &focused, 1.).unwrap();
+
+        let frame = TabFrame::new(&style, 1, tab.shown()).unwrap();
+        assert!(frame.border(true).is_none());
+        assert_eq!(inner(frame), gpui::size(px(100.), px(70.)));
+
+        style.border = Some(Line { width: 3., color: "border".into() });
+        let frame = TabFrame::new(&style, 1, tab.shown()).unwrap();
+        assert_eq!(frame.border(true).unwrap().color, "border");
+        assert_eq!(inner(frame), gpui::size(px(94.), px(64.)));
+
+        style.focus_lone = None;
+        let frame = TabFrame::new(&style, 1, tab.shown()).unwrap();
+        assert_eq!(frame.border(true).unwrap().color, "accent");
+        assert_eq!(inner(frame), gpui::size(px(94.), px(64.)));
+    }
+
+    #[test]
+    fn the_focus_line_can_show_only_in_an_unzoomed_split() {
+        let mut style: PaneFrame = serde_json::from_value(json!({
+            "focus_lone": false,
+            "focus": { "width": 3, "color": "accent" }
+        })).unwrap();
+        let mut tab = Tab::new("tab", "", "a", "t1");
+        let other = Node::block("b", Content::Terminal { terminal: "t2".into() });
+        assert!(tab.root.split("a", Axis::Row, other, "row".into()));
+        let size = gpui::size(px(100.), px(80.));
+        let focused = HashSet::from(["a".into()]);
+        let inner = |shown: &Node, frame: TabFrame<'_>| pane_size(shown, size, "a", Some(frame), &focused, 1.).unwrap();
+
+        let frame = TabFrame::new(&style, 2, tab.shown()).unwrap();
+        assert_eq!(frame.border(true).unwrap().color, "accent");
+        assert!(frame.border(false).is_none());
+        assert_eq!(inner(tab.shown(), frame), gpui::size(px(44.), px(74.)));
+
+        tab.zoomed = Some("a".into());
+        let frame = TabFrame::new(&style, 2, tab.shown()).unwrap();
+        assert!(frame.border(true).is_none());
+        assert_eq!(inner(tab.shown(), frame), size);
+
+        style.focus_lone = None;
+        let frame = TabFrame::new(&style, 2, tab.shown()).unwrap();
+        assert_eq!(frame.border(true).unwrap().color, "accent");
+        assert_eq!(inner(tab.shown(), frame), gpui::size(px(94.), px(74.)));
+    }
 }
 
 /// The tab area and the cell size.
@@ -159,7 +246,7 @@ impl AppWindow {
     fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
         let (context, area) = self.context_area()?;
         let frame = match context.content() {
-            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || panes > 1 => Some(frame),
+            Some(Content::Context { pane: Some(frame), .. }) => TabFrame::new(frame, panes, shown),
             _ => None,
         };
         let zoom = settings::zoom();

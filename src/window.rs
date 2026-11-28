@@ -1319,7 +1319,7 @@ impl AppWindow {
         if self.shows_tab()
             && let Some(c) = self.model.active_tab()
         {
-            let header = self.pane_frame().and_then(|f| f.header.as_ref()).and_then(|h| match &h.content {
+            let header = self.pane_frame().and_then(|f| f.style.header.as_ref()).and_then(|h| match &h.content {
                 HeaderContent::Mod { name, props } => Some((name.clone(), props.clone())),
                 HeaderContent::Builtin(_) => None,
             });
@@ -4582,19 +4582,20 @@ impl AppWindow {
 
     /// The shown tab block's pane frame, if its panes are framed now: when
     /// the tab is split, or always with `lone`.
-    fn pane_frame(&self) -> Option<&PaneFrame> {
+    fn pane_frame(&self) -> Option<pane_size::TabFrame<'_>> {
         let frame = self.chrome.visible_blocks().into_iter().find_map(|n| match n.content() {
             Some(Content::Context { pane, .. }) => pane.as_ref(),
             _ => None,
         })?;
         let ctx = self.model.active_tab()?;
-        (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
+        pane_size::TabFrame::new(frame, ctx.root.panes().len(), ctx.shown())
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
-    fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let line = pane_size::frame_border(f, on);
+    fn frame_pane(&self, n: &Node, frame: pane_size::TabFrame<'_>, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let line = frame.border(on);
+        let f = frame.style;
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
         if let Some(r) = f.radius {
@@ -4634,7 +4635,7 @@ impl AppWindow {
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
-    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<pane_size::TabFrame<'_>>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
@@ -4655,7 +4656,7 @@ impl AppWindow {
                 let axis = n.axis().unwrap();
                 el = if axis == Axis::Row { el.flex_row() } else { el.flex_col() };
                 let shown: Vec<&Node> = children.iter().filter(|c| !c.hidden).collect();
-                let gap = pane_size::gap(n, frame);
+                let gap = pane_size::gap(n, frame.map(|f| f.style));
                 // Weights are shares of what the fixed-size siblings leave, so they always fill it.
                 let total: f32 = shown
                     .iter()
@@ -4695,7 +4696,7 @@ impl AppWindow {
                 }
             }
         };
-        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
+        let row = frame.and_then(|f| f.style.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
@@ -7236,7 +7237,7 @@ mod tests {
             assert!(this.model.focus_pane("pa"));
             this.sync(window, cx);
             let veils = |this: &super::AppWindow| {
-                let v = this.pane_frame().and_then(|f| f.veil);
+                let v = this.pane_frame().and_then(|f| f.style.veil);
                 (this.veil(v, "pa"), this.veil(v, "pb"))
             };
             assert_eq!(veils(this), (None, Some(0.5)));

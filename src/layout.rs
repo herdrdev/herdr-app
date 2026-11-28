@@ -295,6 +295,9 @@ pub struct PaneFrame {
     /// The border while the pane has focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
+    /// Whether to draw the focus line when the tab has one pane or is zoomed (default: true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_lone: Option<bool>,
     /// How much a pane fades while another pane of its tab is selected, 0 to
     /// 1: the terminal's background colour painted over it at that opacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
