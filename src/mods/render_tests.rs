@@ -1105,6 +1105,22 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn popup_backgrounds_follow_the_frame_corners(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for entry in ["mods/menu", "mods/new-menu", "mods/picker", "mods/agents", "frame/palette"] {
+        let mut p = props();
+        if entry == "mods/agents" {
+            p["sortMenu"] = json!(true);
+        }
+        let tree = describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
+        let root = tree.lines().next().unwrap();
+        // A frameless caller still needs the fill; in the stock popup it must fit the frame.
+        assert!(root.contains(".bg[") && root.contains(".rounded[Number(8.0)]"), "{entry}: {root}");
+    }
+}
+
+#[gpui::test]
 fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
     cx.update(herdr_shell::init);
     let staged = Staged::new();

@@ -145,6 +145,7 @@ export default class Agents extends View {
     return v_flex()
       .w_full()
       .p(5)
+      .rounded(8)
       .bg(t.popover)
       .text_size(12.8)
       .child(div().px(8).pt(4).pb(6).text_size(11).text_color(t.dim).child("Sort agents"))

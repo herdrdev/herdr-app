@@ -51,7 +51,7 @@ export default class NewMenu extends View {
     const startAgent = agent => run("tab.new", { space: space?.id, argv: agent.run });
     const installed = this.agents.filter(a => a.installed);
     const choices = this.failed ? installed : [...installed, ...this.agents.filter(a => !a.installed).slice(0, 2)];
-    return v_flex().min_h(0).w_full().h(Math.min(491, 167 + Math.max(1, choices.length + (this.failed ? 1 : 0)) * 31)).bg(t.popover).p(5).text_size(12.8)
+    return v_flex().min_h(0).w_full().h(Math.min(491, 167 + Math.max(1, choices.length + (this.failed ? 1 : 0)) * 31)).rounded(8).bg(t.popover).p(5).text_size(12.8)
       .id("new-menu").track_focus(this.handle)
       .on_key_down((e) => {
         if (e.modifiers.control || e.modifiers.platform || e.modifiers.alt) return;
