@@ -82,10 +82,19 @@ async function directory(path, on) {
   return out;
 }
 
+// Of `names` (relative to `cwd`, or absolute), the ones Git ignores; none
+// outside a repository. Tracked files aren't ignored. A folder is passed as
+// `name/` so folder-only patterns (`build/`) match it.
+async function ignored(cwd, on, names) {
+  if (!names.length) return new Set();
+  const r = await exec("git", ["-c", "core.quotePath=false", "check-ignore", "--", ...names], { cwd, on }).catch(() => null);
+  return new Set(r?.code === 0 ? r.stdout.split("\n").filter(Boolean) : []);
+}
+
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
-    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {}; this.ignoredFolders = new Set();
     this.refresh(cx);
     cx.timer.every(500, cx => this.refreshIfDue(cx));
   }
@@ -111,6 +120,11 @@ export default class Files extends View {
         while (this.context === context && context.watch === watch) {
           watch.pending = watchFolder(root);
           const paths = await watch.pending;
+          // Changes only in ignored folders (a build's output) wait for the poll,
+          // unless one of those folders is open (#73).
+          if (paths.length && !paths.includes(root) && paths.length <= 200
+            && ![...this.folders].some(f => this.ignoredFolders.has(f))
+            && (await ignored(root, null, paths)).size === paths.length) continue;
           if (paths.length && context.watch === watch && this.current(context)) {
             context.dirtyAt = Date.now() + 1;
             this.refreshIfDue(cx);
@@ -128,7 +142,13 @@ export default class Files extends View {
 
   async loadFolder(path, context) {
     const { on, cwd: root } = context;
-    const entries = await directory(path ? `${root}/${path}` : root, on);
+    const dir = path ? `${root}/${path}` : root;
+    const listed = await directory(dir, on);
+    // What Git ignores (node_modules, build output) is dimmed, as in VS Code (#73).
+    const parentIgnored = path && this.ignoredFolders.has(path);
+    const hidden = parentIgnored ? null : await ignored(dir, on, listed.map(e => e.dir ? `${e.name}/` : e.name));
+    const entries = listed.map(e => ({ ...e, ignored: parentIgnored || hidden.has(e.dir ? `${e.name}/` : e.name) }));
+    for (const e of entries) if (e.dir) this.ignoredFolders[e.ignored ? "add" : "delete"](path ? `${path}/${e.name}` : e.name);
     if (!this.current(context) || (path && !this.folders.has(path))) return;
     const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
     this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
@@ -144,7 +164,7 @@ export default class Files extends View {
         this.context.watch?.pending?.cancel();
       }
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on, dirtyAt: 0 }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.context = { key: next, cwd, on, dirtyAt: 0 }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders); this.ignoredFolders = new Set();
       this.pending = new Set(); this.marks = {}; this.show(null); this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
@@ -257,8 +277,8 @@ export default class Files extends View {
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
         .child(entry.dir ? svg(`mods/files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-        .child(svg(`mods/files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().min_w(0).truncate().child(entry.name))
+        .child(svg(`mods/files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(entry.ignored ? t.dim : t.muted))
+        .child(div().flex_1().min_w(0).truncate().when(entry.ignored, el => el.text_color(t.dim)).child(entry.name))
         .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark))));
       if (entry.dir && open) this.rows(path, depth + 1, out, t);
     }

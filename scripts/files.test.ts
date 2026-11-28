@@ -54,6 +54,38 @@ test("Files keeps remote POSIX directory listings on sh", async () => {
   expect(calls).toEqual(["sh"]);
 });
 
+const ignored = new Function("exec", "window", `${directorySource}; return ignored;`)(
+  async (command: string, args: string[], { cwd }: { cwd: string }) => {
+    const p = Bun.spawn([command, ...args], { cwd, stdout: "pipe", stderr: "pipe", windowsHide: true });
+    const [code, stdout, stderr] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    return { code, stdout, stderr };
+  },
+  () => ({ platform: process.platform }),
+);
+
+test("Files leaves out what Git ignores, but not tracked files or anything outside a repository", async () => {
+  const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-files-"));
+  const git = (...args: string[]) => Bun.spawnSync(["git", "-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: root });
+  try {
+    expect([...await ignored(root, null, ["a.log"])]).toEqual([]);
+    git("init", "-q");
+    await writeFile(join(root, ".gitignore"), "build/\n*.log\n");
+    await mkdir(join(root, "build"), { recursive: true });
+    await mkdir(join(root, "src"), { recursive: true });
+    for (const name of ["a.log", "kept.log", "日本語.log", "-dash.log", "src/x.ts"]) await writeFile(join(root, name), "");
+    git("add", "-f", "kept.log");
+    const names = ["build/", "src/", "a.log", "kept.log", "日本語.log", "-dash.log", ".gitignore"];
+    expect([...await ignored(root, null, names)].sort()).toEqual(["-dash.log", "a.log", "build/", "日本語.log"].sort());
+    expect([...await ignored(join(root, "src"), null, ["x.ts"])]).toEqual([]);
+    expect([...await ignored(root, null, [])]).toEqual([]);
+    // Watch events come as absolute paths, deleted ones included.
+    const gone = join(root, "build", "gone.o");
+    expect([...await ignored(root, null, [gone, join(root, "src", "x.ts")])]).toEqual([gone]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Files lists literal folder names, not shell expressions", async () => {
   const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-files-"));
   try {

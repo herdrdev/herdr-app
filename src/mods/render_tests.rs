@@ -366,8 +366,12 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
             let herdr = module(values, Rc::new(RefCell::new(Calls::default())))
                 .async_function("exec", move |a| {
                     let args = strings(a.get(1));
+                    // check-ignore exits 1: nothing ignored here.
+                    let code = if args.iter().any(|arg| arg == "check-ignore") { 1 } else { 0 };
                     let (output, blocked) = if a.string(0)? == "sh" {
                         ("f\0recovered.txt\0", false)
+                    } else if code == 1 {
+                        ("", false)
                     } else if args.iter().any(|arg| arg == "--show-toplevel") {
                         ("/fixture/project\n", false)
                     } else {
@@ -379,7 +383,7 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
                         if blocked {
                             std::future::pending().await
                         } else {
-                            Ok(to_host(&json!({"code":0,"stdout":output,"stderr":""})))
+                            Ok(to_host(&json!({"code":code,"stdout":output,"stderr":""})))
                         }
                     })
                 })
