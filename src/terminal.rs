@@ -2437,7 +2437,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     {
         let mut g = grid.borrow_mut();
-        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        let next = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        // The candidate window is placed from this cell. A full-screen question
+        // moves the cursor when the answer is typed by hand; tell the IME then,
+        // not only when composition starts.
+        let moved = g.cursor_at.map(|b| (b.origin, b.size)) != next.map(|b| (b.origin, b.size));
+        g.cursor_at = next;
+        if moved {
+            window.invalidate_character_coordinates();
+        }
         // As in Herdr, hide on the alternate screen and below five columns.
         g.thumb = None;
         g.track = None;
@@ -2495,6 +2503,7 @@ impl EntityInputHandler for TerminalView {
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
             self.send(text.as_bytes());
+            window.invalidate_character_coordinates();
         }
         cx.notify();
     }
@@ -2513,6 +2522,7 @@ impl EntityInputHandler for TerminalView {
             return;
         }
         self.grid.borrow_mut().marked = (!text.is_empty()).then(|| text.to_owned());
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
