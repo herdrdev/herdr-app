@@ -5,6 +5,10 @@ and keeps them alive when the window closes. Use `herdr-app` only to change
 what the person sees. For starting, reading, messaging, waiting on or cleaning
 up agents and programs, read `hc --skill` and use hc.
 Your terminal address is `$HC_TERMINAL_ID`; it is not a pane ID.
+App-started terminals also receive `HERDR_ENV=1`, including on remote machines.
+OpenCode uses this to disable its internal shared tabs by default and report
+the current session's status. An explicit `tabs.mode: "on"` overrides it;
+existing terminals keep their old environment until reopened.
 
 ## Inspect before acting
 
