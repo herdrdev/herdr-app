@@ -8,6 +8,8 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 
+// Agent statuses, most urgent first.
+const URGENCY = ["blocked", "done", "working", "idle"];
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
 // Space colors, kept by space id in shared "space.colors": a theme
@@ -120,7 +122,13 @@ export default class Picker extends View {
       return;
     }
     this.close();
-    if (r.kind === "ctx") run("tab.select", { id: r.ctx.id });
+    if (r.kind === "ctx") {
+      // A tab with agents opens on one of them, not on whichever pane last had the keyboard:
+      // the focused one, else the one that needs you most (#898).
+      const agent = r.mine?.find((a) => a.focused) ?? [...(r.mine ?? [])].sort((a, b) => URGENCY.indexOf(a.status) - URGENCY.indexOf(b.status))[0];
+      if (agent) run("agent.focus", { terminal: agent.address });
+      else run("tab.select", { id: r.ctx.id });
+    }
     else if (r.kind === "new") run("tab.new");
     else if (r.kind === "space") run("space.new", { machine: r.machine ?? "" });
   }
