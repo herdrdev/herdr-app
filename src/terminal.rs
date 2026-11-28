@@ -2617,6 +2617,12 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                // The click that brings the window forward only focuses, as in Terminal
+                // and iTerm: it never reaches the program (a prompt's option) or selects.
+                // Its release isn't sent either: no press was.
+                if ev.first_mouse {
+                    return;
+                }
                 let g = this.grid.borrow();
                 if let Some(ch) = g.channel {
                     g.core.resize(ch, g.vt.cols, g.vt.rows);
