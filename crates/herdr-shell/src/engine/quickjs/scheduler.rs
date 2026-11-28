@@ -148,6 +148,16 @@ pub(super) fn drain_runtime_jobs(
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
+    drain_runtime_jobs_inner(runtime, window, cx);
+    // After every drain, outside `Context::with` (rule 1 above).
+    runtime.keep_collecting();
+}
+
+fn drain_runtime_jobs_inner(
+    runtime: &Rc<ShellRuntime>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
     if runtime.job_queue_error().is_none() {
         if let Err(error) = runtime.flush_pending_nested_views(window, cx) {
             tracing::error!("error applying a nested view operation: {error}");
@@ -228,6 +238,17 @@ fn drain_job_batch(runtime: &JsRuntime) -> bool {
 /// QuickJS's opaque queue forever. Stop at a hard total-job limit and quarantine
 /// the whole runtime because QuickJS offers no selective pending-job removal.
 pub(crate) fn drain_jobs_transactionally(
+    runtime: &Rc<ShellRuntime>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> anyhow::Result<()> {
+    let drained = drain_jobs_transactionally_inner(runtime, window, cx);
+    // After every drain, as `drain_runtime_jobs`.
+    runtime.keep_collecting();
+    drained
+}
+
+fn drain_jobs_transactionally_inner(
     runtime: &Rc<ShellRuntime>,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
@@ -2049,6 +2070,91 @@ mod tests {
         assert!(matches!(replacement.readiness(), Readiness::Cancelled));
         assert!(matches!(unrelated.readiness(), Readiness::Ready(None)));
         finish(&unrelated);
+    }
+
+    /// QuickJS sets its next collection at 1.5 times the heap after each
+    /// one, regardless of the memory limit, and an allocation over the limit
+    /// fails without collecting. After a collection with two thirds of the limit
+    /// live, cyclic garbage is never freed again: scripts run out of memory with
+    /// a heap of garbage. `keep_collecting`, run by every drain, keeps the next
+    /// collection below the limit.
+    #[gpui::test]
+    fn drains_keep_freeing_cycles_after_the_threshold_passed_the_limit(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let limit = crate::engine::quickjs::sandbox::memory_limit_bytes();
+        let window = cx.add_window(|_, _| Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        // 16 MiB a turn in an object referencing itself, dropped: only a
+        // collection frees it. 40 turns: 640 MiB, more than twice the limit.
+        let turn = |runtime: &ShellRuntime, i: usize| {
+            runtime.with_js(|ctx| {
+                ctx.eval::<(), _>(format!(
+                    "{{ const o = {{ s: 'x'.repeat(16 << 20) + {i} }}; o.self = o; }}"
+                ))
+            })
+        };
+
+        // The state such a collection leaves: the next threshold past the limit.
+        let stuck = ShellRuntime::new_isolated().expect("runtime");
+        stuck.js_runtime.set_gc_threshold(limit * 3 / 2);
+        let failed = (0..40).position(|i| turn(&stuck, i).is_err());
+        assert!(
+            failed.is_some(),
+            "without keep_collecting, cyclic garbage fills the heap"
+        );
+
+        let kept = ShellRuntime::new_isolated().expect("runtime");
+        kept.js_runtime.set_gc_threshold(limit * 3 / 2);
+        for i in 0..40 {
+            turn(&kept, i).unwrap_or_else(|error| panic!("turn {i}: {error}"));
+            context.update(|window, cx| drain_runtime_jobs(&kept, window, cx));
+        }
+        let used = kept.js_runtime.memory_usage().malloc_size as usize;
+        assert!(used < limit / 2, "garbage collected: {used} bytes in use");
+    }
+
+    /// With the heap within `GC_STEP` of the limit, a drain still keeps the next
+    /// collection below the limit (and collects what the last turn left near
+    /// it), so a turn's cyclic garbage is collected during the turn.
+    #[gpui::test]
+    fn a_drain_near_the_limit_keeps_the_next_collection_below_it(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let limit = crate::engine::quickjs::sandbox::memory_limit_bytes();
+        let window = cx.add_window(|_, _| Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let mib = 1 << 20;
+        // Live data up to 7 MiB below the limit, then a turn of four dropped
+        // 2 MiB objects referencing themselves: 8 MiB, past the limit uncollected.
+        let fill = |runtime: &ShellRuntime| {
+            runtime.js_runtime.run_gc();
+            let used = runtime.js_runtime.memory_usage().malloc_size as usize;
+            let live = limit - 7 * mib - used;
+            runtime
+                .with_js(|ctx| ctx.eval::<(), _>(format!("globalThis.live = 'x'.repeat({live});")))
+                .expect("fill");
+            runtime.js_runtime.set_gc_threshold(limit * 3 / 2);
+        };
+        let turn = |runtime: &ShellRuntime| {
+            runtime.with_js(|ctx| {
+                ctx.eval::<(), _>(
+                    "for (let i = 0; i < 4; i++) { const o = { s: 'x'.repeat(2 << 20) }; o.self = o; }",
+                )
+            })
+        };
+
+        let stuck = ShellRuntime::new_isolated().expect("runtime");
+        fill(&stuck);
+        assert!(
+            turn(&stuck).is_err(),
+            "uncollected, the turn's garbage passes the limit"
+        );
+
+        let kept = ShellRuntime::new_isolated().expect("runtime");
+        fill(&kept);
+        for i in 0..20 {
+            context.update(|window, cx| drain_runtime_jobs(&kept, window, cx));
+            turn(&kept).unwrap_or_else(|error| panic!("turn {i}: {error}"));
+        }
     }
 
     #[gpui::test]
