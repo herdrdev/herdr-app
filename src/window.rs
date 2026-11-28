@@ -60,6 +60,31 @@ fn traffic_light_divider_inset(n: &Node, axis: Axis, index: usize, macos: bool, 
     }).reduce(f32::min).unwrap_or(0.0)
 }
 
+/// Moves the divider between `a` and `b` to `new_a`, keeping the sizes of the
+/// other panes in the row. A fixed pane next to a weighted one would otherwise
+/// move every weighted sibling, because weights share what fixed panes leave.
+fn move_divider(children: &mut [Node], a_id: &str, b_id: &str, new_a: f32, total: f32, current: &HashMap<String, f32>) {
+    let b_new = total - new_a;
+    for n in children.iter_mut().filter(|n| !n.hidden) {
+        let fixed = matches!(n.size, Some(Span::Px { .. }));
+        let size = if n.id == a_id {
+            Some(new_a)
+        } else if n.id == b_id {
+            Some(b_new)
+        } else if fixed {
+            None
+        } else {
+            current.get(&n.id).copied()
+        };
+        let Some(size) = size else { continue };
+        n.size = Some(if fixed {
+            Span::Px { px: size.round() }
+        } else {
+            Span::Weight { weight: size.max(0.0) }
+        });
+    }
+}
+
 fn separator_line(row: bool, width: f32, color: Hsla, top: f32) -> Div {
     div().bg(color)
         .when(row, |d| d.w(px(width)))
@@ -4910,18 +4935,22 @@ impl AppWindow {
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
-        drop(bounds);
-        let (start, p) = match axis {
-            Axis::Row => (f32::from(ba.left()), f32::from(pos.x)),
-            Axis::Column => (f32::from(ba.top()), f32::from(pos.y)),
-        };
-        let (la, lb) = match axis {
-            Axis::Row => (f32::from(ba.size.width), f32::from(bb.size.width)),
-            Axis::Column => (f32::from(ba.size.height), f32::from(bb.size.height)),
-        };
         // Measured on screen; sizes are stored as designed (unzoomed).
         let zoom = settings::zoom();
-        let (la, lb, start, p) = (la / zoom, lb / zoom, start / zoom, p / zoom);
+        let (start, p) = match axis {
+            Axis::Row => (f32::from(ba.left()) / zoom, f32::from(pos.x) / zoom),
+            Axis::Column => (f32::from(ba.top()) / zoom, f32::from(pos.y) / zoom),
+        };
+        let (la, lb) = match axis {
+            Axis::Row => (f32::from(ba.size.width) / zoom, f32::from(bb.size.width) / zoom),
+            Axis::Column => (f32::from(ba.size.height) / zoom, f32::from(bb.size.height) / zoom),
+        };
+        let current: HashMap<String, f32> = shown.iter().filter_map(|child| {
+            let b = bounds.get(&child.id)?;
+            let size = if axis == Axis::Row { b.size.width } else { b.size.height };
+            Some((child.id.clone(), f32::from(size) / zoom))
+        }).collect();
+        drop(bounds);
         let total = la + lb;
         // Squeezed and zero-size siblings cannot both keep the drag minimum.
         if total <= 48.0 { return; }
@@ -4934,25 +4963,9 @@ impl AppWindow {
         }
         let new_a = new_a.min(total - 24.0);
         let (a_id, b_id) = (a.id.clone(), b.id.clone());
-        let (sa, sb) = (a.size, b.size);
         let Some(parent) = self.find_node_mut(&container) else { return };
         let Some(children) = parent.children_mut() else { return };
-        let set = |children: &mut Vec<Node>, id: &str, s: Span| {
-            if let Some(n) = children.iter_mut().find(|n| n.id == id) {
-                n.size = Some(s);
-            }
-        };
-        match (sa, sb) {
-            (Some(Span::Px { .. }), _) => set(children, &a_id, Span::Px { px: new_a.round() }),
-            (_, Some(Span::Px { .. })) => set(children, &b_id, Span::Px { px: (total - new_a).round() }),
-            _ => {
-                let wa = match sa { Some(Span::Weight { weight }) => weight, _ => 1.0 };
-                let wb = match sb { Some(Span::Weight { weight }) => weight, _ => 1.0 };
-                let sum = wa + wb;
-                set(children, &a_id, Span::Weight { weight: sum * new_a / total });
-                set(children, &b_id, Span::Weight { weight: sum * (total - new_a) / total });
-            }
-        }
+        move_divider(children, &a_id, &b_id, new_a, total, &current);
     }
 
     fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
