@@ -1,0 +1,618 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -376,6 +376,9 @@
+     uint64_t jit_next_frame_cookie;
+     uint64_t jit_active_frame_cookie;
+     JSJitExecFrame *jit_active_frame;
++    struct JSJitInlineState *jit_inline_top;
++    size_t jit_inline_bytes;
++    uint32_t jit_inline_depth;
+     uint64_t jit_helper_dup_count;
+     uint64_t jit_helper_free_count;
+ #ifdef CONFIG_JIT_TEST_SUPPORT
+@@ -419,6 +422,25 @@
+     JSValue *cur_sp;
+ } JSStackFrame;
+ 
++#ifdef CONFIG_JIT_ABI
++/* Storage is reserved before inline effects and does not move on deopt.
++ * Captured local/argument JSVarRef.pvalue pointers therefore remain valid. */
++typedef struct JSJitInlineState {
++    struct JSJitInlineState *previous;
++    JSJitExecFrame *caller, *root;
++    JSStackFrame *caller_sf;
++    JSStackFrame sf;
++    JSJitExecFrame view;
++    JSValue this_value, new_target;
++    JSValue *values;
++    size_t bytes;
++    uint32_t value_count, argc, argument_slots;
++    uint32_t call_base, call_operands, continuation_pc;
++    uint64_t function_id, generation;
++    bool resumed_exception, values_consumed;
++} JSJitInlineState;
++#endif
++
+ typedef enum {
+     JS_GC_OBJ_TYPE_JS_OBJECT,
+     JS_GC_OBJ_TYPE_FUNCTION_BYTECODE,
+@@ -18937,9 +18959,17 @@
+     return JS_JIT_HELPER_EXCEPTION;
+ }
+ 
+-static JSJitHelperStatus qjsjit_validate_helper_frame(
++typedef enum QJSJitFrameValidation {
++    QJSJIT_VALIDATE_HELPER,
++    QJSJIT_VALIDATE_RESUME,
++    QJSJIT_VALIDATE_CHECK,
++    QJSJIT_VALIDATE_CLEANUP,
++} QJSJitFrameValidation;
++
++static JSJitHelperStatus qjsjit_validate_helper_frame_state(
+     JSJitExecFrame *frame, bool has_stack_map, uint32_t stack_map_id,
+-    JSFunctionBytecode **bytecode, JSStackFrame **stack_frame)
++    JSFunctionBytecode **bytecode, JSStackFrame **stack_frame,
++    QJSJitFrameValidation validation)
+ {
+     JSRuntime *rt;
+     JSContext *ctx;
+@@ -18975,7 +19005,8 @@
+         return qjsjit_reject_helper(frame, "invalid JIT helper entry");
+     if (has_stack_map && stack_map_id >= frame->entry.stack_map_count)
+         return qjsjit_reject_helper(frame, "invalid JIT helper stack map");
+-    if (!JS_IsUndefined(frame->result) || JS_HasException(ctx))
++    if (!JS_IsUndefined(frame->result) ||
++        (validation != QJSJIT_VALIDATE_RESUME && JS_HasException(ctx)))
+         return qjsjit_reject_helper(frame, "invalid JIT helper state");
+ 
+     sf = rt->current_stack_frame;
+@@ -18988,7 +19019,13 @@
+     if (!b || b->realm != ctx || b->jit_function_id == 0 ||
+         b->jit_generation == 0 ||
+         frame->function_id != b->jit_function_id ||
+-        frame->generation != b->jit_generation ||
++        (frame->generation != b->jit_generation &&
++         !(validation == QJSJIT_VALIDATE_CHECK ||
++           ((validation == QJSJIT_VALIDATE_RESUME ||
++             validation == QJSJIT_VALIDATE_CLEANUP) && rt->jit_inline_top &&
++           &rt->jit_inline_top->view == frame &&
++           rt->jit_inline_top->function_id == frame->function_id &&
++           rt->jit_inline_top->generation == frame->generation))) ||
+         frame->bytecode_start != b->byte_code_buf ||
+         frame->arg_buf != (JSValueConst *)sf->arg_buf ||
+         frame->var_buf != sf->var_buf ||
+@@ -19011,6 +19048,14 @@
+     return JS_JIT_HELPER_OK;
+ }
+ 
++static JSJitHelperStatus qjsjit_validate_helper_frame(
++    JSJitExecFrame *frame, bool has_stack_map, uint32_t stack_map_id,
++    JSFunctionBytecode **bytecode, JSStackFrame **stack_frame)
++{
++    return qjsjit_validate_helper_frame_state(frame, has_stack_map,
++        stack_map_id, bytecode, stack_frame, QJSJIT_VALIDATE_HELPER);
++}
++
+ static void qjsjit_unpoison_slot(JSValue *value)
+ {
+ #if defined(__has_feature)
+@@ -19192,7 +19237,8 @@
+     JSStackFrame *sf;
+     JSValue *out, *in;
+ 
+-    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++    if (qjsjit_validate_helper_frame_state(frame, true, stack_map_id, &b, &sf,
++                                          QJSJIT_VALIDATE_CLEANUP) < 0)
+         return JS_JIT_HELPER_EXCEPTION;
+     qjsjit_count_helper(frame, JS_JIT_HELPER_DUP);
+     if (!qjsjit_resolve_slot(frame, b, output, &out) ||
+@@ -19215,7 +19261,8 @@
+     JSValue *in;
+     JSJitHelperStatus status;
+ 
+-    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
++    if (qjsjit_validate_helper_frame_state(frame, false, 0, &b, &sf,
++                                          QJSJIT_VALIDATE_CLEANUP) < 0)
+         return JS_JIT_HELPER_EXCEPTION;
+     qjsjit_count_helper(frame, JS_JIT_HELPER_FREE);
+     if (!qjsjit_resolve_slot(frame, b, input, &in))
+@@ -19999,10 +20046,354 @@
+ 
+ #endif
+ 
++#ifdef CONFIG_JIT_ABI
++static JSValue JS_CallInternalResume(JSContext *caller_ctx, JSValueConst func_obj,
++    JSValueConst this_obj, JSValueConst new_target, int argc,
++    JSValueConst *argv, int flags, JSJitInlineState *resume);
++
++static void qjsjit_inline_activate(JSRuntime *rt, JSJitExecFrame *view)
++{
++    rt->jit_active_frame = view;
++    rt->jit_active_frame_cookie = view ? view->frame_cookie : 0;
++    rt->jit_active_stack_map_count = view ? view->entry.stack_map_count : 0;
++    rt->jit_active_helper_abi_version = view ? view->entry.helper_abi_version : 0;
++}
++
++/* Free only runtime-owned storage, never a pointer supplied in the mutable
++ * public view. Interpreter completion has already consumed its local range. */
++static void qjsjit_inline_destroy(JSRuntime *rt, JSJitInlineState *state)
++{
++    uint32_t i;
++    if (!state->values_consumed) {
++        if (state->sf.var_ref_count)
++            close_var_refs(rt, &state->sf);
++        for (i = 0; i < state->value_count; i++)
++            JS_FreeValueRT(rt, state->values[i]);
++    }
++    rt->jit_inline_top = state->previous;
++    rt->current_stack_frame = state->caller_sf;
++    qjsjit_inline_activate(rt, state->caller);
++    rt->jit_inline_depth--;
++    rt->jit_inline_bytes -= state->bytes;
++    JS_FreeValueRT(rt, state->sf.cur_func);
++    JS_FreeValueRT(rt, state->this_value);
++    JS_FreeValueRT(rt, state->new_target);
++    js_free_rt(rt, state);
++}
++
++/* Native code must never leave a live shadow frame behind. Reject without
++ * replay, and release all its owners before restoring the physical C frame. */
++static bool qjsjit_inline_abort_root(JSJitExecFrame *root)
++{
++    JSRuntime *rt = root->rt;
++    bool found = false;
++    while (rt->jit_inline_top && rt->jit_inline_top->root == root) {
++        found = true;
++        qjsjit_inline_destroy(rt, rt->jit_inline_top);
++    }
++    return found;
++}
++
++JSJitHelperStatus JS_JitInlineEnter(JSJitExecFrame *caller,
++    uint32_t stack_map_id, uint32_t call_pc, uint32_t continuation_pc,
++    uint32_t call_kind, uint32_t argc, JSJitExecFrame **callee)
++{
++    JSFunctionBytecode *caller_b, *b;
++    JSStackFrame *caller_sf;
++    JSJitInlineState *state;
++    JSRuntime *rt;
++    JSValue *operands;
++    JSObject *function;
++    uint32_t opcode, encoded_argc, operands_count, depth, arg_slots, i;
++    size_t value_count, bytes;
++    uint64_t caller_generation, cookie;
++    JSJitHelperStatus status;
++
++    if (!callee)
++        return qjsjit_reject_helper(caller, "missing inline frame output");
++    *callee = NULL;
++    if (qjsjit_validate_helper_frame(caller, true, stack_map_id,
++                                    &caller_b, &caller_sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    rt = caller->rt;
++    if (call_kind > JS_JIT_INLINE_CALL_METHOD || argc > UINT16_MAX)
++        return JS_JIT_HELPER_GUARD_MISS;
++    if (call_pc >= (uint32_t)caller_b->byte_code_len ||
++        continuation_pc >= (uint32_t)caller_b->byte_code_len ||
++        !qjsjit_valid_pc(caller_b, caller_b->byte_code_buf + call_pc, false) ||
++        !qjsjit_valid_pc(caller_b, caller_b->byte_code_buf + continuation_pc, false) ||
++        caller->pc != caller_b->byte_code_buf + call_pc)
++        return qjsjit_reject_helper(caller, "invalid inline call PC");
++    opcode = caller_b->byte_code_buf[call_pc];
++    if (opcode >= OP_call0 && opcode <= OP_call3) {
++        encoded_argc = opcode - OP_call0;
++        if (call_kind != JS_JIT_INLINE_CALL)
++            return qjsjit_reject_helper(caller, "inline call kind mismatch");
++    } else if (opcode == OP_call || opcode == OP_call_method) {
++        encoded_argc = get_u16(caller_b->byte_code_buf + call_pc + 1);
++        if ((opcode == OP_call_method) != (call_kind == JS_JIT_INLINE_CALL_METHOD))
++            return qjsjit_reject_helper(caller, "inline call kind mismatch");
++    } else {
++        /* Constructors, tail calls, generators and eval require their own
++         * activation contracts. Decline before any callee effect. */
++        return JS_JIT_HELPER_GUARD_MISS;
++    }
++    if (encoded_argc != argc ||
++        continuation_pc != call_pc + qjsjit_opcode_table[opcode].size)
++        return qjsjit_reject_helper(caller, "invalid inline continuation");
++    operands_count = argc + 1 + (call_kind == JS_JIT_INLINE_CALL_METHOD);
++    depth = (uint32_t)(caller->stack_top - caller->stack_base);
++    if (depth < operands_count || depth > caller_b->stack_size ||
++        !qjsjit_scratch_is_clear(caller->stack_base, caller_b))
++        return qjsjit_reject_helper(caller, "invalid inline call stack");
++    operands = caller->stack_top - operands_count;
++    if (JS_VALUE_GET_TAG(operands[call_kind == JS_JIT_INLINE_CALL_METHOD]) != JS_TAG_OBJECT)
++        return JS_JIT_HELPER_GUARD_MISS;
++    function = JS_VALUE_GET_OBJ(operands[call_kind == JS_JIT_INLINE_CALL_METHOD]);
++    if (function->class_id != JS_CLASS_BYTECODE_FUNCTION)
++        return JS_JIT_HELPER_GUARD_MISS;
++    b = function->u.func.function_bytecode;
++    if (b->func_kind != JS_FUNC_NORMAL ||
++        qjsjit_ensure_function_identity(rt, b) < 0)
++        return JS_JIT_HELPER_GUARD_MISS;
++    arg_slots = max_int((int)argc, b->arg_count);
++    value_count = (size_t)arg_slots + b->var_count + b->stack_size +
++        JS_JIT_HELPER_SCRATCH_SLOTS;
++    if (value_count > JS_JIT_INLINE_MAX_BYTES / sizeof(JSValue))
++        return JS_JIT_HELPER_GUARD_MISS;
++    bytes = sizeof(*state) + value_count * sizeof(JSValue) +
++        (size_t)b->var_ref_count * sizeof(JSVarRef *);
++    if (rt->jit_inline_depth >= JS_JIT_INLINE_MAX_DEPTH ||
++        bytes > JS_JIT_INLINE_MAX_BYTES ||
++        rt->jit_inline_bytes > JS_JIT_INLINE_MAX_BYTES - bytes ||
++        rt->jit_next_frame_cookie == UINT64_MAX)
++        return JS_JIT_HELPER_GUARD_MISS;
++    /* Unlike js_malloc(ctx), this does not manufacture an OOM exception for
++     * an optional optimization. Quota/allocation failure is pre-effect miss. */
++    state = js_mallocz_rt(rt, bytes);
++    if (!state)
++        return JS_JIT_HELPER_GUARD_MISS;
++    /* Every decline happens before this exactly-once entry checkpoint: a
++     * fallback JS_CallInternal will perform its own poll. Reserve the cookie
++     * and quota before reentrancy, but publish no uninitialized frame/owners. */
++    cookie = ++rt->jit_next_frame_cookie;
++    rt->jit_inline_depth++;
++    rt->jit_inline_bytes += bytes;
++    caller_generation = caller->generation;
++    caller_sf->cur_pc = caller_b->byte_code_buf + continuation_pc;
++    status = JS_JIT_HELPER_EXCEPTION;
++    if (js_poll_interrupts(caller->ctx))
++        goto poll_failed;
++    if (caller->generation != caller_generation) {
++        qjsjit_reject_helper(caller, "inline callback changed native identity");
++        goto poll_failed;
++    }
++    /* Invalidation may retire this pin's generation while immutable bytecode
++     * and its rooted physical frame remain valid. Validate every other field
++     * against current runtime state, then retain the pin's original identity. */
++    caller->generation = caller_b->jit_generation;
++    status = qjsjit_validate_helper_frame(caller, true, stack_map_id,
++                                          &caller_b, &caller_sf);
++    caller->generation = caller_generation;
++    if (status < 0)
++        goto poll_failed;
++    state->bytes = bytes;
++    state->previous = rt->jit_inline_top;
++    state->caller = caller;
++    state->root = state->previous && &state->previous->view == caller ?
++        state->previous->root : caller;
++    state->caller_sf = caller_sf;
++    state->call_base = depth - operands_count;
++    state->call_operands = operands_count;
++    state->continuation_pc = continuation_pc;
++    state->argc = argc;
++    state->function_id = b->jit_function_id;
++    state->generation = b->jit_generation;
++    state->argument_slots = arg_slots;
++    state->value_count = (uint32_t)value_count;
++    state->values = (JSValue *)(state + 1);
++    for (i = 0; i < value_count; i++)
++        state->values[i] = JS_UNDEFINED;
++    for (i = 0; i < argc; i++)
++        state->values[i] = js_dup((caller->stack_top - argc)[i]);
++    state->this_value = call_kind == JS_JIT_INLINE_CALL_METHOD ?
++        js_dup(operands[0]) : JS_UNDEFINED;
++    state->new_target = JS_UNDEFINED;
++    state->sf.cur_func = js_dup(operands[call_kind == JS_JIT_INLINE_CALL_METHOD]);
++    state->sf.arg_buf = state->values;
++    state->sf.arg_count = arg_slots;
++    state->sf.var_buf = state->values + arg_slots;
++    state->sf.var_refs = (JSVarRef **)(state->values + value_count);
++    state->sf.var_ref_count = b->var_ref_count;
++    state->sf.is_strict_mode = b->is_strict_mode;
++    state->sf.prev_frame = caller_sf;
++    state->sf.cur_pc = b->byte_code_buf;
++    state->view = *caller;
++    state->view.flags = (caller->flags & JS_JIT_FRAME_STRESS_GC) |
++        (b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0);
++    state->view.ctx = b->realm;
++    state->view.function_id = b->jit_function_id;
++    state->view.generation = b->jit_generation;
++    state->view.arg_buf = state->sf.arg_buf;
++    state->view.var_buf = state->sf.var_buf;
++    state->view.stack_base = state->sf.var_buf + b->var_count;
++    state->view.stack_top = state->view.stack_base;
++    state->view.stack_capacity = state->view.stack_base + b->stack_size +
++        JS_JIT_HELPER_SCRATCH_SLOTS;
++    state->view.bytecode_start = b->byte_code_buf;
++    state->view.pc = b->byte_code_buf;
++    state->view.frame_cookie = cookie;
++    caller_sf->cur_pc = caller_b->byte_code_buf + continuation_pc;
++    rt->jit_inline_top = state;
++    rt->current_stack_frame = &state->sf;
++    qjsjit_inline_activate(rt, &state->view);
++    *callee = &state->view;
++    return JS_JIT_HELPER_OK;
++poll_failed:
++    rt->jit_inline_depth--;
++    rt->jit_inline_bytes -= bytes;
++    js_free_rt(rt, state);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
++/* Complete the parent CALL with exactly the same success/throw stack effects
++ * as the interpreter. The duplicated/moved result remains rooted while owners
++ * in the callee and parent call operands are released. */
++static void qjsjit_inline_complete(JSJitInlineState *state, JSValue result)
++{
++    JSJitExecFrame *caller = state->caller;
++    JSRuntime *rt = caller->rt;
++    uint32_t base = state->call_base, count = state->call_operands, i;
++    const uint8_t *pc = caller->bytecode_start + state->continuation_pc;
++    qjsjit_inline_destroy(rt, state);
++    caller->pc = pc;
++    rt->current_stack_frame->cur_pc = (uint8_t *)pc;
++    if (!JS_IsException(result)) {
++        for (i = 0; i < count; i++)
++            qjsjit_consume_slot(caller->ctx, caller->stack_base + base + i);
++        caller->stack_base[base] = result;
++        caller->stack_top = caller->stack_base + base + 1;
++    }
++}
++
++JSJitHelperStatus JS_JitInlineLeave(JSJitExecFrame *callee, uint32_t result_slot)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *result;
++    if (qjsjit_validate_helper_frame(callee, false, 0, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!callee->rt->jit_inline_top ||
++        &callee->rt->jit_inline_top->view != callee ||
++        !qjsjit_resolve_slot(callee, b, result_slot, &result) ||
++        JS_IsException(*result))
++        return qjsjit_reject_helper(callee, "invalid inline return");
++    qjsjit_inline_complete(callee->rt->jit_inline_top, js_dup(*result));
++    return JS_JIT_HELPER_OK;
++}
++
++JSJitHelperStatus JS_JitInlineResume(JSJitExecFrame *callee,
++    uint32_t resume_pc, uint32_t resume_kind)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSRuntime *rt;
++    JSJitExecFrame *root;
++    JSJitInlineState *state;
++    JSValue result;
++    if (qjsjit_validate_helper_frame_state(callee, false, 0, &b, &sf,
++                                          QJSJIT_VALIDATE_RESUME) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    rt = callee->rt;
++    state = rt->jit_inline_top;
++    if (!state || &state->view != callee ||
++        resume_kind > JS_JIT_INLINE_RESUME_EXCEPTION ||
++        (resume_kind == JS_JIT_INLINE_RESUME_EXCEPTION) != JS_HasException(callee->ctx) ||
++        resume_pc > (uint32_t)b->byte_code_len ||
++        !qjsjit_valid_pc(b, b->byte_code_buf + resume_pc,
++                         resume_kind == JS_JIT_INLINE_RESUME_EXCEPTION) ||
++        !qjsjit_valid_stack_top(callee->stack_base, b->stack_size, callee->stack_top) ||
++        !qjsjit_scratch_is_clear(callee->stack_base, b))
++        return qjsjit_reject_helper(callee, "invalid inline resume state");
++    root = state->root;
++    callee->pc = b->byte_code_buf + resume_pc;
++    do {
++        state = rt->jit_inline_top;
++        state->resumed_exception = JS_HasException(state->view.ctx);
++        /* Interpreter PC/SP now live in its C dispatch locals. Reentrant
++         * callbacks must not use the stale native helper view while it runs. */
++        qjsjit_inline_activate(rt, NULL);
++        result = JS_CallInternalResume(state->view.ctx, state->sf.cur_func,
++            state->this_value, state->new_target, state->argc,
++            (JSValueConst *)state->values, 0, state);
++        qjsjit_inline_complete(state, result);
++    } while (rt->jit_inline_top && rt->jit_inline_top->root == root);
++    return JS_IsException(result) ? JS_JIT_HELPER_EXCEPTION : JS_JIT_HELPER_OK;
++}
++
++JSJitHelperStatus JS_JitInlineCheck(JSJitExecFrame *frame)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSJitInlineState *state;
++    JSJitExecFrame *root;
++    if (qjsjit_validate_helper_frame_state(frame, false, 0, &b, &sf,
++                                          QJSJIT_VALIDATE_CHECK) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (frame->generation != b->jit_generation)
++        return JS_JIT_HELPER_GUARD_MISS;
++    state = frame->rt->jit_inline_top;
++    if (!state || &state->view != frame)
++        return JS_JIT_HELPER_OK; /* physical root after Leave */
++    root = state->root;
++    do {
++        JSObject *function = JS_VALUE_GET_OBJ(state->sf.cur_func);
++        b = function->u.func.function_bytecode;
++        if (state->view.function_id != state->function_id ||
++            state->view.generation != state->generation)
++            return qjsjit_reject_helper(frame, "invalid inline checkpoint identity");
++        if (b->jit_generation != state->generation)
++            return JS_JIT_HELPER_GUARD_MISS;
++        if (state->caller == root) {
++            function = JS_VALUE_GET_OBJ(state->caller_sf->cur_func);
++            b = function->u.func.function_bytecode;
++            return b->jit_generation == root->generation ?
++                JS_JIT_HELPER_OK : JS_JIT_HELPER_GUARD_MISS;
++        }
++        state = state->previous;
++    } while (state && state->root == root);
++    return qjsjit_reject_helper(frame, "incomplete inline checkpoint chain");
++}
++
++const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version)
++{
++    static const JSJitInlineAPI api = {
++        sizeof(JSJitInlineAPI), QJSJIT_INLINE_RECOVERY_VERSION,
++        JS_JIT_INLINE_MAX_DEPTH, JS_JIT_INLINE_MAX_BYTES,
++        JS_JIT_HELPER_THROWING | JS_JIT_HELPER_ALLOCATING |
++        JS_JIT_HELPER_REENTRANT | JS_JIT_HELPER_FINALIZING, 0,
++        JS_JitInlineEnter, JS_JitInlineLeave, JS_JitInlineResume, JS_JitInlineCheck,
++    };
++    return version == QJSJIT_INLINE_RECOVERY_VERSION ? &api : NULL;
++}
++
++static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
++    JSValueConst this_obj, JSValueConst new_target, int argc,
++    JSValueConst *argv, int flags)
++{
++    return JS_CallInternalResume(caller_ctx, func_obj, this_obj, new_target,
++                                 argc, argv, flags, NULL);
++}
++
++static JSValue JS_CallInternalResume(JSContext *caller_ctx, JSValueConst func_obj,
++    JSValueConst this_obj, JSValueConst new_target, int argc,
++    JSValueConst *argv, int flags, JSJitInlineState *resume)
++#else
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
+ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                JSValueConst this_obj, JSValueConst new_target,
+                                int argc, JSValueConst *argv, int flags)
++#endif
+ {
+     JSRuntime *rt = caller_ctx->rt;
+     JSContext *ctx;
+@@ -20044,6 +20435,34 @@
+ #define BREAK           SWITCH(pc)
+ #endif
+ 
++#ifdef CONFIG_JIT_ABI
++    if (resume) {
++        /* The runtime has already allocated and linked this exact invocation.
++         * Restore every dispatch-loop local; do not replay its prologue. */
++        sf = &resume->sf;
++        p = JS_VALUE_GET_OBJ(sf->cur_func);
++        b = p->u.func.function_bytecode;
++        ctx = b->realm;
++        var_refs = p->u.func.var_refs;
++        local_buf = resume->values;
++        arg_buf = sf->arg_buf;
++        var_buf = sf->var_buf;
++        stack_buf = var_buf + b->var_count;
++        stack_allocated_size = b->stack_size + JS_JIT_HELPER_SCRATCH_SLOTS;
++        arg_allocated_size = resume->argument_slots;
++        sp = resume->view.stack_top;
++        pc = (uint8_t *)resume->view.pc;
++        jit_call_recorded = 1;
++        rt->current_stack_frame = sf;
++        if (resume->resumed_exception)
++            goto exception;
++        if (js_check_stack_overflow(rt, 0)) {
++            JS_ThrowStackOverflow(ctx);
++            goto exception;
++        }
++        goto restart;
++    }
++#endif
+     if (js_poll_interrupts(caller_ctx))
+         return JS_EXCEPTION;
+     if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT)) {
+@@ -20326,6 +20745,14 @@
+                 jit_vtable->native_enter(jit_opaque, entry_function_id,
+                                          entry_generation, entry_pc_offset);
+             jit_exit = entry.entry(&frame);
++            if (qjsjit_inline_abort_root(&frame)) {
++                qjsjit_reject_exit(ctx, &frame.result,
++                                   "unconsumed inline activation at native exit");
++                jit_exit.kind = JS_JIT_EXIT_EXCEPTION;
++                jit_exit.reserved = 0;
++                jit_exit.resume_pc = frame.pc;
++                jit_exit.resume_stack_top = frame.stack_top;
++            }
+             if (jit_vtable->native_exit)
+                 jit_vtable->native_exit(jit_opaque, entry_function_id,
+                                         entry_generation, entry_pc_offset,
+@@ -23504,6 +23931,10 @@
+             JS_FreeValue(ctx, *pval);
+         }
+     }
++#ifdef CONFIG_JIT_ABI
++    if (resume)
++        resume->values_consumed = true;
++#endif
+     rt->current_stack_frame = sf->prev_frame;
+     return ret_val;
+ }
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 21u
++#define QJSJIT_ABI_MINOR 22u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -481,6 +481,70 @@
+ void JS_JitFreeSnapshot(JSJitFunctionSnapshot *snapshot);
+ int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function);
+ 
++/* Versioned runtime-thread inline activation API. Enter requires the complete
++ * pending CALL stack in caller storage, including its function/receiver owners.
++ * CALL_METHOD uses [receiver, function, arguments...], CALL omits receiver.
++ * Unsupported call kinds/targets or exhausted quotas return GUARD_MISS without
++ * changing caller storage, polling or setting an exception. Invalid state is uncatchable.
++ * Enter includes the ordinary call-entry interrupt poll in the caller realm.
++ * Recheck speculative target/type/heap assumptions after Enter's reentrant
++ * checkpoint and before inline effects; a mismatch resumes the new view at PC0.
++ * A rejected interrupt leaves caller PC/SP/operands unchanged and no callee;
++ * publish the decoded call continuation as exception PC before unwinding.
++ * Every successful Enter must be consumed by Leave or Resume before native exit.
++ * Views and their slots stay at stable addresses until consumed. */
++#define QJSJIT_INLINE_RECOVERY_VERSION 1u
++#define JS_JIT_INLINE_CALL 0u
++#define JS_JIT_INLINE_CALL_METHOD 1u
++#define JS_JIT_INLINE_RESUME_INSTRUCTION 0u
++#define JS_JIT_INLINE_RESUME_EXCEPTION 1u
++#define JS_JIT_INLINE_MAX_DEPTH 16u
++#define JS_JIT_INLINE_MAX_BYTES (1024u * 1024u)
++JS_EXTERN JSJitHelperStatus JS_JitInlineEnter(
++    JSJitExecFrame *caller, uint32_t stack_map_id, uint32_t call_pc,
++    uint32_t continuation_pc, uint32_t call_kind, uint32_t argc,
++    JSJitExecFrame **callee);
++/* Leave duplicates the named callee slot before cleanup and transfers the
++ * result into the caller's pending CALL range. All other owners are consumed.
++ * On success caller PC is its next instruction and stack depth changes by
++ * -argc (CALL) or -argc-1 (CALL_METHOD). */
++JS_EXTERN JSJitHelperStatus JS_JitInlineLeave(JSJitExecFrame *callee,
++                                             uint32_t result_slot);
++/* Resume completes every inline ancestor in the interpreter at the exact
++ * instruction/exception state. The root physical frame is left at its pending
++ * call continuation, with one result owner on success or original call operands
++ * on exception. Native code MUST immediately return DEOPT/EXCEPTION respectively
++ * using this root PC/SP and an exact post-call map, never a pre-call replay map.
++ * No artifact/frame pointers survive the pinned call that performs Resume. */
++JS_EXTERN JSJitHelperStatus JS_JitInlineResume(JSJitExecFrame *callee,
++    uint32_t resume_pc, uint32_t resume_kind);
++/* Nonallocating, nonpolling checkpoint of the currently active root or shadow
++ * frame. A valid retired generation (including an inline ancestor) returns
++ * GUARD_MISS without exception: resume the exact post-effect instruction, never
++ * replay an earlier call. Use after every reentrant/finalizing operation,
++ * including Leave on its surviving caller; a consumed callee is not a handle.
++ * DUP/FREE alone accept a retired trusted shadow generation to finish ownership
++ * moves for an already-successful opcode. Check after this commit plumbing,
++ * before another bytecode effect; other helpers and Leave remain strict.
++ * Malformed frame identity is an uncatchable invariant exception. */
++JS_EXTERN JSJitHelperStatus JS_JitInlineCheck(JSJitExecFrame *frame);
++typedef struct JSJitInlineAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t max_depth;
++    uint32_t max_bytes;
++    uint32_t effects; /* conservative JS_JIT_HELPER_* flags for all operations */
++    uint32_t reserved;
++    JSJitHelperStatus (*enter)(JSJitExecFrame *, uint32_t, uint32_t,
++                              uint32_t, uint32_t, uint32_t, JSJitExecFrame **);
++    JSJitHelperStatus (*leave)(JSJitExecFrame *, uint32_t);
++    JSJitHelperStatus (*resume)(JSJitExecFrame *, uint32_t, uint32_t);
++    JSJitHelperStatus (*check)(JSJitExecFrame *);
++} JSJitInlineAPI;
++/* NULL for an unsupported version. Resolve native call addresses through this
++ * table only after validating the main JIT ABI, table size/version and effects. */
++JS_EXTERN const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version);
++
+ #ifdef __cplusplus
+ }
+ #endif

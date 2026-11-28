@@ -1,0 +1,286 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -371,6 +371,7 @@
+     uint32_t jit_active_helper_abi_version;
+     uint64_t jit_next_function_id;
+     uint64_t jit_next_generation;
++    uint64_t jit_next_shape_generation; /* never reset or reused */
+     uint64_t jit_runtime_id;
+     uint64_t jit_next_frame_cookie;
+     uint64_t jit_active_frame_cookie;
+@@ -1093,6 +1094,9 @@
+     int deleted_prop_count;
+     JSShape *shape_hash_next; /* in JSRuntime.shape_hash[h] list */
+     JSObject *proto;
++#ifdef CONFIG_JIT_ABI
++    uint64_t jit_shape_generation;
++#endif
+     JSShapeProperty prop[]; /* prop_size elements */
+ };
+ 
+@@ -2319,7 +2323,18 @@
+                               helper_table_fingerprint);
+     hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
+                               element_layout_fingerprint);
+-    return QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, element_layout);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, element_layout);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, property_layout_fingerprint);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, property_layout);
++}
++
++static uint64_t qjsjit_property_layout_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitPropertyLayout);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitPropertyLayout, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitPropertyLayout, object_shape_offset);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitPropertyLayout, object_properties_offset);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitPropertyLayout, shape_generation_offset);
+ }
+ 
+ static uint64_t qjsjit_element_layout_layout(void)
+@@ -2548,25 +2563,16 @@
+     rt->jit_backend_active_depth--;
+ }
+ 
+-static uint64_t qjsjit_shape_generation(const JSShape *shape)
+-{
+-    uint64_t hash = UINT64_C(1469598103934665603);
+-    int i;
++/* Tokens describe an immutable interval of a shape's descriptor layout.
++   Assignment is feedback-only. Exhaustion disables new observations instead
++   of wrapping into a token that an existing artifact may still contain. */
++static uint64_t qjsjit_observe_shape_generation(JSRuntime *rt, JSShape *shape)
++{
+     if (!shape)
+         return 0;
+-#define QJSJIT_SHAPE_HASH(value) do { \
+-        hash ^= (uint64_t)(value); \
+-        hash *= UINT64_C(1099511628211); \
+-    } while (0)
+-    QJSJIT_SHAPE_HASH((uintptr_t)shape->proto);
+-    QJSJIT_SHAPE_HASH((uint32_t)shape->prop_count);
+-    QJSJIT_SHAPE_HASH((uint16_t)(shape->proto ? shape->proto->class_id : 0));
+-    for (i = 0; i < shape->prop_count; i++) {
+-        QJSJIT_SHAPE_HASH(shape->prop[i].atom);
+-        QJSJIT_SHAPE_HASH(shape->prop[i].flags);
+-    }
+-#undef QJSJIT_SHAPE_HASH
+-    return hash ? hash : 1;
++    if (!shape->jit_shape_generation && rt->jit_next_shape_generation != UINT64_MAX)
++        shape->jit_shape_generation = ++rt->jit_next_shape_generation;
++    return shape->jit_shape_generation;
+ }
+ 
+ static uint32_t qjsjit_property_attributes(uint32_t flags)
+@@ -2618,10 +2624,12 @@
+     event.flags = flags;
+     event.types = types;
+     event.shape_identity = (uintptr_t)receiver->shape;
+-    event.shape_generation = qjsjit_shape_generation(receiver->shape);
++    event.shape_generation = qjsjit_observe_shape_generation(rt, receiver->shape);
+     event.prototype_identity = receiver == owner ? 0 : (uintptr_t)owner;
+     event.prototype_generation = receiver == owner ? 0 :
+-        qjsjit_shape_generation(owner->shape);
++        qjsjit_observe_shape_generation(rt, owner->shape);
++    if (!event.shape_generation || (receiver != owner && !event.prototype_generation))
++        return;
+     event.property_offset = (uint32_t)(property - owner->prop);
+     event.property_attributes = qjsjit_property_attributes(shape_property->flags);
+     rt->jit_backend_active_depth++;
+@@ -2971,6 +2979,11 @@
+     info.helper_table_fingerprint = QJSJIT_GENERATED_HELPER_FINGERPRINT;
+     info.element_layout_fingerprint = qjsjit_element_layout_layout();
+     qjsjit_init_element_layout(&info.element_layout);
++    info.property_layout_fingerprint = qjsjit_property_layout_layout();
++    info.property_layout.struct_size = sizeof(info.property_layout);
++    info.property_layout.object_shape_offset = offsetof(JSObject, shape);
++    info.property_layout.object_properties_offset = offsetof(JSObject, prop);
++    info.property_layout.shape_generation_offset = offsetof(JSShape, jit_shape_generation);
+ 
+     build_fingerprint = qjsjit_hash_u64(UINT64_C(0xcbf29ce484222325),
+                                         info.source_revision);
+@@ -3000,8 +3013,10 @@
+         build_fingerprint, info.runtime_api_layout_fingerprint);
+     build_fingerprint = qjsjit_hash_u64(
+         build_fingerprint, info.helper_table_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.element_layout_fingerprint);
+     info.build_fingerprint = qjsjit_hash_u64(
+-        build_fingerprint, info.element_layout_fingerprint);
++        build_fingerprint, info.property_layout_fingerprint);
+ 
+     copy_size = caller_size;
+     if (copy_size > sizeof(info))
+@@ -6442,6 +6457,12 @@
+     rt->shape_hash_count--;
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++#define QJSJIT_INVALIDATE_SHAPE(shape) ((shape)->jit_shape_generation = 0)
++#else
++#define QJSJIT_INVALIDATE_SHAPE(shape) ((void)0)
++#endif
++
+ /* create a new empty shape with prototype 'proto'. It is not hashed */
+ static inline JSShape *js_new_shape_nohash(JSContext *ctx, JSObject *proto,
+                                            int hash_size, int prop_size)
+@@ -6454,6 +6475,7 @@
+     if (!sh_alloc)
+         return NULL;
+     sh = get_shape_from_alloc(sh_alloc, hash_size);
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     sh->header.ref_count = 1;
+     add_gc_object(rt, &sh->header, JS_GC_OBJ_TYPE_SHAPE);
+     if (proto)
+@@ -6550,6 +6572,7 @@
+     sh_alloc1 = get_alloc_from_shape(sh1);
+     memcpy(sh_alloc, sh_alloc1, size);
+     sh = get_shape_from_alloc(sh_alloc, hash_size);
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     sh->header.ref_count = 1;
+     add_gc_object(ctx->rt, &sh->header, JS_GC_OBJ_TYPE_SHAPE);
+     sh->is_hashed = false;
+@@ -6738,6 +6761,7 @@
+         list_add_tail(&sh->header.link, &ctx->rt->gc_obj_list);
+     }
+     *psh = sh;
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     sh->prop_size = new_size;
+     return 0;
+ }
+@@ -6772,6 +6796,7 @@
+     sh = get_shape_from_alloc(sh_alloc, new_hash_size);
+     list_del(&old_sh->header.link);
+     memcpy(sh, old_sh, sizeof(JSShape));
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     list_add_tail(&sh->header.link, &ctx->rt->gc_obj_list);
+ 
+     memset(prop_hash_end(sh) - new_hash_size, 0,
+@@ -6842,6 +6867,7 @@
+     /* Initialize the new shape property.
+        The object property at p->prop[sh->prop_count] is uninitialized */
+     prop = sh->prop;
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     pr = &prop[sh->prop_count++];
+     pr->atom = JS_DupAtom(ctx, atom);
+     pr->flags = prop_flags;
+@@ -7176,6 +7202,7 @@
+             return JS_EXCEPTION;
+         }
+         p->shape = sh;
++        QJSJIT_INVALIDATE_SHAPE(sh);
+         for (i = 0; i < count; i++) {
+             atom = props[i];
+             pr = &sh->prop[i];
+@@ -9539,6 +9566,7 @@
+     sh = p->shape;
+     if (sh->proto)
+         JS_FreeValue(ctx, JS_MKPTR(JS_TAG_OBJECT, sh->proto));
++    QJSJIT_INVALIDATE_SHAPE(sh);
+     sh->proto = proto;
+     if (proto)
+         proto->is_prototype = true;
+@@ -9889,6 +9917,7 @@
+     /* 'func' shall not modify the object properties 'pr' */
+     val = func(realm, p, prop, pr->u.init.opaque);
+     js_autoinit_free(ctx->rt, pr);
++    QJSJIT_INVALIDATE_SHAPE(p->shape);
+     prs->flags &= ~JS_PROP_TMASK;
+     pr->u.value = JS_UNDEFINED;
+     if (JS_IsException(val))
+@@ -11068,6 +11097,7 @@
+             free_property(ctx->rt, pr1, pr->flags);
+             JS_FreeAtom(ctx, pr->atom);
+             /* put default values */
++            QJSJIT_INVALIDATE_SHAPE(p->shape);
+             pr->flags = 0;
+             pr->atom = JS_ATOM_NULL;
+             pr1->u.value = JS_UNDEFINED;
+@@ -11965,6 +11995,7 @@
+             sh->is_hashed = false;
+         }
+     }
++    QJSJIT_INVALIDATE_SHAPE(p->shape);
+     return 0;
+ }
+ 
+@@ -11974,6 +12005,7 @@
+     if (flags != (*pprs)->flags) {
+         if (js_shape_prepare_update(ctx, p, pprs))
+             return -1;
++        QJSJIT_INVALIDATE_SHAPE(p->shape);
+         (*pprs)->flags = flags;
+     }
+     return 0;
+@@ -12058,6 +12090,7 @@
+                     } else {
+                         JS_FreeValue(ctx, pr->u.value);
+                     }
++                    QJSJIT_INVALIDATE_SHAPE(p->shape);
+                     prs->flags = (prs->flags &
+                                   (JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE)) |
+                         JS_PROP_GETSET;
+@@ -12098,6 +12131,7 @@
+                         JS_FreeValue(ctx, JS_MKPTR(JS_TAG_OBJECT, pr->u.getset.getter));
+                     if (pr->u.getset.setter)
+                         JS_FreeValue(ctx, JS_MKPTR(JS_TAG_OBJECT, pr->u.getset.setter));
++                    QJSJIT_INVALIDATE_SHAPE(p->shape);
+                     prs->flags &= ~(JS_PROP_TMASK | JS_PROP_WRITABLE);
+                     pr->u.value = JS_UNDEFINED;
+                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF) {
+@@ -12133,6 +12167,7 @@
+                         val1 = js_dup(*pr->u.var_ref->pvalue);
+                         free_var_ref(ctx->rt, pr->u.var_ref);
+                         pr->u.value = val1;
++                        QJSJIT_INVALIDATE_SHAPE(p->shape);
+                         prs->flags &= ~(JS_PROP_TMASK | JS_PROP_WRITABLE);
+                     }
+                 } else if (prs->flags & JS_PROP_LENGTH) {
+@@ -19538,7 +19573,8 @@
+     expected_generation = (uint64_t)generation_lo |
+                           ((uint64_t)generation_hi << 32);
+     if ((uint64_t)(uintptr_t)receiver->shape != expected_identity ||
+-        qjsjit_shape_generation(receiver->shape) != expected_generation)
++        expected_generation == 0 || !receiver->shape ||
++        receiver->shape->jit_shape_generation != expected_generation)
+         return JS_JIT_HELPER_GUARD_MISS;
+     return JS_JIT_HELPER_OK;
+ }
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 20u
++#define QJSJIT_ABI_MINOR 21u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -372,6 +372,15 @@
+     uint32_t float64_array_class_id;
+ } JSJitElementLayout;
+ 
++/* Stable offsets for native shape-token guards. The nonzero token is
++   assigned only by feedback and cleared before descriptor mutations. */
++typedef struct JSJitPropertyLayout {
++    uint32_t struct_size;
++    uint32_t object_shape_offset;
++    uint32_t object_properties_offset;
++    uint32_t shape_generation_offset;
++} JSJitPropertyLayout;
++
+ typedef struct JSJitABIInfo {
+     uint32_t struct_size;
+     uint16_t major;
+@@ -396,6 +405,8 @@
+     uint64_t helper_table_fingerprint;
+     uint64_t element_layout_fingerprint;
+     JSJitElementLayout element_layout;
++    uint64_t property_layout_fingerprint;
++    JSJitPropertyLayout property_layout;
+ } JSJitABIInfo;
+ 
+ typedef struct JSJitHelperCounters {

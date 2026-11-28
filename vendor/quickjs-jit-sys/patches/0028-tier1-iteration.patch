@@ -1,0 +1,240 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -154,6 +154,9 @@
+       NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)            \
+     X(GENERIC_OP, generic_op, JS_JitHelperGenericOp, MAP_OUT_TWO_OP, 3,    \
+       OWNED, CONSUMED, CONSUMED, NONE, OWNED,                               \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
++    X(ITERATOR_OP, iterator_op, JS_JitHelperIteratorOp, MAP_OUT_TWO_OP, 0, \
++      NONE, NONE, NONE, NONE, NONE,                                         \
+       THROWING | ALLOCATING | REENTRANT | FINALIZING)
+ 
+ typedef enum JSJitHelperId {
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -134,6 +134,37 @@
+ 
+ JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
+ 
++/* Versioned continuing-path leaf for `for_of_next` over the built-in Array
++ * values iterator. It performs no allocation, throw, finalization or VM
++ * reentry. VALUE is returned only when the live iterator is an Array values
++ * iterator whose `next` method is the exact built-in, the iterated object is
++ * a fast Array and the current index is inside its dense storage; it then
++ * advances the iterator index and stores an owned (duplicated) element in
++ * *out, exactly as the built-in `next` would. Every other state is a MISS
++ * that leaves the iterator and *out untouched so the caller can run the
++ * generic interpreter operation. */
++#define QJSJIT_ITERATOR_API_VERSION 1u
++
++typedef enum JSJitIteratorQueryStatus {
++    JS_JIT_ITERATOR_QUERY_INVALID = -1,
++    JS_JIT_ITERATOR_QUERY_MISS = 0,
++    JS_JIT_ITERATOR_QUERY_VALUE = 1,
++} JSJitIteratorQueryStatus;
++
++typedef int JSJitArrayValuesNextFunc(JSContext *ctx, const JSValue *iterator,
++                                     const JSValue *next_method,
++                                     JSValue *out);
++
++typedef struct JSJitIteratorAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t effects;
++    uint32_t reserved;
++    JSJitArrayValuesNextFunc *array_values_next;
++} JSJitIteratorAPI;
++
++JS_EXTERN const JSJitIteratorAPI *JS_JitGetIteratorAPI(uint32_t version);
++
+ #define JS_JIT_FEEDBACK_ARRAY_STORE (1U << 6)
+ #define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
+ #define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -20673,6 +20673,124 @@
+     return exit;
+ }
+ 
++/* Exact interpreter stack effects for the synchronous iteration opcodes.
++ * `depth` is the bytecode-visible stack depth before the opcode. Native code
++ * materializes the complete frame, including the opcode's push window (which
++ * must still be JS_UNDEFINED), and reloads the affected slots afterwards. The
++ * interpreter routines run directly on the materialized stack, so every owner
++ * stays C-visible across user iterator code, allocation and cycle collection.
++ * On a language exception every slot at or above the opcode's interpreter
++ * exception depth is JS_UNDEFINED and every slot below it is exactly what the
++ * interpreter's unwinder observes, including the for-of catch offset that
++ * closes the iterator with a throw completion. */
++JSJitHelperStatus JS_JitHelperIteratorOp(JSJitExecFrame *frame,
++                                         uint32_t stack_map_id, uint32_t depth,
++                                         uint32_t opcode, uint32_t operand,
++                                         uint32_t reserved)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSContext *ctx;
++    JSValue *sp;
++    uint32_t visible, pops, window, exception_depth, success_depth, i;
++    int status;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_ITERATOR_OP);
++    ctx = frame->ctx;
++    switch (opcode) {
++    case OP_for_of_start:
++        pops = 1;
++        window = 2;
++        break;
++    case OP_for_of_next:
++        if (operand > UINT8_MAX)
++            return qjsjit_reject_helper(frame, "invalid JIT for-of offset");
++        pops = 3 + operand;
++        window = 2;
++        break;
++    case OP_for_in_start:
++        pops = 1;
++        window = 0;
++        break;
++    case OP_for_in_next:
++        pops = 1;
++        window = 2;
++        break;
++    case OP_iterator_close:
++        pops = 3;
++        window = 0;
++        break;
++    default:
++        return qjsjit_reject_helper(frame, "invalid JIT iterator opcode");
++    }
++    if (opcode != OP_for_of_next && operand != 0)
++        return qjsjit_reject_helper(frame, "invalid JIT iterator operand");
++    visible = (uint32_t)(frame->stack_top - frame->stack_base);
++    if (reserved != 0 || depth < pops || depth > b->stack_size ||
++        visible > b->stack_size || depth + window > visible)
++        return qjsjit_reject_helper(frame, "invalid JIT iterator stack");
++    sp = frame->stack_base + depth;
++    for (i = 0; i < window; i++) {
++        if (!JS_IsUndefined(sp[i]))
++            return qjsjit_reject_helper(frame, "occupied JIT iterator output");
++    }
++    if (opcode == OP_iterator_close) {
++        /* iter_obj next catch_offset -> ; the catch offset is dropped and the
++         * next method released before closing, exactly as the interpreter
++         * does, so neither is live if closing throws. */
++        exception_depth = depth - 2;
++        success_depth = depth - 3;
++        JS_FreeValue(ctx, sp[-1]);
++        sp[-1] = JS_UNDEFINED;
++        JS_FreeValue(ctx, sp[-2]);
++        sp[-2] = JS_UNDEFINED;
++    } else {
++        exception_depth = depth;
++        success_depth = depth + window;
++    }
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    switch (opcode) {
++    case OP_for_of_start:
++        status = js_for_of_start(ctx, sp, false);
++        if (status == 0)
++            sp[1] = JS_NewCatchOffset(ctx, 0);
++        break;
++    case OP_for_of_next:
++        status = js_for_of_next(ctx, sp, -3 - (int)operand);
++        break;
++    case OP_for_in_start:
++        status = js_for_in_start(ctx, sp);
++        break;
++    case OP_for_in_next:
++        status = js_for_in_next(ctx, sp);
++        break;
++    default:
++        status = 0;
++        if (!JS_IsUndefined(sp[-3])) {
++            status = JS_IteratorClose(ctx, sp[-3], false);
++            if (status == 0)
++                JS_FreeValue(ctx, sp[-3]);
++        }
++        if (status == 0)
++            sp[-3] = JS_UNDEFINED;
++        break;
++    }
++    if (status < 0) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    if (qjsjit_stress_gc(frame) == JS_JIT_HELPER_OK)
++        return JS_JIT_HELPER_OK;
++    /* An allocation failure after a completed operation reports the pending
++     * exception at the interpreter's exception depth for this opcode. */
++    for (i = exception_depth; i < success_depth; i++)
++        qjsjit_consume_slot(ctx, frame->stack_base + i);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
+ #endif
+ 
+ #ifdef CONFIG_JIT_ABI
+@@ -63148,6 +63266,57 @@
+     };
+     return version == QJSJIT_ARRAY_API_VERSION ? &api : NULL;
+ }
++
++/* A leaf: no allocation, property lookup, exception, finalization, callback
++ * or VM reentry. The only effects on a VALUE result are the ones the built-in
++ * %ArrayIteratorPrototype%.next performs for an in-bounds dense element: the
++ * iterator index advances and the element is duplicated into *out. Every
++ * other state misses before touching anything. */
++static int qjsjit_array_values_next(JSContext *ctx, const JSValue *iterator,
++                                    const JSValue *next_method, JSValue *out)
++{
++    JSObject *iterator_object, *method, *array;
++    JSArrayIteratorData *it;
++    uint32_t idx;
++
++    if (!ctx || !iterator || !next_method || !out)
++        return JS_JIT_ITERATOR_QUERY_INVALID;
++    if (JS_VALUE_GET_TAG(*iterator) != JS_TAG_OBJECT ||
++        JS_VALUE_GET_TAG(*next_method) != JS_TAG_OBJECT)
++        return JS_JIT_ITERATOR_QUERY_MISS;
++    iterator_object = JS_VALUE_GET_OBJ(*iterator);
++    method = JS_VALUE_GET_OBJ(*next_method);
++    if (iterator_object->class_id != JS_CLASS_ARRAY_ITERATOR ||
++        method->class_id != JS_CLASS_C_FUNCTION ||
++        method->u.cfunc.cproto != JS_CFUNC_iterator_next ||
++        method->u.cfunc.c_function.iterator_next != js_array_iterator_next)
++        return JS_JIT_ITERATOR_QUERY_MISS;
++    it = iterator_object->u.array_iterator_data;
++    if (!it || it->kind != JS_ITERATOR_KIND_VALUE ||
++        JS_VALUE_GET_TAG(it->obj) != JS_TAG_OBJECT)
++        return JS_JIT_ITERATOR_QUERY_MISS;
++    array = JS_VALUE_GET_OBJ(it->obj);
++    /* A fast Array's own `length` data property is never below its dense
++     * count, so an in-bounds dense index is exactly the built-in's
++     * `idx < length` element read, with no prototype or getter lookup. */
++    if (array->class_id != JS_CLASS_ARRAY || !array->fast_array)
++        return JS_JIT_ITERATOR_QUERY_MISS;
++    idx = it->idx;
++    if (idx >= array->u.array.count)
++        return JS_JIT_ITERATOR_QUERY_MISS;
++    it->idx = idx + 1;
++    *out = js_dup(array->u.array.u.values[idx]);
++    return JS_JIT_ITERATOR_QUERY_VALUE;
++}
++
++const JSJitIteratorAPI *JS_JitGetIteratorAPI(uint32_t version)
++{
++    static const JSJitIteratorAPI api = {
++        sizeof(JSJitIteratorAPI), QJSJIT_ITERATOR_API_VERSION, 0, 0,
++        qjsjit_array_values_next,
++    };
++    return version == QJSJIT_ITERATOR_API_VERSION ? &api : NULL;
++}
+ #endif
+ 
+ static JSValue js_typed_array_get_buffer(JSContext *ctx, JSValueConst this_val)

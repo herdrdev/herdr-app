@@ -1,0 +1,144 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2512,6 +2512,60 @@
+     rt->jit_backend_active_depth--;
+ }
+ 
++static void qjsjit_record_array_feedback(JSRuntime *rt, JSFunctionBytecode *b,
++                                        uint32_t pc, JSValueConst receiver,
++                                        uint32_t flags)
++{
++    uint32_t mode = JS_JIT_ARRAY_MODE_GENERIC;
++    JSObject *object;
++    JSTypedArray *typed;
++    JSArrayBuffer *buffer;
++
++    if (!qjsjit_feedback_enabled(rt, b))
++        return;
++    if (JS_VALUE_GET_TAG(receiver) == JS_TAG_OBJECT) {
++        object = JS_VALUE_GET_OBJ(receiver);
++        switch (object->class_id) {
++        case JS_CLASS_ARRAY:
++            if (object->fast_array)
++                mode = JS_JIT_ARRAY_MODE_PACKED;
++            else
++                flags |= JS_JIT_FEEDBACK_ARRAY_SLOW;
++            break;
++        case JS_CLASS_INT32_ARRAY:
++        case JS_CLASS_FLOAT64_ARRAY:
++            mode = object->class_id == JS_CLASS_INT32_ARRAY ?
++                JS_JIT_ARRAY_MODE_INT32 : JS_JIT_ARRAY_MODE_FLOAT64;
++            typed = object->u.typed_array;
++            if (!object->fast_array || !typed || !typed->buffer ||
++                (typed->buffer->class_id != JS_CLASS_ARRAY_BUFFER &&
++                 typed->buffer->class_id != JS_CLASS_SHARED_ARRAY_BUFFER) ||
++                !(buffer = typed->buffer->u.array_buffer)) {
++                flags |= JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING;
++                break;
++            }
++            /* Fixed-length views over RABs need not have track_rab set. */
++            if (typed->track_rab || buffer->max_byte_length >= 0)
++                flags |= JS_JIT_FEEDBACK_ARRAY_RESIZABLE;
++            if (buffer->detached)
++                flags |= JS_JIT_FEEDBACK_ARRAY_DETACHED;
++            if (buffer->immutable)
++                flags |= JS_JIT_FEEDBACK_ARRAY_IMMUTABLE;
++            if (buffer->shared)
++                flags |= JS_JIT_FEEDBACK_ARRAY_SHARED;
++            break;
++        default:
++            /* Built-in supported arrays are exotic too; only unsupported
++             * receiver classes contribute the EXOTIC hazard here. */
++            if (object->is_exotic)
++                flags |= JS_JIT_FEEDBACK_ARRAY_EXOTIC;
++            break;
++        }
++    }
++    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_ARRAY, pc, mode,
++                            NULL, 0, flags);
++}
++
+ static void qjsjit_record_binary_feedback(JSRuntime *rt, JSFunctionBytecode *b,
+                                           uint32_t pc, uint32_t lhs_type,
+                                           uint32_t rhs_type,
+@@ -20962,6 +21016,12 @@
+                 JSShapeProperty *prs;
+ 
+                 atom = JS_ATOM_length;
++#ifdef CONFIG_JIT_ABI
++                if (qjsjit_feedback_enabled(rt, b))
++                    qjsjit_record_array_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1), sp[-1],
++                        JS_JIT_FEEDBACK_ARRAY_LENGTH);
++#endif
+ 
+                 obj = sp[-1];
+                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+@@ -22792,6 +22852,11 @@
+             {
+                 JSValue val;
+ 
++#ifdef CONFIG_JIT_ABI
++                if (qjsjit_feedback_enabled(rt, b))
++                    qjsjit_record_array_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1), sp[-2], 0);
++#endif
+                 sf->cur_pc = pc;
+                 val = JS_GetPropertyValue(ctx, sp[-2], sp[-1]);
+                 JS_FreeValue(ctx, sp[-2]);
+@@ -22862,6 +22927,12 @@
+                 uint32_t idx;
+                 JSObject *p;
+ 
++#ifdef CONFIG_JIT_ABI
++                if (qjsjit_feedback_enabled(rt, b))
++                    qjsjit_record_array_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1), sp[-3],
++                        JS_JIT_FEEDBACK_ARRAY_STORE);
++#endif
+                 val = sp[-1];
+                 if (likely(JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_INT)) {
+                     idx = JS_VALUE_GET_INT(sp[-2]);
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 22u
++#define QJSJIT_ABI_MINOR 23u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -83,8 +83,29 @@
+     JS_JIT_FEEDBACK_CALL = 0, JS_JIT_FEEDBACK_RETURN = 1,
+     JS_JIT_FEEDBACK_BINARY = 2, JS_JIT_FEEDBACK_CONVERSION = 3,
+     JS_JIT_FEEDBACK_BRANCH = 4, JS_JIT_FEEDBACK_PROPERTY = 5,
++    JS_JIT_FEEDBACK_ARRAY = 6,
+ } JSJitFeedbackKind;
+ 
++/* ARRAY observes the receiver before any property lookup, coercion or store.
++ * slot is JSJitArrayMode, type_count is zero, and flags describe the access
++ * and observed hazards. These are profiles, never continuing-path guards. */
++typedef enum JSJitArrayMode {
++    JS_JIT_ARRAY_MODE_GENERIC = 0,
++    JS_JIT_ARRAY_MODE_PACKED = 1,
++    JS_JIT_ARRAY_MODE_INT32 = 2,
++    JS_JIT_ARRAY_MODE_FLOAT64 = 3,
++} JSJitArrayMode;
++
++#define JS_JIT_FEEDBACK_ARRAY_STORE (1U << 6)
++#define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
++#define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)
++#define JS_JIT_FEEDBACK_ARRAY_SLOW (1U << 9)
++#define JS_JIT_FEEDBACK_ARRAY_RESIZABLE (1U << 10)
++#define JS_JIT_FEEDBACK_ARRAY_DETACHED (1U << 11)
++#define JS_JIT_FEEDBACK_ARRAY_IMMUTABLE (1U << 12)
++#define JS_JIT_FEEDBACK_ARRAY_SHARED (1U << 13)
++#define JS_JIT_FEEDBACK_ARRAY_INVALID_BACKING (1U << 14)
++
+ #define JS_JIT_FEEDBACK_OVERFLOW (1U << 0)
+ #define JS_JIT_FEEDBACK_NEGATIVE_ZERO (1U << 1)
+ #define JS_JIT_FEEDBACK_NAN (1U << 2)

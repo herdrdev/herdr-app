@@ -1,0 +1,2791 @@
+diff --git a/api-test.c b/api-test.c
+index a45dfb3..884e849 100644
+--- a/api-test.c
++++ b/api-test.c
+@@ -6,6 +6,78 @@
+ #include <string.h>
+ #include "quickjs.h"
+ #include "cutils.h"
++#ifdef CONFIG_JIT_ABI
++#include "quickjs-jit.h"
++#endif
++
++#ifdef CONFIG_JIT_ABI
++typedef struct JSJitABIInfoV1_0 {
++    uint32_t struct_size;
++    uint16_t major;
++    uint16_t minor;
++    uint8_t pointer_width;
++    uint8_t little_endian;
++    uint16_t value_size;
++    uint64_t source_revision;
++    uint64_t opcode_fingerprint;
++    uint64_t value_layout_fingerprint;
++    uint64_t build_feature_flags;
++    uint64_t build_fingerprint;
++    uint64_t abi_info_layout_fingerprint;
++    uint64_t function_id_layout_fingerprint;
++    uint64_t hot_event_layout_fingerprint;
++    uint64_t function_snapshot_layout_fingerprint;
++    uint64_t entry_handle_layout_fingerprint;
++    uint64_t backend_vtable_layout_fingerprint;
++} JSJitABIInfoV1_0;
++
++typedef struct JSJitABIInfoV1_1 {
++    JSJitABIInfoV1_0 prefix;
++    uint64_t exec_frame_layout_fingerprint;
++    uint64_t exit_layout_fingerprint;
++} JSJitABIInfoV1_1;
++
++static void jit_abi_prefix_queries(void)
++{
++    struct {
++        JSJitABIInfoV1_0 prefix;
++        uint8_t canary[16];
++    } v1_0;
++    struct {
++        JSJitABIInfoV1_1 prefix;
++        uint8_t canary[16];
++    } v1_1;
++    uint8_t expected[16];
++
++    _Static_assert(sizeof(JSJitABIInfoV1_0) ==
++                   offsetof(JSJitABIInfo, exec_frame_layout_fingerprint),
++                   "ABI 1.0 prefix size");
++    _Static_assert(sizeof(JSJitABIInfoV1_1) ==
++                   offsetof(JSJitABIInfo, runtime_api_layout_fingerprint),
++                   "ABI 1.1 prefix size");
++    memset(expected, 0xa5, sizeof(expected));
++    memset(&v1_0, 0, sizeof(v1_0));
++    v1_0.prefix.struct_size = sizeof(v1_0.prefix);
++    memset(v1_0.canary, 0xa5, sizeof(v1_0.canary));
++    assert(JS_GetJitABIInfo((JSJitABIInfo *)&v1_0.prefix) ==
++           JS_JIT_BACKEND_OK);
++    assert(v1_0.prefix.struct_size == sizeof(JSJitABIInfo));
++    assert(v1_0.prefix.major == QJSJIT_ABI_MAJOR);
++    assert(v1_0.prefix.minor == QJSJIT_ABI_MINOR);
++    assert(!memcmp(v1_0.canary, expected, sizeof(expected)));
++
++    memset(expected, 0x5a, sizeof(expected));
++    memset(&v1_1, 0, sizeof(v1_1));
++    v1_1.prefix.prefix.struct_size = sizeof(v1_1.prefix);
++    memset(v1_1.canary, 0x5a, sizeof(v1_1.canary));
++    assert(JS_GetJitABIInfo((JSJitABIInfo *)&v1_1.prefix) ==
++           JS_JIT_BACKEND_OK);
++    assert(v1_1.prefix.prefix.struct_size == sizeof(JSJitABIInfo));
++    assert(v1_1.prefix.prefix.major == QJSJIT_ABI_MAJOR);
++    assert(v1_1.prefix.prefix.minor == QJSJIT_ABI_MINOR);
++    assert(!memcmp(v1_1.canary, expected, sizeof(expected)));
++}
++#endif
+ 
+ static JSRuntime *new_runtime(void)
+ {
+@@ -1133,6 +1205,9 @@ static void new_symbol(void)
+ 
+ int main(void)
+ {
++#ifdef CONFIG_JIT_ABI
++    jit_abi_prefix_queries();
++#endif
+     cfunctions();
+     sync_call();
+     async_call();
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+new file mode 100644
+index 0000000..d84b8bc
+--- /dev/null
++++ b/quickjs-jit-helpers.h
+@@ -0,0 +1,160 @@
++/*
++ * Canonical QuickJS JIT helper ABI.
++ *
++ * This file is deliberately an X-macro data source.  Helper IDs, the runtime
++ * table, public C declarations, native metadata, generated Rust metadata, and
++ * Cranelift signatures all derive from QJSJIT_HELPER_LIST.  Entries are
++ * append-only and POLL remains ID zero for ABI 1.0 compatibility.
++ *
++ * Value ownership entries are in logical value-argument order.  OWNED denotes
++ * an output slot, BORROWED remains owned by its frame slot, and CONSUMED is set
++ * to JS_UNDEFINED by the adapter on both success and language exception.
++ * Helper ownership is deliberately independent of bytecode stack effects:
++ * lowering performs opcode-specific moves and FREE calls explicitly, in
++ * QuickJS interpreter order, instead of hiding pops in a reusable helper.
++ */
++#ifndef QUICKJS_JIT_HELPERS_H
++#define QUICKJS_JIT_HELPERS_H
++
++#define QJSJIT_HELPER_ABI_VERSION 1u
++#define QJSJIT_HELPER_MAX_ABI_TYPES 8u
++#define QJSJIT_HELPER_MAX_VALUES 4u
++
++typedef int32_t JSJitHelperStatus;
++enum {
++    JS_JIT_HELPER_OK = 0,
++    JS_JIT_HELPER_EXCEPTION = -1,
++};
++
++typedef enum JSJitHelperABIType {
++    JS_JIT_HELPER_ABI_NONE = 0,
++    JS_JIT_HELPER_ABI_STATUS = 1,
++    JS_JIT_HELPER_ABI_FRAME = 2,
++    JS_JIT_HELPER_ABI_U32 = 3,
++} JSJitHelperABIType;
++
++typedef enum JSJitHelperOwnership {
++    JS_JIT_HELPER_NONE = 0,
++    JS_JIT_HELPER_BORROWED = 1,
++    JS_JIT_HELPER_CONSUMED = 2,
++    JS_JIT_HELPER_OWNED = 3,
++} JSJitHelperOwnership;
++
++enum {
++    JS_JIT_HELPER_THROWING = 1u << 0,
++    JS_JIT_HELPER_ALLOCATING = 1u << 1,
++    JS_JIT_HELPER_REENTRANT = 1u << 2,
++    JS_JIT_HELPER_FINALIZING = 1u << 3,
++};
++
++typedef enum JSJitCompareOp {
++    JS_JIT_COMPARE_LT = 0,
++    JS_JIT_COMPARE_LTE = 1,
++    JS_JIT_COMPARE_GT = 2,
++    JS_JIT_COMPARE_GTE = 3,
++    JS_JIT_COMPARE_EQ = 4,
++    JS_JIT_COMPARE_NEQ = 5,
++    JS_JIT_COMPARE_STRICT_EQ = 6,
++    JS_JIT_COMPARE_STRICT_NEQ = 7,
++} JSJitCompareOp;
++
++/* id, table field, C adapter, signature, value arity, four ownership entries,
++ * output ownership, behavioral flags */
++#define QJSJIT_HELPER_LIST(X)                                                \
++    X(POLL, interrupt_poll, JS_JitHelperPoll, FRAME, 0, NONE, NONE, NONE,    \
++      NONE, NONE, THROWING | REENTRANT)                                      \
++    X(DUP, dup, JS_JitHelperDup, MAP_OUT_IN, 2, OWNED, BORROWED, NONE, NONE, \
++      OWNED, 0)                                                              \
++    X(FREE, free, JS_JitHelperFree, MAP_IN, 1, CONSUMED, NONE, NONE, NONE,   \
++      NONE, REENTRANT | FINALIZING)                                          \
++    X(RESOLVE_CONST, resolve_const, JS_JitHelperResolveConst,                \
++      MAP_OUT_INDEX, 1, OWNED, NONE, NONE, NONE, OWNED, 0)                  \
++    X(TO_NUMERIC, to_numeric, JS_JitHelperToNumeric, MAP_OUT_IN, 2, OWNED,   \
++      CONSUMED, NONE, NONE, OWNED,                                           \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                        \
++    X(TO_BOOL, to_bool, JS_JitHelperToBool, MAP_OUT_IN, 2, OWNED, CONSUMED, \
++      NONE, NONE, OWNED, REENTRANT | FINALIZING)                             \
++    X(ADD_SLOW, add_slow, JS_JitHelperAddSlow, MAP_OUT_TWO, 3, OWNED,       \
++      CONSUMED, CONSUMED, NONE, OWNED,                                       \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                        \
++    X(COMPARE_SLOW, compare_slow, JS_JitHelperCompareSlow, MAP_OUT_TWO_OP,   \
++      3, OWNED, CONSUMED, CONSUMED, NONE, OWNED,                             \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                        \
++    X(GET_PROPERTY, get_property, JS_JitHelperGetProperty,                  \
++      MAP_OUT_OBJECT_ATOM, 2, OWNED, BORROWED, NONE, NONE, OWNED,           \
++      THROWING | ALLOCATING | REENTRANT)                                     \
++    X(SET_PROPERTY, set_property, JS_JitHelperSetProperty,                   \
++      MAP_OBJECT_ATOM_VALUE, 2, BORROWED, CONSUMED, NONE, NONE, NONE,        \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                        \
++    X(CALL, call, JS_JitHelperCall, MAP_CALL, 4, OWNED, BORROWED, BORROWED, \
++      BORROWED, OWNED, THROWING | ALLOCATING | REENTRANT)                    \
++    X(NEW_ARRAY, new_array, JS_JitHelperNewArray, MAP_OUT, 1, OWNED, NONE,  \
++      NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)                  \
++    X(NEW_OBJECT, new_object, JS_JitHelperNewObject, MAP_OUT, 1, OWNED,      \
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)
++
++typedef enum JSJitHelperId {
++#define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
++                         own1, own2, own3, output, flags)                    \
++    JS_JIT_HELPER_##id,
++    QJSJIT_HELPER_LIST(QJSJIT_HELPER_ID)
++#undef QJSJIT_HELPER_ID
++    JS_JIT_HELPER_COUNT,
++} JSJitHelperId;
++
++typedef struct JSJitHelperInfo {
++    uint16_t id;
++    uint8_t abi_type_count;
++    uint8_t value_arity;
++    uint8_t abi_types[QJSJIT_HELPER_MAX_ABI_TYPES];
++    uint8_t value_ownership[QJSJIT_HELPER_MAX_VALUES];
++    uint8_t output_ownership;
++    uint8_t reserved[3];
++    uint32_t flags;
++    const char *name;
++} JSJitHelperInfo;
++
++#define QJSJIT_DECLARE_FRAME(name)                                           \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame)
++#define QJSJIT_DECLARE_MAP_IN(name)                                          \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t input)
++#define QJSJIT_DECLARE_MAP_OUT(name)                                         \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output)
++#define QJSJIT_DECLARE_MAP_OUT_IN(name)                                      \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output, \
++                                     uint32_t input)
++#define QJSJIT_DECLARE_MAP_OUT_INDEX(name) QJSJIT_DECLARE_MAP_OUT_IN(name)
++#define QJSJIT_DECLARE_MAP_OUT_TWO(name)                                     \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output, \
++                                     uint32_t left, uint32_t right)
++#define QJSJIT_DECLARE_MAP_OUT_TWO_OP(name)                                  \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output, \
++                                     uint32_t left, uint32_t right,          \
++                                     uint32_t operation)
++#define QJSJIT_DECLARE_MAP_OUT_OBJECT_ATOM(name)                             \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output, \
++                                     uint32_t object, uint32_t atom)
++#define QJSJIT_DECLARE_MAP_OBJECT_ATOM_VALUE(name)                           \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t object, \
++                                     uint32_t atom, uint32_t value)
++#define QJSJIT_DECLARE_MAP_CALL(name)                                        \
++    JS_EXTERN JSJitHelperStatus name(                                       \
++        JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t output,       \
++        uint32_t function, uint32_t this_value, uint32_t argv, uint32_t argc)
++#define QJSJIT_DECLARE(id, field, c_name, signature, value_arity, own0, own1, \
++                       own2, own3, output, flags)                            \
++    QJSJIT_DECLARE_##signature(c_name);
++QJSJIT_HELPER_LIST(QJSJIT_DECLARE)
++#undef QJSJIT_DECLARE
++
++JS_EXTERN const JSJitHelperInfo *JS_JitGetHelperTable(
++    uint32_t *count, uint64_t *fingerprint);
++
++#endif /* QUICKJS_JIT_HELPERS_H */
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+new file mode 100644
+index 0000000..d9c1503
+--- /dev/null
++++ b/quickjs-jit.h
+@@ -0,0 +1,378 @@
++/*
++ * Versioned interface between QuickJS and an optional external JIT backend.
++ *
++ * This header is append-only within one ABI major version. It intentionally
++ * exposes no private QuickJS layout.
++ */
++#ifndef QUICKJS_JIT_H
++#define QUICKJS_JIT_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "quickjs.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define QJSJIT_ABI_MAJOR 1u
++#define QJSJIT_ABI_MINOR 4u
++
++/* Frame flags are append-only. Stress collection is a test/debug contract:
++ * every helper performs an allocating cycle-GC point before and after its
++ * operation while all live values remain in frame-visible slots. */
++#define JS_JIT_FUNCTION_STRICT (1U << 0)
++#define JS_JIT_FRAME_STRESS_GC (1U << 1)
++#define JS_JIT_FRAME_SIDE_PATH_HIT (1U << 2)
++
++/* Helper slot numbers flatten arguments, locals, and the operand stack, in
++ * that order. JS_JIT_SLOT_NONE is accepted only as argv for argc == 0. */
++#define JS_JIT_SLOT_NONE UINT32_MAX
++
++/* Native lowering may need an owned output distinct from every borrowed or
++ * consumed opcode input. QuickJS reserves these operand-tail slots in every
++ * normal bytecode frame; they are C-visible owners while frame.stack_top
++ * includes them and are never roots inferred from stack-map metadata. */
++#define JS_JIT_HELPER_SCRATCH_SLOTS 2u
++
++typedef struct JSJitFunctionId {
++    uint32_t struct_size;
++    uint32_t reserved;
++    uint64_t id;
++    uint64_t generation;
++} JSJitFunctionId;
++
++typedef enum JSJitHotKind {
++    JS_JIT_HOT_CALL = 0,
++    JS_JIT_HOT_LOOP = 1,
++} JSJitHotKind;
++
++/* Stable tokens: never expose QuickJS's private tag encoding to the backend. */
++typedef enum JSJitFeedbackType {
++    JS_JIT_FEEDBACK_NONE = 0,
++    JS_JIT_FEEDBACK_INT32 = 1,
++    JS_JIT_FEEDBACK_FLOAT64 = 2,
++    JS_JIT_FEEDBACK_BOOL = 3,
++    JS_JIT_FEEDBACK_NULL = 4,
++    JS_JIT_FEEDBACK_UNDEFINED = 5,
++    JS_JIT_FEEDBACK_STRING = 6,
++    JS_JIT_FEEDBACK_OBJECT = 7,
++} JSJitFeedbackType;
++
++typedef struct JSJitHotEvent {
++    uint32_t struct_size;
++    uint32_t kind;
++    JSJitFunctionId function;
++    uint32_t pc;
++    uint32_t count;
++    uint32_t feedback_type;
++    uint32_t feedback_slot;
++    JSJitFunctionId callee;
++} JSJitHotEvent;
++
++typedef enum JSJitOperandFormat {
++#define FMT(format) JS_JIT_FMT_##format,
++#define DEF(id, size, n_pop, n_push, format)
++#define def(id, size, n_pop, n_push, format)
++#include "quickjs-opcode.h"
++#undef def
++#undef DEF
++    JS_JIT_FMT_COUNT,
++} JSJitOperandFormat;
++
++typedef enum JSJitOpcode {
++#define FMT(format)
++#define DEF(id, size, n_pop, n_push, format) JS_JIT_OP_##id,
++#define def(id, size, n_pop, n_push, format)
++#include "quickjs-opcode.h"
++#undef def
++#undef DEF
++    JS_JIT_OPCODE_COUNT,
++} JSJitOpcode;
++
++typedef struct JSJitOpcodeInfo {
++    uint8_t opcode;
++    uint8_t size;
++    uint8_t n_pop;
++    uint8_t n_push;
++    uint8_t format;
++    uint8_t reserved[3];
++    const char *name;
++} JSJitOpcodeInfo;
++
++typedef enum JSJitConstantKind {
++    JS_JIT_CONSTANT_IMMEDIATE = 0,
++    JS_JIT_CONSTANT_STRING = 1,
++    JS_JIT_CONSTANT_BIG_INT = 2,
++    JS_JIT_CONSTANT_FUNCTION = 3,
++    JS_JIT_CONSTANT_OBJECT = 4,
++} JSJitConstantKind;
++
++typedef struct JSJitConstantDescriptor {
++    uint32_t index;
++    int32_t tag;
++    uint32_t kind;
++    uint32_t reserved;
++} JSJitConstantDescriptor;
++
++typedef enum JSJitSnapshotStatus {
++    JS_JIT_SNAPSHOT_OK = 0,
++    JS_JIT_SNAPSHOT_INVALID_ARGUMENT = -1,
++    JS_JIT_SNAPSHOT_NOT_BYTECODE = -2,
++    JS_JIT_SNAPSHOT_GENERATOR = -3,
++    JS_JIT_SNAPSHOT_ASYNC = -4,
++    JS_JIT_SNAPSHOT_EVAL = -5,
++    JS_JIT_SNAPSHOT_WITH = -6,
++    JS_JIT_SNAPSHOT_OUT_OF_MEMORY = -7,
++    JS_JIT_SNAPSHOT_TOO_LARGE = -8,
++    JS_JIT_SNAPSHOT_INVALID_BYTECODE = -9,
++} JSJitSnapshotStatus;
++
++/*
++ * The pointed-to arrays and this structure are one allocation. They contain
++ * copied scalar data only; JS_JitFreeSnapshot is safe after the source
++ * function and runtime have been collected.
++ */
++typedef struct JSJitFunctionSnapshot {
++    uint32_t struct_size;
++    uint32_t flags;
++    JSJitFunctionId function;
++    void *opaque;
++    uint64_t source_revision;
++    uint64_t opcode_fingerprint;
++    const uint8_t *bytecode;
++    uint32_t bytecode_len;
++    uint16_t arg_count;
++    uint16_t local_count;
++    uint16_t closure_count;
++    uint16_t stack_size;
++    const JSJitConstantDescriptor *constants;
++    uint32_t constant_count;
++    const uint8_t *exception_map;
++    uint32_t exception_map_len;
++    const uint8_t *source_map;
++    uint32_t source_map_len;
++} JSJitFunctionSnapshot;
++
++typedef enum JSJitExitKind {
++    JS_JIT_EXIT_DONE = 0,
++    JS_JIT_EXIT_EXCEPTION = 1,
++    JS_JIT_EXIT_INTERRUPT = 2,
++    JS_JIT_EXIT_DEOPT = 3,
++    JS_JIT_EXIT_RETRY_INTERPRETER = 4,
++} JSJitExitKind;
++
++typedef struct JSJitExecFrame JSJitExecFrame;
++
++#include "quickjs-jit-helpers.h"
++
++/*
++ * Runtime helpers are reached through this frame-owned, versioned table so
++ * generated code never embeds process addresses. POLL remains the v1.0
++ * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
++ */
++#define QJSJIT_RUNTIME_API_MAJOR 1u
++#define QJSJIT_RUNTIME_API_MINOR 1u
++
++#define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame)
++#define QJSJIT_RUNTIME_FIELD_MAP_IN(field)                                  \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t input)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT(field)                                 \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_IN(field)                              \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t input)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_INDEX(field)                           \
++    QJSJIT_RUNTIME_FIELD_MAP_OUT_IN(field)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_TWO(field)                             \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t left, uint32_t right)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_TWO_OP(field)                          \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t left, uint32_t right,               \
++                               uint32_t operation)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_OBJECT_ATOM(field)                     \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t object, uint32_t atom)
++#define QJSJIT_RUNTIME_FIELD_MAP_OBJECT_ATOM_VALUE(field)                   \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t object,      \
++                               uint32_t atom, uint32_t value)
++#define QJSJIT_RUNTIME_FIELD_MAP_CALL(field)                                \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t function, uint32_t this_value,      \
++                               uint32_t argv, uint32_t argc)
++
++typedef struct JSJitRuntimeAPI {
++    uint32_t struct_size;
++    uint16_t major;
++    uint16_t minor;
++#define QJSJIT_RUNTIME_FIELD(id, field, c_name, signature, value_arity, own0, \
++                             own1, own2, own3, output, flags)                \
++    QJSJIT_RUNTIME_FIELD_##signature(field);
++    QJSJIT_HELPER_LIST(QJSJIT_RUNTIME_FIELD)
++#undef QJSJIT_RUNTIME_FIELD
++} JSJitRuntimeAPI;
++
++typedef struct JSJitExit {
++    uint32_t kind;
++    /* Reserved at the C boundary; a backend trampoline may consume internal identity. */
++    uint32_t reserved;
++    const uint8_t *resume_pc;
++    JSValue *resume_stack_top;
++} JSJitExit;
++
++/*
++ * An entry is an ordinary native call. It returns one of the exits above;
++ * it must never retain frame pointers, unwind across C, or transfer control
++ * directly to an interpreter label. DONE transfers ownership of a
++ * non-JS_EXCEPTION frame.result and forbids a pending exception. Every other
++ * exit requires frame.result to remain JS_UNDEFINED. EXCEPTION requires a
++ * pending exception. INTERRUPT permits an optional pending exception and is
++ * made uncatchable by QuickJS. DEOPT and RETRY forbid a pending exception;
++ * DEOPT supplies an instruction-boundary resume_pc and materialized stack_top.
++ * RETRY may not mutate the frame and resumes at the PC/SP at which this
++ * particular entry (including OSR) was acquired.
++ */
++typedef JSJitExit (*JSJitEntryFn)(JSJitExecFrame *frame);
++
++/*
++ * A usable handle has non-NULL entry and pin fields. The pin must keep the
++ * entry and all of its metadata alive until the matching release_entry call.
++ * QuickJS releases it exactly once after the native call and before processing
++ * the returned exit.
++ */
++typedef struct JSJitEntryHandle {
++    uint32_t struct_size;
++    uint32_t reserved;
++    JSJitEntryFn entry;
++    void *pin;
++    uint32_t stack_map_count;
++    uint32_t helper_abi_version;
++} JSJitEntryHandle;
++
++/*
++ * All pointers in an execution frame are borrowed on the runtime thread for
++ * the duration of one pinned entry call. They must never enter an owned
++ * compilation snapshot or be retained after release_entry.
++ */
++struct JSJitExecFrame {
++    uint32_t struct_size;
++    uint32_t flags;
++    JSRuntime *rt;
++    JSContext *ctx;
++    uint64_t function_id;
++    uint64_t generation;
++    JSValueConst *arg_buf;
++    JSValue *var_buf;
++    JSValue *stack_base;
++    JSValue *stack_top;
++    const uint8_t *bytecode_start;
++    const uint8_t *pc;
++    JSValue result;
++    JSJitEntryHandle entry;
++    const JSJitRuntimeAPI *runtime_api;
++    uint64_t runtime_id;
++    uint64_t frame_cookie;
++    JSValue *stack_capacity;
++};
++
++typedef struct JSJitABIInfo {
++    uint32_t struct_size;
++    uint16_t major;
++    uint16_t minor;
++    uint8_t pointer_width;
++    uint8_t little_endian;
++    uint16_t value_size;
++    uint64_t source_revision;
++    uint64_t opcode_fingerprint;
++    uint64_t value_layout_fingerprint;
++    uint64_t build_feature_flags;
++    uint64_t build_fingerprint;
++    uint64_t abi_info_layout_fingerprint;
++    uint64_t function_id_layout_fingerprint;
++    uint64_t hot_event_layout_fingerprint;
++    uint64_t function_snapshot_layout_fingerprint;
++    uint64_t entry_handle_layout_fingerprint;
++    uint64_t backend_vtable_layout_fingerprint;
++    uint64_t exec_frame_layout_fingerprint;
++    uint64_t exit_layout_fingerprint;
++    uint64_t runtime_api_layout_fingerprint;
++    uint64_t helper_table_fingerprint;
++} JSJitABIInfo;
++
++typedef struct JSJitHelperCounters {
++    uint32_t struct_size;
++    uint32_t reserved;
++    uint64_t dup_count;
++    uint64_t free_count;
++} JSJitHelperCounters;
++
++typedef struct JSJitBackendVTable {
++    uint32_t struct_size;
++    uint32_t (*record_hot)(void *opaque, const JSJitHotEvent *event);
++    void (*submit_snapshot)(void *opaque, JSJitFunctionSnapshot *snapshot);
++    /*
++     * pc is a bytecode offset. A backend may return a nonempty handle for a
++     * nonzero pc only after that OSR point and its full frame state verify.
++     */
++    JSJitEntryHandle (*acquire_entry)(void *opaque, uint64_t id,
++                                      uint64_t generation, uint32_t pc);
++    void (*release_entry)(void *opaque, JSJitEntryHandle entry);
++    void (*runtime_detach)(void *opaque, JSRuntime *rt);
++    void (*function_retire)(void *opaque, uint64_t id, uint64_t generation);
++    size_t (*memory_used)(void *opaque);
++    void (*native_enter)(void *opaque, uint64_t id, uint64_t generation,
++                         uint32_t pc);
++    void (*native_exit)(void *opaque, uint64_t id, uint64_t generation,
++                        uint32_t pc, uint32_t exit_kind);
++} JSJitBackendVTable;
++
++enum {
++    JS_JIT_BACKEND_OK = 0,
++    JS_JIT_BACKEND_INVALID_ARGUMENT = -1,
++    JS_JIT_BACKEND_ALREADY_ATTACHED = -2,
++    JS_JIT_BACKEND_INVALID_VTABLE = -3,
++    JS_JIT_BACKEND_BUSY = -4,
++};
++
++int JS_GetJitABIInfo(JSJitABIInfo *out);
++uint64_t JS_GetJitRuntimeId(JSRuntime *rt);
++int JS_JitGetHelperCounters(JSRuntime *rt, JSJitHelperCounters *counters);
++int JS_JitResetHelperCounters(JSRuntime *rt);
++typedef struct JSJitTraceEvent {
++    uint32_t pc;
++    uint8_t opcode;
++    uint8_t kind;
++    uint8_t helper_id;
++    uint8_t reserved;
++} JSJitTraceEvent;
++#ifdef CONFIG_JIT_TEST_SUPPORT
++int JS_JitGetHelperCount(JSRuntime *rt, uint32_t helper_id, uint64_t *count);
++int JS_JitSetExecutionTrace(JSRuntime *rt, JSJitTraceEvent *events,
++                            uint32_t capacity);
++int JS_JitGetExecutionTraceLength(JSRuntime *rt, uint32_t *length,
++                                  uint32_t *overflowed);
++#endif
++int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable, void *opaque);
++const JSJitOpcodeInfo *JS_JitGetOpcodeTable(uint32_t *count,
++                                            uint64_t *fingerprint);
++int JS_JitSnapshotFunction(JSContext *ctx, JSValueConst function,
++                           JSJitFunctionSnapshot **out);
++void JS_JitFreeSnapshot(JSJitFunctionSnapshot *snapshot);
++int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* QUICKJS_JIT_H */
+diff --git a/quickjs.c b/quickjs.c
+index 11caae0..065896a 100644
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -45,6 +45,9 @@
+ #include "cutils.h"
+ #include "list.h"
+ #include "quickjs.h"
++#ifdef CONFIG_JIT_ABI
++#include "quickjs-jit.h"
++#endif
+ #include "libregexp.h"
+ #include "dtoa.h"
+ 
+@@ -354,6 +357,33 @@ struct JSRuntime {
+     void *user_opaque;
+     void *libc_opaque;
+     JSRuntimeFinalizerState *finalizers;
++#ifdef CONFIG_JIT_ABI
++    const JSJitBackendVTable *jit_backend_vtable;
++    void *jit_backend_opaque;
++    uint32_t jit_backend_active_depth;
++    uint32_t jit_active_stack_map_count;
++    uint32_t jit_active_helper_abi_version;
++    uint64_t jit_next_function_id;
++    uint64_t jit_next_generation;
++    uint64_t jit_runtime_id;
++    uint64_t jit_next_frame_cookie;
++    uint64_t jit_active_frame_cookie;
++    JSJitExecFrame *jit_active_frame;
++    uint64_t jit_helper_dup_count;
++    uint64_t jit_helper_free_count;
++#ifdef CONFIG_JIT_TEST_SUPPORT
++    uint64_t jit_helper_counts[JS_JIT_HELPER_COUNT];
++    JSJitTraceEvent *jit_trace_events;
++    uint32_t jit_trace_capacity;
++    uint32_t jit_trace_length;
++    uint32_t jit_trace_overflowed;
++    uint32_t jit_trace_current_pc;
++    uint8_t jit_trace_current_opcode;
++    bool jit_trace_current_valid;
++#endif
++    /* Runtime-owned root; boundary throws always duplicate this value. */
++    JSValue jit_uncatchable_exception;
++#endif
+ };
+ 
+ struct JSClass {
+@@ -812,6 +842,10 @@ typedef struct JSFunctionBytecode {
+     int pc2line_len;
+     uint8_t *pc2line_buf;
+     char *source;
++#ifdef CONFIG_JIT_ABI
++    uint64_t jit_function_id;
++    uint64_t jit_generation;
++#endif
+ } JSFunctionBytecode;
+ 
+ typedef struct JSBoundFunction {
+@@ -1968,6 +2002,22 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
+     rt = mf->js_calloc(opaque, 1, sizeof(JSRuntime));
+     if (!rt)
+         return NULL;
++#ifdef CONFIG_JIT_ABI
++    {
++#ifdef CONFIG_ATOMICS
++        static _Atomic uint64_t next_runtime_id;
++        rt->jit_runtime_id = atomic_fetch_add(&next_runtime_id, 1) + 1;
++#else
++        static uint64_t next_runtime_id;
++        rt->jit_runtime_id = ++next_runtime_id;
++#endif
++        if (rt->jit_runtime_id == 0) {
++            mf->js_free(opaque, rt);
++            return NULL;
++        }
++    }
++    rt->jit_uncatchable_exception = JS_UNDEFINED;
++#endif
+     rt->mf = *mf;
+     if (!rt->mf.js_malloc_usable_size) {
+         /* use dummy function if none provided */
+@@ -2036,6 +2086,697 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
+     rt->user_opaque = opaque;
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++#define QJSJIT_SOURCE_REVISION UINT64_C(0xfd0a0210b7be0095)
++#include "quickjs-jit-opcodes.generated.h"
++#include "quickjs-jit-helpers.generated.h"
++#define QJSJIT_OPCODE_FINGERPRINT QJSJIT_GENERATED_OPCODE_FINGERPRINT
++#define QJSJIT_BUILD_FEATURE_FLAGS UINT64_C(0x0000000000000001)
++
++static uint64_t qjsjit_hash_u64(uint64_t hash, uint64_t value)
++{
++    int i;
++    for (i = 0; i < 8; i++) {
++        hash ^= value & 0xff;
++        hash *= UINT64_C(0x100000001b3);
++        value >>= 8;
++    }
++    return hash;
++}
++
++static int qjsjit_init_uncatchable_exception(JSContext *ctx)
++{
++    JSRuntime *rt = ctx->rt;
++    JSValue exception;
++
++    if (!JS_IsUndefined(rt->jit_uncatchable_exception))
++        return 0;
++    /* A null prototype keeps the emergency root independent of any realm. */
++    exception = JS_NewObjectProtoClass(ctx, JS_NULL, JS_CLASS_ERROR);
++    if (JS_IsException(exception))
++        return -1;
++    JS_SetUncatchableError(ctx, exception);
++    rt->jit_uncatchable_exception = exception;
++    return 0;
++}
++
++static uint64_t qjsjit_layout_start(size_t size, size_t align)
++{
++    uint64_t hash = UINT64_C(0xcbf29ce484222325);
++    hash = qjsjit_hash_u64(hash, size);
++    return qjsjit_hash_u64(hash, align);
++}
++
++static uint64_t qjsjit_layout_field(uint64_t hash, size_t offset, size_t size)
++{
++    hash = qjsjit_hash_u64(hash, offset);
++    return qjsjit_hash_u64(hash, size);
++}
++
++#define QJSJIT_LAYOUT_START(type) \
++    qjsjit_layout_start(sizeof(type), _Alignof(type))
++#define QJSJIT_LAYOUT_FIELD(hash, type, field) \
++    qjsjit_layout_field((hash), offsetof(type, field), \
++                        sizeof(((type *)0)->field))
++
++static uint64_t qjsjit_function_id_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitFunctionId);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionId, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionId, reserved);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionId, id);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionId, generation);
++}
++
++static uint64_t qjsjit_hot_event_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitHotEvent);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitHotEvent, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitHotEvent, kind);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitHotEvent, function);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitHotEvent, pc);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitHotEvent, count);
++}
++
++static uint64_t qjsjit_function_snapshot_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitFunctionSnapshot);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, flags);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, function);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, opaque);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, source_revision);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot,
++                              opcode_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, bytecode);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, bytecode_len);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, arg_count);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, local_count);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, closure_count);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, stack_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, constants);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, constant_count);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, exception_map);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot,
++                              exception_map_len);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, source_map);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitFunctionSnapshot, source_map_len);
++}
++
++static uint64_t qjsjit_entry_handle_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitEntryHandle);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, reserved);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, entry);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, pin);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, stack_map_count);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitEntryHandle, helper_abi_version);
++}
++
++static uint64_t qjsjit_exec_frame_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitExecFrame);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, flags);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, rt);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, ctx);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, function_id);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, generation);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, arg_buf);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, var_buf);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, stack_base);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, stack_top);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, bytecode_start);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, pc);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, result);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, entry);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, runtime_api);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, runtime_id);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, frame_cookie);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitExecFrame, stack_capacity);
++}
++
++static uint64_t qjsjit_exit_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitExit);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExit, kind);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExit, reserved);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitExit, resume_pc);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitExit, resume_stack_top);
++}
++
++static uint64_t qjsjit_runtime_api_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitRuntimeAPI);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitRuntimeAPI, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitRuntimeAPI, major);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitRuntimeAPI, minor);
++#define QJSJIT_RUNTIME_LAYOUT_FIELD(id, field, c_name, signature, value_arity, \
++                                    own0, own1, own2, own3, output, flags)    \
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitRuntimeAPI, field);
++    QJSJIT_HELPER_LIST(QJSJIT_RUNTIME_LAYOUT_FIELD)
++#undef QJSJIT_RUNTIME_LAYOUT_FIELD
++    return hash;
++}
++
++static uint64_t qjsjit_backend_vtable_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitBackendVTable);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, record_hot);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, submit_snapshot);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, acquire_entry);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, release_entry);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, runtime_detach);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, function_retire);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, memory_used);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_enter);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitBackendVTable, native_exit);
++}
++
++static uint64_t qjsjit_abi_info_layout(void)
++{
++    uint64_t hash = QJSJIT_LAYOUT_START(JSJitABIInfo);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, struct_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, major);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, minor);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, pointer_width);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, little_endian);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, value_size);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, source_revision);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, opcode_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, value_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, build_feature_flags);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo, build_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              abi_info_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              function_id_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              hot_event_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              function_snapshot_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              entry_handle_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              backend_vtable_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              exec_frame_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                              exit_layout_fingerprint);
++    hash = QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                               runtime_api_layout_fingerprint);
++    return QJSJIT_LAYOUT_FIELD(hash, JSJitABIInfo,
++                               helper_table_fingerprint);
++}
++
++static uint64_t qjsjit_value_layout(void)
++{
++    uint64_t hash = qjsjit_layout_start(sizeof(JSValue), _Alignof(JSValue));
++    hash = qjsjit_hash_u64(hash, (uint64_t)(int64_t)JS_TAG_FIRST);
++    hash = qjsjit_hash_u64(hash, (uint64_t)(int64_t)JS_TAG_FLOAT64);
++#if defined(JS_NAN_BOXING) && JS_NAN_BOXING
++    hash = qjsjit_hash_u64(hash, 1);
++#else
++    hash = qjsjit_hash_u64(hash, 0);
++#endif
++    return hash;
++}
++
++static int qjsjit_ensure_function_identity(JSRuntime *rt,
++                                           JSFunctionBytecode *b)
++{
++    if (b->jit_function_id != 0)
++        return 0;
++    if (rt->jit_next_function_id == UINT64_MAX ||
++        rt->jit_next_generation == UINT64_MAX)
++        return -1;
++    b->jit_function_id = ++rt->jit_next_function_id;
++    b->jit_generation = ++rt->jit_next_generation;
++    return 0;
++}
++
++static void qjsjit_retire_identity(JSRuntime *rt, uint64_t id,
++                                   uint64_t generation)
++{
++    if (id != 0 && rt->jit_backend_vtable &&
++        rt->jit_backend_vtable->function_retire) {
++        rt->jit_backend_vtable->function_retire(rt->jit_backend_opaque,
++                                                id, generation);
++    }
++}
++
++static const JSJitOpcodeInfo qjsjit_opcode_table[] = {
++#define FMT(format)
++#define DEF(id, size, n_pop, n_push, format) \
++    { JS_JIT_OP_##id, size, n_pop, n_push, JS_JIT_FMT_##format, { 0, 0, 0 }, #id },
++#define def(id, size, n_pop, n_push, format)
++#include "quickjs-opcode.h"
++#undef def
++#undef DEF
++};
++
++#define QJSJIT_ABI_COUNT_FRAME 2
++#define QJSJIT_ABI_COUNT_MAP_IN 4
++#define QJSJIT_ABI_COUNT_MAP_OUT 4
++#define QJSJIT_ABI_COUNT_MAP_OUT_IN 5
++#define QJSJIT_ABI_COUNT_MAP_OUT_INDEX 5
++#define QJSJIT_ABI_COUNT_MAP_OUT_TWO 6
++#define QJSJIT_ABI_COUNT_MAP_OUT_TWO_OP 7
++#define QJSJIT_ABI_COUNT_MAP_OUT_OBJECT_ATOM 6
++#define QJSJIT_ABI_COUNT_MAP_OBJECT_ATOM_VALUE 6
++#define QJSJIT_ABI_COUNT_MAP_CALL 8
++#define QJSJIT_ABI_TYPES_0                                               \
++    JS_JIT_HELPER_ABI_STATUS, JS_JIT_HELPER_ABI_FRAME
++#define QJSJIT_ABI_TYPES_2 QJSJIT_ABI_TYPES_0, JS_JIT_HELPER_ABI_U32,   \
++    JS_JIT_HELPER_ABI_U32
++#define QJSJIT_ABI_TYPES_3 QJSJIT_ABI_TYPES_2, JS_JIT_HELPER_ABI_U32
++#define QJSJIT_ABI_TYPES_4 QJSJIT_ABI_TYPES_3, JS_JIT_HELPER_ABI_U32
++#define QJSJIT_ABI_TYPES_5 QJSJIT_ABI_TYPES_4, JS_JIT_HELPER_ABI_U32
++#define QJSJIT_ABI_TYPES_6 QJSJIT_ABI_TYPES_5, JS_JIT_HELPER_ABI_U32
++#define QJSJIT_ABI_TYPES_FRAME QJSJIT_ABI_TYPES_0
++#define QJSJIT_ABI_TYPES_MAP_IN QJSJIT_ABI_TYPES_2
++#define QJSJIT_ABI_TYPES_MAP_OUT QJSJIT_ABI_TYPES_2
++#define QJSJIT_ABI_TYPES_MAP_OUT_IN QJSJIT_ABI_TYPES_3
++#define QJSJIT_ABI_TYPES_MAP_OUT_INDEX QJSJIT_ABI_TYPES_3
++#define QJSJIT_ABI_TYPES_MAP_OUT_TWO QJSJIT_ABI_TYPES_4
++#define QJSJIT_ABI_TYPES_MAP_OUT_TWO_OP QJSJIT_ABI_TYPES_5
++#define QJSJIT_ABI_TYPES_MAP_OUT_OBJECT_ATOM QJSJIT_ABI_TYPES_4
++#define QJSJIT_ABI_TYPES_MAP_OBJECT_ATOM_VALUE QJSJIT_ABI_TYPES_4
++#define QJSJIT_ABI_TYPES_MAP_CALL QJSJIT_ABI_TYPES_6
++#define THROWING JS_JIT_HELPER_THROWING
++#define ALLOCATING JS_JIT_HELPER_ALLOCATING
++#define REENTRANT JS_JIT_HELPER_REENTRANT
++#define FINALIZING JS_JIT_HELPER_FINALIZING
++static const JSJitHelperInfo qjsjit_helper_table[] = {
++#define QJSJIT_HELPER_INFO(id, field, c_name, signature, value_arity, own0,   \
++                           own1, own2, own3, output, flags)                  \
++    { JS_JIT_HELPER_##id, QJSJIT_ABI_COUNT_##signature, value_arity,         \
++      { QJSJIT_ABI_TYPES_##signature },                                     \
++      { JS_JIT_HELPER_##own0, JS_JIT_HELPER_##own1, JS_JIT_HELPER_##own2,   \
++        JS_JIT_HELPER_##own3 },                                             \
++      JS_JIT_HELPER_##output, { 0, 0, 0 }, flags, #id },
++    QJSJIT_HELPER_LIST(QJSJIT_HELPER_INFO)
++#undef QJSJIT_HELPER_INFO
++};
++#undef FINALIZING
++#undef REENTRANT
++#undef ALLOCATING
++#undef THROWING
++
++_Static_assert(countof(qjsjit_helper_table) ==
++               QJSJIT_GENERATED_HELPER_COUNT,
++               "generated helper metadata count differs from QuickJS");
++
++const JSJitHelperInfo *JS_JitGetHelperTable(uint32_t *count,
++                                            uint64_t *fingerprint)
++{
++    if (count)
++        *count = countof(qjsjit_helper_table);
++    if (fingerprint)
++        *fingerprint = QJSJIT_GENERATED_HELPER_FINGERPRINT;
++    return qjsjit_helper_table;
++}
++
++_Static_assert(countof(qjsjit_opcode_table) ==
++               QJSJIT_GENERATED_OPCODE_COUNT,
++               "generated opcode metadata count differs from QuickJS");
++
++const JSJitOpcodeInfo *JS_JitGetOpcodeTable(uint32_t *count,
++                                            uint64_t *fingerprint)
++{
++    if (count)
++        *count = countof(qjsjit_opcode_table);
++    if (fingerprint)
++        *fingerprint = QJSJIT_OPCODE_FINGERPRINT;
++    return qjsjit_opcode_table;
++}
++
++static uint32_t qjsjit_constant_kind(JSContext *ctx, JSValueConst value)
++{
++    int tag = JS_VALUE_GET_NORM_TAG(value);
++    if (tag == JS_TAG_STRING)
++        return JS_JIT_CONSTANT_STRING;
++    if (tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT)
++        return JS_JIT_CONSTANT_BIG_INT;
++    if (tag == JS_TAG_OBJECT) {
++        if (JS_IsFunction(ctx, value))
++            return JS_JIT_CONSTANT_FUNCTION;
++        return JS_JIT_CONSTANT_OBJECT;
++    }
++    return JS_JIT_CONSTANT_IMMEDIATE;
++}
++
++static int qjsjit_snapshot_bytecode_status(const JSFunctionBytecode *b)
++{
++    int pc = 0;
++    bool has_eval = false;
++    bool has_with = false;
++    while (pc < b->byte_code_len) {
++        const JSJitOpcodeInfo *info;
++        uint8_t opcode = b->byte_code_buf[pc];
++        if (opcode >= countof(qjsjit_opcode_table))
++            return JS_JIT_SNAPSHOT_INVALID_BYTECODE;
++        info = &qjsjit_opcode_table[opcode];
++        if (opcode == JS_JIT_OP_invalid || !info->size ||
++            info->size > b->byte_code_len - pc)
++            return JS_JIT_SNAPSHOT_INVALID_BYTECODE;
++        switch (opcode) {
++        case JS_JIT_OP_eval:
++        case JS_JIT_OP_apply_eval:
++            has_eval = true;
++            break;
++        case JS_JIT_OP_with_get_var:
++        case JS_JIT_OP_with_put_var:
++        case JS_JIT_OP_with_delete_var:
++        case JS_JIT_OP_with_make_ref:
++        case JS_JIT_OP_with_get_ref:
++        case JS_JIT_OP_with_get_ref_undef:
++            has_with = true;
++            break;
++        default:
++            break;
++        }
++        pc += info->size;
++    }
++    if (pc != b->byte_code_len)
++        return JS_JIT_SNAPSHOT_INVALID_BYTECODE;
++    if (has_eval)
++        return JS_JIT_SNAPSHOT_EVAL;
++    if (has_with)
++        return JS_JIT_SNAPSHOT_WITH;
++    return JS_JIT_SNAPSHOT_OK;
++}
++
++int JS_JitSnapshotFunction(JSContext *ctx, JSValueConst function,
++                           JSJitFunctionSnapshot **out)
++{
++    JSObject *object;
++    JSFunctionBytecode *b;
++    JSJitFunctionSnapshot *snapshot;
++    JSJitConstantDescriptor *constants;
++    uint8_t *tail;
++    size_t descriptor_bytes, total;
++    int i, status;
++
++    if (!ctx || !out)
++        return JS_JIT_SNAPSHOT_INVALID_ARGUMENT;
++    *out = NULL;
++    if (JS_VALUE_GET_TAG(function) != JS_TAG_OBJECT)
++        return JS_JIT_SNAPSHOT_NOT_BYTECODE;
++    object = JS_VALUE_GET_OBJ(function);
++    switch (object->class_id) {
++    case JS_CLASS_BYTECODE_FUNCTION:
++    case JS_CLASS_GENERATOR_FUNCTION:
++    case JS_CLASS_ASYNC_FUNCTION:
++    case JS_CLASS_ASYNC_GENERATOR_FUNCTION:
++        break;
++    default:
++        return JS_JIT_SNAPSHOT_NOT_BYTECODE;
++    }
++    b = object->u.func.function_bytecode;
++    if (!b)
++        return JS_JIT_SNAPSHOT_NOT_BYTECODE;
++    if (b->func_kind & JS_FUNC_GENERATOR)
++        return JS_JIT_SNAPSHOT_GENERATOR;
++    if (b->func_kind & JS_FUNC_ASYNC)
++        return JS_JIT_SNAPSHOT_ASYNC;
++    if (b->byte_code_len < 0 || b->cpool_count < 0 || b->pc2line_len < 0)
++        return JS_JIT_SNAPSHOT_INVALID_BYTECODE;
++    status = qjsjit_snapshot_bytecode_status(b);
++    if (status != JS_JIT_SNAPSHOT_OK)
++        return status;
++    if (qjsjit_ensure_function_identity(ctx->rt, b))
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++
++    if ((size_t)b->cpool_count >
++        (SIZE_MAX - sizeof(*snapshot)) / sizeof(*constants))
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++    descriptor_bytes = (size_t)b->cpool_count * sizeof(*constants);
++    total = sizeof(*snapshot) + descriptor_bytes;
++    if ((size_t)b->byte_code_len > SIZE_MAX - total)
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++    total += (size_t)b->byte_code_len;
++    if ((size_t)b->pc2line_len > SIZE_MAX - total)
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++    total += (size_t)b->pc2line_len;
++
++    if (total > 64 * 1024 * 1024)
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++    snapshot = malloc(total);
++    if (!snapshot)
++        return JS_JIT_SNAPSHOT_OUT_OF_MEMORY;
++    memset(snapshot, 0, sizeof(*snapshot));
++    constants = (JSJitConstantDescriptor *)(snapshot + 1);
++    tail = (uint8_t *)constants + descriptor_bytes;
++
++    snapshot->struct_size = sizeof(*snapshot);
++    snapshot->flags = b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0;
++    snapshot->opaque = NULL;
++    snapshot->source_revision = QJSJIT_SOURCE_REVISION;
++    snapshot->opcode_fingerprint = QJSJIT_OPCODE_FINGERPRINT;
++    snapshot->bytecode = tail;
++    snapshot->bytecode_len = b->byte_code_len;
++    snapshot->arg_count = b->arg_count;
++    snapshot->local_count = b->var_count;
++    snapshot->closure_count = b->closure_var_count;
++    snapshot->stack_size = b->stack_size;
++    snapshot->constants = constants;
++    snapshot->constant_count = b->cpool_count;
++    snapshot->exception_map = NULL;
++    snapshot->exception_map_len = 0;
++    if (b->byte_code_len)
++        memcpy(tail, b->byte_code_buf, b->byte_code_len);
++    tail += b->byte_code_len;
++    snapshot->source_map = tail;
++    snapshot->source_map_len = b->pc2line_len;
++    if (b->pc2line_len)
++        memcpy(tail, b->pc2line_buf, b->pc2line_len);
++
++    for (i = 0; i < b->cpool_count; i++) {
++        constants[i].index = i;
++        constants[i].tag = JS_VALUE_GET_NORM_TAG(b->cpool[i]);
++        constants[i].kind = qjsjit_constant_kind(ctx, b->cpool[i]);
++        constants[i].reserved = 0;
++    }
++
++    snapshot->function.struct_size = sizeof(snapshot->function);
++    snapshot->function.id = b->jit_function_id;
++    snapshot->function.generation = b->jit_generation;
++    *out = snapshot;
++    return JS_JIT_SNAPSHOT_OK;
++}
++
++void JS_JitFreeSnapshot(JSJitFunctionSnapshot *snapshot)
++{
++    free(snapshot);
++}
++
++int JS_JitInvalidateFunction(JSContext *ctx, JSValueConst function)
++{
++    JSObject *object;
++    JSFunctionBytecode *b;
++    uint64_t old_generation;
++
++    if (!ctx || JS_VALUE_GET_TAG(function) != JS_TAG_OBJECT)
++        return JS_JIT_SNAPSHOT_INVALID_ARGUMENT;
++    object = JS_VALUE_GET_OBJ(function);
++    switch (object->class_id) {
++    case JS_CLASS_BYTECODE_FUNCTION:
++    case JS_CLASS_GENERATOR_FUNCTION:
++    case JS_CLASS_ASYNC_FUNCTION:
++    case JS_CLASS_ASYNC_GENERATOR_FUNCTION:
++        break;
++    default:
++        return JS_JIT_SNAPSHOT_NOT_BYTECODE;
++    }
++    b = object->u.func.function_bytecode;
++    if (!b || !b->realm || b->realm->rt != ctx->rt)
++        return JS_JIT_SNAPSHOT_NOT_BYTECODE;
++    if (qjsjit_ensure_function_identity(ctx->rt, b))
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++    if (ctx->rt->jit_next_generation == UINT64_MAX)
++        return JS_JIT_SNAPSHOT_TOO_LARGE;
++
++    old_generation = b->jit_generation;
++    b->jit_generation = ++ctx->rt->jit_next_generation;
++    qjsjit_retire_identity(ctx->rt, b->jit_function_id, old_generation);
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_GetJitABIInfo(JSJitABIInfo *out)
++{
++    JSJitABIInfo info;
++    uint32_t caller_size;
++    uint16_t endian_probe = 1;
++    uint64_t build_fingerprint;
++    size_t copy_size;
++
++    if (!out)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    memcpy(&caller_size, out, sizeof(caller_size));
++    if (caller_size <
++        offsetof(JSJitABIInfo, exec_frame_layout_fingerprint))
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++
++    memset(&info, 0, sizeof(info));
++    info.struct_size = sizeof(info);
++    info.major = QJSJIT_ABI_MAJOR;
++    info.minor = QJSJIT_ABI_MINOR;
++    info.pointer_width = sizeof(void *) * 8;
++    info.little_endian = *(const uint8_t *)&endian_probe;
++    info.value_size = sizeof(JSValue);
++    info.source_revision = QJSJIT_SOURCE_REVISION;
++    info.opcode_fingerprint = QJSJIT_OPCODE_FINGERPRINT;
++    info.value_layout_fingerprint = qjsjit_value_layout();
++    info.build_feature_flags = QJSJIT_BUILD_FEATURE_FLAGS;
++    info.abi_info_layout_fingerprint = qjsjit_abi_info_layout();
++    info.function_id_layout_fingerprint = qjsjit_function_id_layout();
++    info.hot_event_layout_fingerprint = qjsjit_hot_event_layout();
++    info.function_snapshot_layout_fingerprint =
++        qjsjit_function_snapshot_layout();
++    info.entry_handle_layout_fingerprint = qjsjit_entry_handle_layout();
++    info.backend_vtable_layout_fingerprint = qjsjit_backend_vtable_layout();
++    info.exec_frame_layout_fingerprint = qjsjit_exec_frame_layout();
++    info.exit_layout_fingerprint = qjsjit_exit_layout();
++    info.runtime_api_layout_fingerprint = qjsjit_runtime_api_layout();
++    info.helper_table_fingerprint = QJSJIT_GENERATED_HELPER_FINGERPRINT;
++
++    build_fingerprint = qjsjit_hash_u64(UINT64_C(0xcbf29ce484222325),
++                                        info.source_revision);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.opcode_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.value_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.build_feature_flags);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.abi_info_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.function_id_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.hot_event_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.function_snapshot_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.entry_handle_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.backend_vtable_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.exec_frame_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(build_fingerprint,
++                                        info.exit_layout_fingerprint);
++    build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.runtime_api_layout_fingerprint);
++    info.build_fingerprint = qjsjit_hash_u64(
++        build_fingerprint, info.helper_table_fingerprint);
++
++    copy_size = caller_size;
++    if (copy_size > sizeof(info))
++        copy_size = sizeof(info);
++    memcpy(out, &info, copy_size);
++    return JS_JIT_BACKEND_OK;
++}
++
++uint64_t JS_GetJitRuntimeId(JSRuntime *rt)
++{
++    return rt ? rt->jit_runtime_id : 0;
++}
++
++int JS_JitGetHelperCounters(JSRuntime *rt, JSJitHelperCounters *counters)
++{
++    if (!rt || !counters || counters->struct_size != sizeof(*counters) ||
++        counters->reserved != 0)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    counters->dup_count = rt->jit_helper_dup_count;
++    counters->free_count = rt->jit_helper_free_count;
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_JitResetHelperCounters(JSRuntime *rt)
++{
++    if (!rt)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    if (rt->jit_backend_active_depth != 0)
++        return JS_JIT_BACKEND_BUSY;
++    rt->jit_helper_dup_count = 0;
++    rt->jit_helper_free_count = 0;
++#ifdef CONFIG_JIT_TEST_SUPPORT
++    memset(rt->jit_helper_counts, 0, sizeof(rt->jit_helper_counts));
++#endif
++    return JS_JIT_BACKEND_OK;
++}
++
++#ifdef CONFIG_JIT_TEST_SUPPORT
++int JS_JitGetHelperCount(JSRuntime *rt, uint32_t helper_id, uint64_t *count)
++{
++    if (!rt || !count || helper_id >= JS_JIT_HELPER_COUNT)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    *count = rt->jit_helper_counts[helper_id];
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_JitSetExecutionTrace(JSRuntime *rt, JSJitTraceEvent *events,
++                            uint32_t capacity)
++{
++    if (!rt || (!events && capacity != 0) || rt->jit_backend_active_depth != 0)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    rt->jit_trace_events = events;
++    rt->jit_trace_capacity = capacity;
++    rt->jit_trace_length = 0;
++    rt->jit_trace_overflowed = 0;
++    rt->jit_trace_current_valid = false;
++    return JS_JIT_BACKEND_OK;
++}
++
++int JS_JitGetExecutionTraceLength(JSRuntime *rt, uint32_t *length,
++                                  uint32_t *overflowed)
++{
++    if (!rt || !length || !overflowed)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    *length = rt->jit_trace_length;
++    *overflowed = rt->jit_trace_overflowed;
++    return JS_JIT_BACKEND_OK;
++}
++#endif
++
++int JS_SetJitBackend(JSRuntime *rt, const JSJitBackendVTable *vtable,
++                     void *opaque)
++{
++    if (!rt)
++        return JS_JIT_BACKEND_INVALID_ARGUMENT;
++    if (rt->jit_backend_active_depth != 0)
++        return JS_JIT_BACKEND_BUSY;
++
++    if (!vtable) {
++        const JSJitBackendVTable *old_vtable;
++        void *old_opaque;
++        if (opaque)
++            return JS_JIT_BACKEND_INVALID_ARGUMENT;
++        if (!rt->jit_backend_vtable)
++            return JS_JIT_BACKEND_OK;
++        old_vtable = rt->jit_backend_vtable;
++        old_opaque = rt->jit_backend_opaque;
++        rt->jit_backend_vtable = NULL;
++        rt->jit_backend_opaque = NULL;
++        if (old_vtable->runtime_detach)
++            old_vtable->runtime_detach(old_opaque, rt);
++        return JS_JIT_BACKEND_OK;
++    }
++
++    if (rt->jit_backend_vtable)
++        return JS_JIT_BACKEND_ALREADY_ATTACHED;
++    if (vtable->struct_size != sizeof(*vtable) ||
++        (vtable->acquire_entry && !vtable->release_entry))
++        return JS_JIT_BACKEND_INVALID_VTABLE;
++
++    rt->jit_backend_vtable = vtable;
++    rt->jit_backend_opaque = opaque;
++    return JS_JIT_BACKEND_OK;
++}
++#endif /* CONFIG_JIT_ABI */
++
+ int JS_AddRuntimeFinalizer(JSRuntime *rt, JSRuntimeFinalizer *finalizer,
+                            void *arg)
+ {
+@@ -2291,8 +3032,14 @@ void JS_FreeRuntime(JSRuntime *rt)
+     bool leak = false;
+     int i;
+ 
++#ifdef CONFIG_JIT_ABI
++    JS_SetJitBackend(rt, NULL, NULL);
++#endif
+     rt->in_free = true;
+     JS_FreeValueRT(rt, rt->current_exception);
++#ifdef CONFIG_JIT_ABI
++    JS_FreeValueRT(rt, rt->jit_uncatchable_exception);
++#endif
+ 
+     list_for_each_safe(el, el1, &rt->job_list) {
+         JSJobEntry *e = list_entry(el, JSJobEntry, link);
+@@ -2523,7 +3270,11 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
+     ctx->error_stack_trace_limit = js_int32(10);
+     init_list_head(&ctx->loaded_modules);
+ 
+-    if (JS_AddIntrinsicBasicObjects(ctx)) {
++    if (JS_AddIntrinsicBasicObjects(ctx)
++#ifdef CONFIG_JIT_ABI
++        || qjsjit_init_uncatchable_exception(ctx)
++#endif
++    ) {
+         JS_FreeContext(ctx);
+         return NULL;
+     }
+@@ -8240,6 +8991,19 @@ static inline __exception int js_poll_interrupts(JSContext *ctx)
+     }
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++static const JSJitRuntimeAPI qjsjit_runtime_api = {
++    sizeof(JSJitRuntimeAPI),
++    QJSJIT_RUNTIME_API_MAJOR,
++    QJSJIT_RUNTIME_API_MINOR,
++#define QJSJIT_RUNTIME_HELPER(id, field, c_name, signature, value_arity, own0, \
++                              own1, own2, own3, output, flags)               \
++    c_name,
++    QJSJIT_HELPER_LIST(QJSJIT_RUNTIME_HELPER)
++#undef QJSJIT_RUNTIME_HELPER
++};
++#endif
++
+ /* return -1 (exception) or true/false */
+ static int JS_SetPrototypeInternal(JSContext *ctx, JSValueConst obj,
+                                    JSValueConst proto_val, bool throw_flag)
+@@ -17546,6 +18310,720 @@ static bool needs_backtrace(JSValue exc)
+     return !find_own_property1(p, JS_ATOM_stack);
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++_Static_assert(JS_JIT_HELPER_SCRATCH_SLOTS <= INT_MAX - UINT16_MAX,
++               "JIT scratch addition must fit stack_allocated_size");
++
++static bool qjsjit_valid_stack_top(JSValue *stack_base, uint32_t stack_size,
++                                   JSValue *stack_top)
++{
++    uintptr_t base = (uintptr_t)stack_base;
++    uintptr_t end = (uintptr_t)(stack_base + stack_size);
++    uintptr_t top = (uintptr_t)stack_top;
++
++    return top >= base && top <= end &&
++        (top - base) % sizeof(JSValue) == 0;
++}
++
++static bool qjsjit_scratch_is_clear(JSValue *stack_base,
++                                    JSFunctionBytecode *b)
++{
++    JSValue *scratch = stack_base + b->stack_size;
++    uint32_t i;
++
++    for (i = 0; i < JS_JIT_HELPER_SCRATCH_SLOTS; i++) {
++        if (!JS_IsUndefined(scratch[i]))
++            return false;
++    }
++    return true;
++}
++
++static void qjsjit_clear_scratch(JSContext *ctx, JSValue *stack_base,
++                                 JSValue **stack_top,
++                                 JSFunctionBytecode *b)
++{
++    JSValue *scratch = stack_base + b->stack_size;
++    uint32_t i;
++
++    for (i = 0; i < JS_JIT_HELPER_SCRATCH_SLOTS; i++) {
++        JS_FreeValue(ctx, scratch[i]);
++        scratch[i] = JS_UNDEFINED;
++    }
++    if ((uintptr_t)*stack_top > (uintptr_t)scratch)
++        *stack_top = scratch;
++}
++
++static bool qjsjit_valid_pc(JSFunctionBytecode *b, const uint8_t *pc,
++                            bool allow_end)
++{
++    uintptr_t start = (uintptr_t)b->byte_code_buf;
++    uintptr_t end = start + (size_t)b->byte_code_len;
++    uintptr_t value = (uintptr_t)pc;
++    int offset = 0;
++
++    if (value < start || (allow_end ? value > end : value >= end))
++        return false;
++    while (offset < b->byte_code_len) {
++        const JSJitOpcodeInfo *info;
++        uint8_t opcode;
++
++        if (pc == b->byte_code_buf + offset)
++            return true;
++        opcode = b->byte_code_buf[offset];
++        if (opcode >= countof(qjsjit_opcode_table))
++            return false;
++        info = &qjsjit_opcode_table[opcode];
++        if (!info->size || info->size > b->byte_code_len - offset)
++            return false;
++        offset += info->size;
++    }
++    return allow_end && pc == b->byte_code_buf + b->byte_code_len;
++}
++
++static bool qjsjit_is_uncatchable_sentinel(JSRuntime *rt, JSValueConst value)
++{
++    return JS_VALUE_GET_TAG(value) == JS_TAG_OBJECT &&
++        JS_VALUE_GET_TAG(rt->jit_uncatchable_exception) == JS_TAG_OBJECT &&
++        JS_VALUE_GET_OBJ(value) ==
++            JS_VALUE_GET_OBJ(rt->jit_uncatchable_exception);
++}
++
++static void qjsjit_ensure_uncatchable_exception(JSContext *ctx)
++{
++    JSRuntime *rt = ctx->rt;
++
++    /* Hosts may reset a transferred exception; re-arm the private root. */
++    JS_SetUncatchableError(ctx, rt->jit_uncatchable_exception);
++    if (!JS_HasException(ctx) ||
++        !JS_IsUncatchableError(rt->current_exception)) {
++        assert(JS_IsUncatchableError(rt->jit_uncatchable_exception));
++        JS_Throw(ctx, js_dup(rt->jit_uncatchable_exception));
++    }
++}
++
++static void qjsjit_reject_exit(JSContext *ctx, JSValue *result,
++                               const char *message)
++{
++    JSValue pending;
++
++    if (JS_HasException(ctx)) {
++        pending = JS_GetException(ctx);
++        JS_FreeValue(ctx, pending);
++    }
++    JS_FreeValue(ctx, *result);
++    *result = JS_UNDEFINED;
++    JS_ThrowInternalError(ctx, "%s", message);
++    JS_SetUncatchableError(ctx, ctx->rt->current_exception);
++    qjsjit_ensure_uncatchable_exception(ctx);
++}
++
++/*
++ * Helpers intentionally accept slot numbers instead of JSValue arguments.
++ * That keeps every live owner in the interpreter frame across allocation,
++ * re-entrancy and cycle collection.  Validation is split from slot access so
++ * a forged identity/cookie/map/index can never read, duplicate or free the
++ * value used by a caller to detect accidental touching.
++ */
++static JSJitHelperStatus qjsjit_reject_helper(JSJitExecFrame *frame,
++                                              const char *message)
++{
++    JSValue result = JS_UNDEFINED;
++
++    if (frame && frame->ctx)
++        qjsjit_reject_exit(frame->ctx, &result, message);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
++static JSJitHelperStatus qjsjit_validate_helper_frame(
++    JSJitExecFrame *frame, bool has_stack_map, uint32_t stack_map_id,
++    JSFunctionBytecode **bytecode, JSStackFrame **stack_frame)
++{
++    JSRuntime *rt;
++    JSContext *ctx;
++    JSStackFrame *sf;
++    JSObject *function;
++    JSFunctionBytecode *b;
++    uint32_t allowed_flags = JS_JIT_FUNCTION_STRICT |
++        JS_JIT_FRAME_STRESS_GC | JS_JIT_FRAME_SIDE_PATH_HIT;
++
++    if (!frame || !frame->rt || !frame->ctx)
++        return qjsjit_reject_helper(frame, "invalid JIT helper frame");
++    rt = frame->rt;
++    ctx = frame->ctx;
++    if (ctx->rt != rt)
++        return qjsjit_reject_helper(frame, "invalid JIT helper context");
++    if (frame->struct_size != sizeof(*frame) ||
++        (frame->flags & ~allowed_flags) != 0 ||
++        frame->runtime_api != &qjsjit_runtime_api ||
++        frame->runtime_api->struct_size != sizeof(JSJitRuntimeAPI) ||
++        frame->runtime_api->major != QJSJIT_RUNTIME_API_MAJOR ||
++        frame->runtime_api->minor != QJSJIT_RUNTIME_API_MINOR ||
++        frame->runtime_id == 0 || frame->runtime_id != rt->jit_runtime_id ||
++        frame->frame_cookie == 0 ||
++        frame->frame_cookie != rt->jit_active_frame_cookie ||
++        frame != rt->jit_active_frame)
++        return qjsjit_reject_helper(frame, "invalid JIT helper identity");
++    if (frame->entry.struct_size != sizeof(JSJitEntryHandle) ||
++        frame->entry.reserved != 0 || !frame->entry.entry ||
++        !frame->entry.pin ||
++        frame->entry.helper_abi_version != QJSJIT_HELPER_ABI_VERSION ||
++        frame->entry.helper_abi_version != rt->jit_active_helper_abi_version ||
++        frame->entry.stack_map_count != rt->jit_active_stack_map_count)
++        return qjsjit_reject_helper(frame, "invalid JIT helper entry");
++    if (has_stack_map && stack_map_id >= frame->entry.stack_map_count)
++        return qjsjit_reject_helper(frame, "invalid JIT helper stack map");
++    if (!JS_IsUndefined(frame->result) || JS_HasException(ctx))
++        return qjsjit_reject_helper(frame, "invalid JIT helper state");
++
++    sf = rt->current_stack_frame;
++    if (!sf || JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT)
++        return qjsjit_reject_helper(frame, "invalid JIT helper function");
++    function = JS_VALUE_GET_OBJ(sf->cur_func);
++    if (function->class_id != JS_CLASS_BYTECODE_FUNCTION)
++        return qjsjit_reject_helper(frame, "invalid JIT helper function");
++    b = function->u.func.function_bytecode;
++    if (!b || b->realm != ctx || b->jit_function_id == 0 ||
++        b->jit_generation == 0 ||
++        frame->function_id != b->jit_function_id ||
++        frame->generation != b->jit_generation ||
++        frame->bytecode_start != b->byte_code_buf ||
++        frame->arg_buf != (JSValueConst *)sf->arg_buf ||
++        frame->var_buf != sf->var_buf ||
++        frame->stack_base != sf->var_buf + b->var_count ||
++        frame->stack_capacity != frame->stack_base + b->stack_size +
++                                     JS_JIT_HELPER_SCRATCH_SLOTS ||
++        !qjsjit_valid_stack_top(frame->stack_base,
++                                (uint32_t)(frame->stack_capacity -
++                                           frame->stack_base),
++                                frame->stack_top) ||
++        !qjsjit_valid_pc(b, frame->pc, true) ||
++        ((frame->flags & JS_JIT_FUNCTION_STRICT) != 0) !=
++            b->is_strict_mode)
++        return qjsjit_reject_helper(frame, "stale JIT helper frame");
++
++    /* Backtraces, exception tables and recursive JS calls all observe this. */
++    sf->cur_pc = (uint8_t *)frame->pc;
++    *bytecode = b;
++    *stack_frame = sf;
++    return JS_JIT_HELPER_OK;
++}
++
++static bool qjsjit_resolve_slot(JSJitExecFrame *frame,
++                                JSFunctionBytecode *b, uint32_t slot,
++                                JSValue **value)
++{
++    uint32_t stack_count;
++    uint64_t local_base = b->arg_count;
++    uint64_t stack_base = local_base + b->var_count;
++
++    if (slot == JS_JIT_SLOT_NONE)
++        return false;
++    if ((uint64_t)slot < local_base) {
++        *value = (JSValue *)frame->arg_buf + slot;
++        return true;
++    }
++    if ((uint64_t)slot < stack_base) {
++        *value = frame->var_buf + (slot - (uint32_t)local_base);
++        return true;
++    }
++    stack_count = (uint32_t)(frame->stack_top - frame->stack_base);
++    if ((uint64_t)slot - stack_base >= stack_count)
++        return false;
++    *value = frame->stack_base + ((uint64_t)slot - stack_base);
++    return true;
++}
++
++static bool qjsjit_valid_atom(JSRuntime *rt, JSAtom atom)
++{
++    JSAtomStruct *entry;
++
++    if (__JS_AtomIsTaggedInt(atom))
++        return true;
++    if (atom == JS_ATOM_NULL || atom >= (uint32_t)rt->atom_size)
++        return false;
++    entry = rt->atom_array[atom];
++    return entry && !atom_is_free(entry);
++}
++
++static JSJitHelperStatus qjsjit_stress_gc(JSJitExecFrame *frame)
++{
++    JSValue cycle;
++
++    if (!(frame->flags & JS_JIT_FRAME_STRESS_GC))
++        return JS_JIT_HELPER_OK;
++    cycle = JS_NewArray(frame->ctx);
++    if (JS_IsException(cycle))
++        return JS_JIT_HELPER_EXCEPTION;
++    if (JS_SetPropertyUint32(frame->ctx, cycle, 0, js_dup(cycle)) < 0) {
++        JS_FreeValue(frame->ctx, cycle);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    JS_FreeValue(frame->ctx, cycle);
++    JS_RunGC(frame->rt);
++    return JS_JIT_HELPER_OK;
++}
++
++static void qjsjit_stress_gc_after_exception(JSJitExecFrame *frame)
++{
++    JSValue exception, stress_exception, cycle;
++
++    if (!(frame->flags & JS_JIT_FRAME_STRESS_GC))
++        return;
++    assert(JS_HasException(frame->ctx));
++    exception = JS_GetException(frame->ctx);
++    cycle = JS_NewArray(frame->ctx);
++    if (!JS_IsException(cycle)) {
++        (void)JS_SetPropertyUint32(frame->ctx, cycle, 0, js_dup(cycle));
++        JS_FreeValue(frame->ctx, cycle);
++    }
++    /* Preserve the helper's language exception, not an artificial
++     * stress-allocation failure. */
++    if (JS_HasException(frame->ctx)) {
++        stress_exception = JS_GetException(frame->ctx);
++        JS_FreeValue(frame->ctx, stress_exception);
++    }
++    JS_RunGC(frame->rt);
++    JS_Throw(frame->ctx, exception);
++}
++
++static void qjsjit_consume_slot(JSContext *ctx, JSValue *slot)
++{
++    JS_FreeValue(ctx, *slot);
++    *slot = JS_UNDEFINED;
++}
++
++static JSJitHelperStatus qjsjit_finish_output(JSJitExecFrame *frame,
++                                              JSValue *output)
++{
++    if (qjsjit_stress_gc(frame) == JS_JIT_HELPER_OK)
++        return JS_JIT_HELPER_OK;
++    qjsjit_consume_slot(frame->ctx, output);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
++#ifdef CONFIG_JIT_TEST_SUPPORT
++static void qjsjit_count_helper(JSJitExecFrame *frame, uint32_t helper_id)
++{
++    JSRuntime *rt;
++    uint32_t index;
++
++    if (!frame || !frame->rt || helper_id >= JS_JIT_HELPER_COUNT)
++        return;
++    rt = frame->rt;
++    rt->jit_helper_counts[helper_id]++;
++    if (!rt->jit_trace_events || !rt->jit_trace_current_valid)
++        return;
++    index = rt->jit_trace_length++;
++    if (index < rt->jit_trace_capacity) {
++        rt->jit_trace_events[index].pc = rt->jit_trace_current_pc;
++        rt->jit_trace_events[index].opcode = rt->jit_trace_current_opcode;
++        rt->jit_trace_events[index].kind = 1;
++        rt->jit_trace_events[index].helper_id = (uint8_t)helper_id;
++        rt->jit_trace_events[index].reserved = 0;
++    } else {
++        rt->jit_trace_overflowed = 1;
++    }
++}
++#else
++#define qjsjit_count_helper(frame, helper_id) ((void)0)
++#endif
++
++JSJitHelperStatus JS_JitHelperPoll(JSJitExecFrame *frame)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++
++    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++#ifdef CONFIG_JIT_TEST_SUPPORT
++    if (frame->rt->jit_trace_events) {
++        uint32_t pc = (uint32_t)(frame->pc - frame->bytecode_start);
++        uint8_t opcode = *frame->pc;
++        uint32_t index = frame->rt->jit_trace_length++;
++        frame->rt->jit_trace_current_pc = pc;
++        frame->rt->jit_trace_current_opcode = opcode;
++        frame->rt->jit_trace_current_valid = true;
++        if (index < frame->rt->jit_trace_capacity) {
++            frame->rt->jit_trace_events[index].pc = pc;
++            frame->rt->jit_trace_events[index].opcode = opcode;
++            frame->rt->jit_trace_events[index].kind = 0;
++            frame->rt->jit_trace_events[index].helper_id = 0;
++            frame->rt->jit_trace_events[index].reserved = 0;
++        } else {
++            frame->rt->jit_trace_overflowed = 1;
++        }
++    }
++#endif
++    qjsjit_count_helper(frame, JS_JIT_HELPER_POLL);
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (js_poll_interrupts(frame->ctx)) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_stress_gc(frame);
++}
++
++JSJitHelperStatus JS_JitHelperDup(JSJitExecFrame *frame,
++                                  uint32_t stack_map_id, uint32_t output,
++                                  uint32_t input)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *in;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_DUP);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, input, &in) || out == in)
++        return qjsjit_reject_helper(frame, "invalid JIT DUP slot");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT DUP output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    *out = js_dup(*in);
++    frame->rt->jit_helper_dup_count++;
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperFree(JSJitExecFrame *frame,
++                                   uint32_t stack_map_id, uint32_t input)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *in;
++    JSJitHelperStatus status;
++
++    if (qjsjit_validate_helper_frame(frame, false, 0, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_FREE);
++    if (!qjsjit_resolve_slot(frame, b, input, &in))
++        return qjsjit_reject_helper(frame, "invalid JIT FREE slot");
++    status = qjsjit_stress_gc(frame);
++    qjsjit_consume_slot(frame->ctx, in);
++    frame->rt->jit_helper_free_count++;
++    if (status < 0) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_stress_gc(frame);
++}
++
++JSJitHelperStatus JS_JitHelperResolveConst(JSJitExecFrame *frame,
++                                           uint32_t stack_map_id,
++                                           uint32_t output, uint32_t index)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_RESOLVE_CONST);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        index >= (uint32_t)b->cpool_count)
++        return qjsjit_reject_helper(frame, "invalid JIT constant slot");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT constant output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    *out = js_dup(b->cpool[index]);
++    return qjsjit_finish_output(frame, out);
++}
++
++static JSJitHelperStatus qjsjit_to_value(JSJitExecFrame *frame,
++                                         uint32_t stack_map_id,
++                                         uint32_t output, uint32_t input,
++                                         bool numeric)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *in;
++    int boolean;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, input, &in))
++        return qjsjit_reject_helper(frame, "invalid JIT conversion slot");
++    if (out != in && !JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT conversion output");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, in);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    if (numeric) {
++        /* OP_plus is ToNumeric plus QuickJS's required BigInt rejection.
++         * Move first so the only owner remains in a C-visible frame slot
++         * throughout user coercion and any allocation or re-entrancy. */
++        if (out != in) {
++            *out = *in;
++            *in = JS_UNDEFINED;
++        }
++        if (js_unary_arith_slow(frame->ctx, out + 1, OP_plus) < 0) {
++            qjsjit_stress_gc_after_exception(frame);
++            return JS_JIT_HELPER_EXCEPTION;
++        }
++    } else {
++        boolean = JS_ToBoolFree(frame->ctx, *in);
++        *in = JS_UNDEFINED;
++        if (boolean < 0) {
++            *out = JS_UNDEFINED;
++            qjsjit_stress_gc_after_exception(frame);
++            return JS_JIT_HELPER_EXCEPTION;
++        }
++        *out = js_bool(boolean);
++    }
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperToNumeric(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t output, uint32_t input)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_TO_NUMERIC);
++    return qjsjit_to_value(frame, stack_map_id, output, input, true);
++}
++
++JSJitHelperStatus JS_JitHelperToBool(JSJitExecFrame *frame,
++                                     uint32_t stack_map_id, uint32_t output,
++                                     uint32_t input)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_TO_BOOL);
++    return qjsjit_to_value(frame, stack_map_id, output, input, false);
++}
++
++static JSJitHelperStatus qjsjit_binary_slow(JSJitExecFrame *frame,
++                                            uint32_t stack_map_id,
++                                            uint32_t output, uint32_t left,
++                                            uint32_t right,
++                                            uint32_t operation,
++                                            bool compare)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *lhs, *rhs;
++    int status;
++    OPCodeEnum opcode;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, left, &lhs) ||
++        !qjsjit_resolve_slot(frame, b, right, &rhs) ||
++        out != lhs || rhs != lhs + 1)
++        return qjsjit_reject_helper(frame, "invalid JIT binary slots");
++    if (compare && operation > JS_JIT_COMPARE_STRICT_NEQ)
++        return qjsjit_reject_helper(frame, "invalid JIT comparison");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, lhs);
++        qjsjit_consume_slot(frame->ctx, rhs);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    if (!compare) {
++        status = js_add_slow(frame->ctx, rhs + 1);
++    } else {
++        switch (operation) {
++        case JS_JIT_COMPARE_LT: opcode = OP_lt; break;
++        case JS_JIT_COMPARE_LTE: opcode = OP_lte; break;
++        case JS_JIT_COMPARE_GT: opcode = OP_gt; break;
++        case JS_JIT_COMPARE_GTE: opcode = OP_gte; break;
++        case JS_JIT_COMPARE_EQ: opcode = OP_eq; break;
++        case JS_JIT_COMPARE_NEQ: opcode = OP_neq; break;
++        case JS_JIT_COMPARE_STRICT_EQ: opcode = OP_strict_eq; break;
++        default: opcode = OP_strict_neq; break;
++        }
++        if (operation <= JS_JIT_COMPARE_GTE)
++            status = js_relational_slow(frame->ctx, rhs + 1, opcode);
++        else if (operation <= JS_JIT_COMPARE_NEQ)
++            status = js_eq_slow(frame->ctx, rhs + 1,
++                                operation == JS_JIT_COMPARE_NEQ);
++        else
++            status = js_strict_eq_slow(
++                frame->ctx, rhs + 1,
++                operation == JS_JIT_COMPARE_STRICT_NEQ);
++    }
++    *rhs = JS_UNDEFINED;
++    if (status < 0) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperAddSlow(JSJitExecFrame *frame,
++                                      uint32_t stack_map_id,
++                                      uint32_t output, uint32_t left,
++                                      uint32_t right)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_ADD_SLOW);
++    return qjsjit_binary_slow(frame, stack_map_id, output, left, right, 0,
++                              false);
++}
++
++JSJitHelperStatus JS_JitHelperCompareSlow(JSJitExecFrame *frame,
++                                          uint32_t stack_map_id,
++                                          uint32_t output, uint32_t left,
++                                          uint32_t right,
++                                          uint32_t operation)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_COMPARE_SLOW);
++    return qjsjit_binary_slow(frame, stack_map_id, output, left, right,
++                              operation, true);
++}
++
++JSJitHelperStatus JS_JitHelperGetProperty(JSJitExecFrame *frame,
++                                          uint32_t stack_map_id,
++                                          uint32_t output, uint32_t object,
++                                          uint32_t atom)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *obj, result;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_GET_PROPERTY);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, object, &obj) || out == obj ||
++        !qjsjit_valid_atom(frame->rt, (JSAtom)atom))
++        return qjsjit_reject_helper(frame, "invalid JIT property get");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT property output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = JS_GetProperty(frame->ctx, *obj, (JSAtom)atom);
++    if (JS_IsException(result)) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperSetProperty(JSJitExecFrame *frame,
++                                          uint32_t stack_map_id,
++                                          uint32_t object, uint32_t atom,
++                                          uint32_t value)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *obj, *val;
++    int result;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_SET_PROPERTY);
++    if (!qjsjit_resolve_slot(frame, b, object, &obj) ||
++        !qjsjit_resolve_slot(frame, b, value, &val) || obj == val ||
++        !qjsjit_valid_atom(frame->rt, (JSAtom)atom))
++        return qjsjit_reject_helper(frame, "invalid JIT property set");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, val);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    result = JS_SetPropertyInternal2(frame->ctx, *obj, (JSAtom)atom, *val,
++                                     *obj, JS_PROP_THROW_STRICT);
++    *val = JS_UNDEFINED;
++    if (result < 0) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_stress_gc(frame);
++}
++
++JSJitHelperStatus JS_JitHelperCall(JSJitExecFrame *frame,
++                                   uint32_t stack_map_id, uint32_t output,
++                                   uint32_t function, uint32_t this_value,
++                                   uint32_t argv, uint32_t argc)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *func, *this_obj, *args = NULL, *slot;
++    JSValue result;
++    uint32_t i;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_CALL);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, function, &func) ||
++        !qjsjit_resolve_slot(frame, b, this_value, &this_obj) ||
++        out == func || out == this_obj || argc > INT_MAX)
++        return qjsjit_reject_helper(frame, "invalid JIT call slots");
++    if (argc == 0) {
++        if (argv != JS_JIT_SLOT_NONE)
++            return qjsjit_reject_helper(frame, "invalid empty JIT argv");
++    } else {
++        if (!qjsjit_resolve_slot(frame, b, argv, &args))
++            return qjsjit_reject_helper(frame, "invalid JIT argv");
++        for (i = 0; i < argc; i++) {
++            if (!qjsjit_resolve_slot(frame, b, argv + i, &slot) ||
++                slot != args + i || out == slot)
++                return qjsjit_reject_helper(frame, "invalid JIT argv range");
++        }
++    }
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT call output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = JS_Call(frame->ctx, *func, *this_obj, (int)argc,
++                     (JSValueConst *)args);
++    if (JS_IsException(result)) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
++
++static JSJitHelperStatus qjsjit_new_value(JSJitExecFrame *frame,
++                                          uint32_t stack_map_id,
++                                          uint32_t output, bool array)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, result;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!qjsjit_resolve_slot(frame, b, output, &out))
++        return qjsjit_reject_helper(frame, "invalid JIT allocation slot");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT allocation output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = array ? JS_NewArray(frame->ctx) : JS_NewObject(frame->ctx);
++    if (JS_IsException(result)) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperNewArray(JSJitExecFrame *frame,
++                                       uint32_t stack_map_id,
++                                       uint32_t output)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_NEW_ARRAY);
++    return qjsjit_new_value(frame, stack_map_id, output, true);
++}
++
++JSJitHelperStatus JS_JitHelperNewObject(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t output)
++{
++    qjsjit_count_helper(frame, JS_JIT_HELPER_NEW_OBJECT);
++    return qjsjit_new_value(frame, stack_map_id, output, false);
++}
++#endif
++
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
+ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                                JSValueConst this_obj, JSValueConst new_target,
+@@ -17557,10 +19035,14 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+     JSFunctionBytecode *b;
+     JSStackFrame sf_s, *sf = &sf_s;
+     uint8_t *pc;
+-    int opcode, arg_allocated_size, i;
++    int opcode, arg_allocated_size, stack_allocated_size, i;
+     JSValue *local_buf, *stack_buf, *var_buf, *arg_buf, *sp, ret_val, *pval;
+     JSVarRef **var_refs;
+     size_t alloca_size;
++#ifdef CONFIG_JIT_ABI
++    int jit_call_recorded = 0;
++    uint32_t jit_hot_kind = JS_JIT_HOT_CALL, jit_probe_budget = 1;
++#endif
+ 
+ #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_STEP
+ #define DUMP_BYTECODE_OR_DONT(pc) \
+@@ -17602,6 +19084,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             local_buf = arg_buf = sf->arg_buf;
+             var_buf = sf->var_buf;
+             stack_buf = sf->var_buf + b->var_count;
++#ifdef CONFIG_JIT_ABI
++            stack_allocated_size = (int)b->stack_size +
++                (int)JS_JIT_HELPER_SCRATCH_SLOTS;
++#else
++            stack_allocated_size = b->stack_size;
++#endif
+             sp = sf->cur_sp;
+             sf->cur_sp = NULL; /* cur_sp is NULL if the function is running */
+             pc = sf->cur_pc;
+@@ -17634,8 +19122,15 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         arg_allocated_size = 0;
+     }
+ 
++#ifdef CONFIG_JIT_ABI
++    stack_allocated_size = (int)b->stack_size +
++        (int)JS_JIT_HELPER_SCRATCH_SLOTS;
++#else
++    stack_allocated_size = b->stack_size;
++#endif
++
+     alloca_size = sizeof(JSValue) * (arg_allocated_size + b->var_count +
+-                                     b->stack_size) +
++                                     stack_allocated_size) +
+         sizeof(JSVarRef *) * b->var_ref_count;
+     if (js_check_stack_overflow(rt, alloca_size))
+         return JS_ThrowStackOverflow(caller_ctx);
+@@ -17664,7 +19159,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         var_buf[i] = JS_UNDEFINED;
+ 
+     stack_buf = var_buf + b->var_count;
+-    sf->var_refs = (JSVarRef **)(stack_buf + b->stack_size);
++    for(i = b->stack_size; i < stack_allocated_size; i++)
++        stack_buf[i] = JS_UNDEFINED;
++    sf->var_refs = (JSVarRef **)(stack_buf + stack_allocated_size);
+     sf->var_ref_count = b->var_ref_count;
+     for(i = 0; i < b->var_ref_count; i++)
+         sf->var_refs[i] = NULL;
+@@ -17681,6 +19178,282 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         print_func_name(b);
+ #endif
+ 
++#ifdef CONFIG_JIT_ABI
++ jit_poll:
++    jit_probe_budget = 64; if (rt->jit_backend_vtable)
++        JS_SetUncatchableError(ctx, rt->jit_uncatchable_exception);
++#ifdef CONFIG_JIT_ABI
++    /* Identity is established before feedback and feedback is reported before
++     * native acquisition.  A call is counted once per invocation; a taken
++     * backedge sets jit_hot_kind after its successful interrupt poll. */
++    if (((jit_hot_kind == JS_JIT_HOT_CALL && !jit_call_recorded) ||
++         jit_hot_kind == JS_JIT_HOT_LOOP) && rt->jit_backend_vtable &&
++        rt->jit_backend_vtable->record_hot &&
++        qjsjit_ensure_function_identity(rt, b) == 0) {
++        const JSJitBackendVTable *hot_vtable = rt->jit_backend_vtable;
++        void *hot_opaque = rt->jit_backend_opaque;
++        JSJitHotEvent event;
++        uint32_t request_snapshot;
++
++        memset(&event, 0, sizeof(event));
++        event.struct_size = sizeof(event);
++        event.kind = jit_hot_kind;
++        event.function.struct_size = sizeof(event.function);
++        event.function.id = b->jit_function_id;
++        event.function.generation = b->jit_generation;
++        event.pc = jit_hot_kind == JS_JIT_HOT_CALL ? 0 :
++            (uint32_t)(pc - b->byte_code_buf);
++        event.count = jit_hot_kind == JS_JIT_HOT_CALL ? 1 : 64;
++        event.feedback_slot = UINT32_MAX;
++        event.callee.struct_size = sizeof(event.callee);
++        event.callee.id = b->jit_function_id;
++        event.callee.generation = b->jit_generation;
++        if (jit_hot_kind == JS_JIT_HOT_CALL && b->arg_count != 0) {
++            int feedback_tag = JS_VALUE_GET_TAG(arg_buf[0]);
++            event.feedback_slot = 0;
++            switch (feedback_tag) {
++            case JS_TAG_INT: event.feedback_type = JS_JIT_FEEDBACK_INT32; break;
++            case JS_TAG_FLOAT64: event.feedback_type = JS_JIT_FEEDBACK_FLOAT64; break;
++            case JS_TAG_BOOL: event.feedback_type = JS_JIT_FEEDBACK_BOOL; break;
++            case JS_TAG_NULL: event.feedback_type = JS_JIT_FEEDBACK_NULL; break;
++            case JS_TAG_UNDEFINED: event.feedback_type = JS_JIT_FEEDBACK_UNDEFINED; break;
++            case JS_TAG_STRING:
++            case JS_TAG_STRING_ROPE:
++                event.feedback_type = JS_JIT_FEEDBACK_STRING;
++                break;
++            case JS_TAG_OBJECT: event.feedback_type = JS_JIT_FEEDBACK_OBJECT; break;
++            default: event.feedback_type = JS_JIT_FEEDBACK_NONE; break;
++            }
++        }
++        rt->jit_backend_active_depth++;
++        request_snapshot = hot_vtable->record_hot(hot_opaque, &event);
++        rt->jit_backend_active_depth--;
++        if (jit_hot_kind == JS_JIT_HOT_CALL)
++            jit_call_recorded = 1;
++        jit_hot_kind = JS_JIT_HOT_CALL;
++        if (request_snapshot && hot_vtable->submit_snapshot) {
++            JSJitFunctionSnapshot *snapshot = NULL;
++            if (JS_JitSnapshotFunction(ctx, func_obj, &snapshot) ==
++                    JS_JIT_SNAPSHOT_OK && snapshot) {
++                /* Ownership transfers for exactly this callback. */
++                rt->jit_backend_active_depth++;
++                hot_vtable->submit_snapshot(hot_opaque, snapshot);
++                rt->jit_backend_active_depth--;
++            }
++        }
++    }
++#endif
++    if (JS_IsUncatchableError(rt->jit_uncatchable_exception) &&
++        rt->jit_backend_vtable && rt->jit_backend_vtable->acquire_entry &&
++        qjsjit_ensure_function_identity(rt, b) == 0) {
++        const JSJitBackendVTable *jit_vtable = rt->jit_backend_vtable;
++        void *jit_opaque = rt->jit_backend_opaque;
++        JSJitEntryHandle entry;
++        const uint8_t *entry_pc = pc;
++        JSValue *entry_sp = sp;
++        uint32_t entry_pc_offset = (uint32_t)(pc - b->byte_code_buf);
++
++        /* acquire_entry is an external callback and may inspect the frame. */
++        sf->cur_pc = pc;
++        rt->jit_backend_active_depth++;
++        entry = jit_vtable->acquire_entry(jit_opaque, b->jit_function_id,
++                                          b->jit_generation, entry_pc_offset);
++        if (entry.struct_size != sizeof(entry) || entry.reserved != 0 ||
++            !entry.entry || !entry.pin ||
++            entry.helper_abi_version != QJSJIT_HELPER_ABI_VERSION) {
++            if (entry.pin && jit_vtable->release_entry)
++                jit_vtable->release_entry(jit_opaque, entry);
++            rt->jit_backend_active_depth--;
++        } else {
++            JSJitExecFrame frame;
++            JSJitExit jit_exit;
++            const uint8_t *resume_pc;
++            JSValue *resume_sp;
++            JSJitExecFrame *previous_active_frame;
++            uint64_t previous_frame_cookie;
++            uint32_t previous_stack_map_count;
++            uint32_t previous_helper_abi_version;
++
++            rt->jit_next_frame_cookie++;
++            if (unlikely(rt->jit_next_frame_cookie == 0)) {
++                jit_vtable->release_entry(jit_opaque, entry);
++                rt->jit_backend_active_depth--;
++                goto restart;
++            }
++
++            memset(&frame, 0, sizeof(frame));
++            frame.struct_size = sizeof(frame);
++            frame.flags = b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0;
++            frame.rt = rt;
++            frame.ctx = ctx;
++            frame.function_id = b->jit_function_id;
++            frame.generation = b->jit_generation;
++            frame.arg_buf = (JSValueConst *)arg_buf;
++            frame.var_buf = var_buf;
++            frame.stack_base = stack_buf;
++            frame.stack_top = sp;
++            frame.bytecode_start = b->byte_code_buf;
++            frame.pc = pc;
++            frame.result = JS_UNDEFINED;
++            frame.entry = entry;
++            frame.runtime_api = &qjsjit_runtime_api;
++            frame.runtime_id = rt->jit_runtime_id;
++            frame.frame_cookie = rt->jit_next_frame_cookie;
++            frame.stack_capacity = stack_buf + stack_allocated_size;
++
++            /* Native helpers may recurse through JS while this frame is live. */
++            sf->cur_pc = pc;
++            previous_active_frame = rt->jit_active_frame;
++            previous_frame_cookie = rt->jit_active_frame_cookie;
++            previous_stack_map_count = rt->jit_active_stack_map_count;
++            previous_helper_abi_version = rt->jit_active_helper_abi_version;
++            rt->jit_active_frame = &frame;
++            rt->jit_active_frame_cookie = frame.frame_cookie;
++            rt->jit_active_stack_map_count = entry.stack_map_count;
++            rt->jit_active_helper_abi_version = entry.helper_abi_version;
++            if (jit_vtable->native_enter)
++                jit_vtable->native_enter(jit_opaque, b->jit_function_id,
++                                         b->jit_generation, entry_pc_offset);
++            jit_exit = entry.entry(&frame);
++            if (jit_vtable->native_exit)
++                jit_vtable->native_exit(jit_opaque, b->jit_function_id,
++                                        b->jit_generation, entry_pc_offset,
++                                        jit_exit.kind);
++            rt->jit_active_frame = previous_active_frame;
++            rt->jit_active_frame_cookie = previous_frame_cookie;
++            rt->jit_active_stack_map_count = previous_stack_map_count;
++            rt->jit_active_helper_abi_version = previous_helper_abi_version;
++            jit_vtable->release_entry(jit_opaque, entry);
++            rt->jit_backend_active_depth--;
++
++            if (!qjsjit_scratch_is_clear(stack_buf, b)) {
++                /* Every generated exit must first move or consume all
++                 * reserved owners.  Clear through the known C allocation
++                 * (never through mutable frame pointers), then make the
++                 * compiler invariant failure uncatchable. */
++                qjsjit_clear_scratch(ctx, stack_buf, &frame.stack_top, b);
++                qjsjit_reject_exit(ctx, &frame.result,
++                                   "owned JIT scratch at exit");
++                jit_exit.kind = JS_JIT_EXIT_EXCEPTION;
++                jit_exit.reserved = 0;
++                jit_exit.resume_pc = NULL;
++                jit_exit.resume_stack_top = NULL;
++            }
++
++            resume_pc = jit_exit.resume_pc ? jit_exit.resume_pc : frame.pc;
++            resume_sp = jit_exit.resume_stack_top ?
++                jit_exit.resume_stack_top : frame.stack_top;
++            if (jit_exit.reserved != 0 ||
++                frame.stack_capacity != stack_buf + stack_allocated_size ||
++                !qjsjit_valid_stack_top(
++                    stack_buf, (uint32_t)stack_allocated_size, resume_sp)) {
++                qjsjit_reject_exit(ctx, &frame.result,
++                                   "invalid JIT exit frame");
++                pc = (uint8_t *)entry_pc;
++                sp = entry_sp;
++                goto exception;
++            }
++
++            switch (jit_exit.kind) {
++            case JS_JIT_EXIT_DONE:
++                if (JS_HasException(ctx) || JS_IsException(frame.result) ||
++                    !qjsjit_valid_stack_top(stack_buf, b->stack_size,
++                                            resume_sp)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT done state");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                    goto exception;
++                }
++                sp = resume_sp;
++                ret_val = frame.result;
++                goto done;
++            case JS_JIT_EXIT_EXCEPTION:
++                if (!JS_IsUndefined(frame.result) ||
++                    !JS_HasException(ctx) ||
++                    !qjsjit_valid_stack_top(stack_buf, b->stack_size,
++                                            resume_sp)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT exception state");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                } else if (!qjsjit_valid_pc(b, resume_pc, true)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT exception PC");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                } else {
++                    pc = (uint8_t *)resume_pc;
++                    sp = resume_sp;
++                }
++                goto exception;
++            case JS_JIT_EXIT_INTERRUPT:
++                if (!JS_IsUndefined(frame.result) ||
++                    !qjsjit_valid_stack_top(stack_buf, b->stack_size,
++                                            resume_sp)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT interrupt state");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                    goto exception;
++                } else if (!qjsjit_valid_pc(b, resume_pc, true)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT interrupt PC");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                } else {
++                    pc = (uint8_t *)resume_pc;
++                    sp = resume_sp;
++                }
++                if (!JS_HasException(ctx) ||
++                    !JS_IsUncatchableError(rt->current_exception))
++                    JS_ThrowInterrupted(ctx);
++                qjsjit_ensure_uncatchable_exception(ctx);
++                goto exception;
++            case JS_JIT_EXIT_DEOPT:
++                if (!JS_IsUndefined(frame.result) || JS_HasException(ctx) ||
++                    !qjsjit_valid_stack_top(stack_buf, b->stack_size,
++                                            resume_sp)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT deopt state");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                    goto exception;
++                } else if (!jit_exit.resume_pc ||
++                    !qjsjit_valid_pc(b, jit_exit.resume_pc, false)) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT deopt PC");
++                    pc = (uint8_t *)entry_pc;
++                    sp = resume_sp;
++                    goto exception;
++                }
++                pc = (uint8_t *)jit_exit.resume_pc;
++                sp = resume_sp;
++                goto restart;
++            case JS_JIT_EXIT_RETRY_INTERPRETER:
++                /* RETRY is valid only before native code mutates the frame. */
++                if (!JS_IsUndefined(frame.result) || JS_HasException(ctx) ||
++                    frame.stack_top != entry_sp) {
++                    qjsjit_reject_exit(ctx, &frame.result,
++                                       "invalid JIT retry state");
++                    pc = (uint8_t *)entry_pc;
++                    sp = entry_sp;
++                    goto exception;
++                }
++                pc = (uint8_t *)entry_pc;
++                sp = entry_sp;
++                goto restart;
++            default:
++                qjsjit_reject_exit(ctx, &frame.result,
++                                   "invalid JIT exit kind");
++                pc = (uint8_t *)entry_pc;
++                sp = resume_sp;
++                goto exception;
++            }
++        }
++    }
++#endif
++
+  restart:
+     for(;;) {
+         int call_argc;
+@@ -18662,27 +20435,63 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+             BREAK;
+ 
+         CASE(OP_goto):
+-            pc += (int32_t)get_u32(pc);
+-            if (unlikely(js_poll_interrupts(ctx)))
+-                goto exception;
++            {
++                int32_t diff = (int32_t)get_u32(pc);
++                pc += diff;
++                if (unlikely(js_poll_interrupts(ctx)))
++                    goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (diff < 0 && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
++            }
+             BREAK;
+         CASE(OP_goto16):
+-            pc += (int16_t)get_u16(pc);
+-            if (unlikely(js_poll_interrupts(ctx)))
+-                goto exception;
++            {
++                int16_t diff = (int16_t)get_u16(pc);
++                pc += diff;
++                if (unlikely(js_poll_interrupts(ctx)))
++                    goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (diff < 0 && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
++            }
+             BREAK;
+         CASE(OP_goto8):
+-            pc += (int8_t)pc[0];
+-            if (unlikely(js_poll_interrupts(ctx)))
+-                goto exception;
++            {
++                int8_t diff = (int8_t)pc[0];
++                pc += diff;
++                if (unlikely(js_poll_interrupts(ctx)))
++                    goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (diff < 0 && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
++            }
+             BREAK;
+         CASE(OP_if_true):
+             {
+                 int res;
+                 JSValue op1;
++#ifdef CONFIG_JIT_ABI
++                uint8_t *next_pc;
++#endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
++#ifdef CONFIG_JIT_ABI
++                next_pc = pc;
++#endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+@@ -18694,15 +20503,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 }
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (pc < next_pc && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
+             }
+             BREAK;
+         CASE(OP_if_false):
+             {
+                 int res;
+                 JSValue op1;
++#ifdef CONFIG_JIT_ABI
++                uint8_t *next_pc;
++#endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
++#ifdef CONFIG_JIT_ABI
++                next_pc = pc;
++#endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+@@ -18714,15 +20536,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 }
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (pc < next_pc && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
+             }
+             BREAK;
+         CASE(OP_if_true8):
+             {
+                 int res;
+                 JSValue op1;
++#ifdef CONFIG_JIT_ABI
++                uint8_t *next_pc;
++#endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
++#ifdef CONFIG_JIT_ABI
++                next_pc = pc;
++#endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+@@ -18734,15 +20569,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 }
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (pc < next_pc && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
+             }
+             BREAK;
+         CASE(OP_if_false8):
+             {
+                 int res;
+                 JSValue op1;
++#ifdef CONFIG_JIT_ABI
++                uint8_t *next_pc;
++#endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
++#ifdef CONFIG_JIT_ABI
++                next_pc = pc;
++#endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+                 } else {
+@@ -18754,6 +20602,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+                 }
+                 if (unlikely(js_poll_interrupts(ctx)))
+                     goto exception;
++#ifdef CONFIG_JIT_ABI
++                if (pc < next_pc && rt->jit_backend_vtable &&
++                    rt->jit_backend_vtable->acquire_entry && --jit_probe_budget == 0) {
++                    jit_hot_kind = JS_JIT_HOT_LOOP;
++                    goto jit_poll;
++                }
++#endif
+             }
+             BREAK;
+         CASE(OP_catch):
+@@ -20319,12 +22174,32 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+         }
+     }
+  exception:
+-    if (needs_backtrace(rt->current_exception)
+-    || JS_IsUndefined(ctx->error_back_trace)) {
++#ifdef CONFIG_JIT_ABI
++    {
++        bool preserve_uncatchable =
++            JS_IsUncatchableError(rt->current_exception);
++
++        /* Backtrace allocation must not replace the emergency sentinel. */
++        if (!qjsjit_is_uncatchable_sentinel(rt, rt->current_exception) &&
++            (needs_backtrace(rt->current_exception) ||
++             JS_IsUndefined(ctx->error_back_trace))) {
++            sf->cur_pc = pc;
++            build_backtrace(ctx, rt->current_exception, JS_UNDEFINED,
++                            NULL, 0, 0, 0);
++        }
++        /* A partial OOM may create the Error, then fail in its backtrace. */
++        if (preserve_uncatchable &&
++            !JS_IsUncatchableError(rt->current_exception))
++            qjsjit_ensure_uncatchable_exception(ctx);
++    }
++#else
++    if (needs_backtrace(rt->current_exception) ||
++        JS_IsUndefined(ctx->error_back_trace)) {
+         sf->cur_pc = pc;
+         build_backtrace(ctx, rt->current_exception, JS_UNDEFINED,
+                         NULL, 0, 0, 0);
+     }
++#endif
+     if (!JS_IsUncatchableError(rt->current_exception)) {
+         while (sp > stack_buf) {
+             JSValue val = *--sp;
+@@ -20564,7 +22439,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
+     sf->is_strict_mode = b->is_strict_mode;
+     sf->cur_pc = b->byte_code_buf;
+     arg_buf_len = max_int(b->arg_count, argc);
++#ifdef CONFIG_JIT_ABI
++    local_count = arg_buf_len + b->var_count + b->stack_size +
++        JS_JIT_HELPER_SCRATCH_SLOTS;
++#else
+     local_count = arg_buf_len + b->var_count + b->stack_size;
++#endif
+     alloc_size = sizeof(JSValue) * max_int(local_count, 1) +
+         sizeof(JSVarRef *) * b->var_ref_count;
+     sf->arg_buf = js_malloc(ctx, alloc_size);
+@@ -20576,7 +22456,12 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
+     sf->arg_count = arg_buf_len;
+     sf->var_buf = sf->arg_buf + arg_buf_len;
+     sf->cur_sp = sf->var_buf + b->var_count;
++#ifdef CONFIG_JIT_ABI
++    sf->var_refs = (JSVarRef **)(sf->cur_sp + b->stack_size +
++                                 JS_JIT_HELPER_SCRATCH_SLOTS);
++#else
+     sf->var_refs = (JSVarRef **)(sf->cur_sp + b->stack_size);
++#endif
+     sf->var_ref_count = b->var_ref_count;
+     for(i = 0; i < b->var_ref_count; i++)
+         sf->var_refs[i] = NULL;
+@@ -20585,6 +22470,10 @@ static __exception int async_func_init(JSContext *ctx, JSAsyncFunctionState *s,
+     n = arg_buf_len + b->var_count;
+     for(i = argc; i < n; i++)
+         sf->arg_buf[i] = JS_UNDEFINED;
++#ifdef CONFIG_JIT_ABI
++    for(i = 0; i < JS_JIT_HELPER_SCRATCH_SLOTS; i++)
++        sf->cur_sp[b->stack_size + i] = JS_UNDEFINED;
++#endif
+     return 0;
+ }
+ 
+@@ -36316,6 +38205,12 @@ static void free_function_bytecode(JSRuntime *rt, JSFunctionBytecode *b)
+ {
+     int i;
+ 
++#ifdef CONFIG_JIT_ABI
++    qjsjit_retire_identity(rt, b->jit_function_id, b->jit_generation);
++    b->jit_function_id = 0;
++    b->jit_generation = 0;
++#endif
++
+     if (b->byte_code_buf)
+         free_bytecode_atoms(rt, b->byte_code_buf, b->byte_code_len, true);
+ 

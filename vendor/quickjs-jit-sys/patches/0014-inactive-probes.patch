@@ -1,0 +1,265 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -20098,8 +20098,6 @@
+         var_buf[i] = JS_UNDEFINED;
+ 
+     stack_buf = var_buf + b->var_count;
+-    for(i = b->stack_size; i < stack_allocated_size; i++)
+-        stack_buf[i] = JS_UNDEFINED;
+     sf->var_refs = (JSVarRef **)(stack_buf + stack_allocated_size);
+     sf->var_ref_count = b->var_ref_count;
+     for(i = 0; i < b->var_ref_count; i++)
+@@ -20118,8 +20116,7 @@
+ #endif
+ 
+ #ifdef CONFIG_JIT_ABI
+-    if (argc >= 0 && argc <= 8 && !rt->jit_suspended && rt->jit_backend_vtable &&
+-        rt->jit_backend_vtable->record_feedback) {
++    if (argc >= 0 && argc <= 8 && qjsjit_feedback_enabled(rt, b)) {
+         uint32_t call_types[8];
+         for (i = 0; i < argc; i++) {
+             qjsjit_unpoison_slot(&arg_buf[i]);
+@@ -20255,6 +20252,10 @@
+                 goto restart;
+             }
+ 
++            /* Reserved helper owners are invisible to the interpreter. Only
++               initialize them when a native entry will receive the frame. */
++            for(i = b->stack_size; i < stack_allocated_size; i++)
++                stack_buf[i] = JS_UNDEFINED;
+             memset(&frame, 0, sizeof(frame));
+             frame.struct_size = sizeof(frame);
+             frame.flags = b->is_strict_mode ? JS_JIT_FUNCTION_STRICT : 0;
+@@ -20899,10 +20900,12 @@
+             ret_val = *--sp;
+ #ifdef CONFIG_JIT_ABI
+             {
+-                uint32_t return_type = qjsjit_feedback_type(ret_val);
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
+-                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
+-                    &return_type, 1, 0);
++                if (qjsjit_feedback_enabled(rt, b)) {
++                    uint32_t return_type = qjsjit_feedback_type(ret_val);
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                        (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                        &return_type, 1, 0);
++                }
+             }
+ #endif
+             goto done;
+@@ -20910,10 +20913,12 @@
+             ret_val = JS_UNDEFINED;
+ #ifdef CONFIG_JIT_ABI
+             {
+-                uint32_t return_type = JS_JIT_VALUE_UNDEFINED;
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
+-                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
+-                    &return_type, 1, 0);
++                if (qjsjit_feedback_enabled(rt, b)) {
++                    uint32_t return_type = JS_JIT_VALUE_UNDEFINED;
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_RETURN,
++                        (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                        &return_type, 1, 0);
++                }
+             }
+ #endif
+             goto done;
+@@ -21500,13 +21505,15 @@
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
+                 uint32_t condition_type;
++                bool feedback_active;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
+-                condition_type = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                condition_type = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+@@ -21514,10 +21521,12 @@
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
+-                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
+-                    &condition_type, 1,
+-                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                if (feedback_active) {
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                        (uint32_t)(pc - b->byte_code_buf - 5), 0,
++                        &condition_type, 1,
++                        res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                }
+ #endif
+                 sp--;
+                 if (res) {
+@@ -21541,13 +21550,15 @@
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
+                 uint32_t condition_type;
++                bool feedback_active;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 4;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
+-                condition_type = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                condition_type = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+@@ -21555,10 +21566,12 @@
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
+-                    (uint32_t)(pc - b->byte_code_buf - 5), 0,
+-                    &condition_type, 1,
+-                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                if (feedback_active) {
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                        (uint32_t)(pc - b->byte_code_buf - 5), 0,
++                        &condition_type, 1,
++                        !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                }
+ #endif
+                 sp--;
+                 if (!res) {
+@@ -21582,13 +21595,15 @@
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
+                 uint32_t condition_type;
++                bool feedback_active;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
+-                condition_type = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                condition_type = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+@@ -21596,10 +21611,12 @@
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
+-                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
+-                    &condition_type, 1,
+-                    res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                if (feedback_active) {
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                        (uint32_t)(pc - b->byte_code_buf - 2), 0,
++                        &condition_type, 1,
++                        res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                }
+ #endif
+                 sp--;
+                 if (res) {
+@@ -21623,13 +21640,15 @@
+ #ifdef CONFIG_JIT_ABI
+                 uint8_t *next_pc;
+                 uint32_t condition_type;
++                bool feedback_active;
+ #endif
+ 
+                 op1 = sp[-1];
+                 pc += 1;
+ #ifdef CONFIG_JIT_ABI
+                 next_pc = pc;
+-                condition_type = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                condition_type = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 if ((uint32_t)JS_VALUE_GET_TAG(op1) <= JS_TAG_UNDEFINED) {
+                     res = JS_VALUE_GET_INT(op1);
+@@ -21637,10 +21656,12 @@
+                     res = JS_ToBoolFree(ctx, op1);
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
+-                    (uint32_t)(pc - b->byte_code_buf - 2), 0,
+-                    &condition_type, 1,
+-                    !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                if (feedback_active) {
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_BRANCH,
++                        (uint32_t)(pc - b->byte_code_buf - 2), 0,
++                        &condition_type, 1,
++                        !res ? JS_JIT_FEEDBACK_BRANCH_TAKEN : 0);
++                }
+ #endif
+                 sp--;
+                 if (!res) {
+@@ -22749,10 +22770,12 @@
+                 uint32_t tag;
+ #ifdef CONFIG_JIT_ABI
+                 uint32_t conversion_types[2];
++                bool feedback_active;
+ #endif
+                 op1 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                conversion_types[0] = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                conversion_types[0] = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 tag = JS_VALUE_GET_TAG(op1);
+                 if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag)) {
+@@ -22762,10 +22785,12 @@
+                         goto exception;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
+-                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
+-                    conversion_types, 2, 0);
++                if (feedback_active && qjsjit_feedback_enabled(rt, b)) {
++                    conversion_types[1] = qjsjit_feedback_type(sp[-1]);
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
++                        (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                        conversion_types, 2, 0);
++                }
+ #endif
+             }
+             BREAK;
+@@ -22777,10 +22802,12 @@
+                 double d;
+ #ifdef CONFIG_JIT_ABI
+                 uint32_t conversion_types[2];
++                bool feedback_active;
+ #endif
+                 op1 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                conversion_types[0] = qjsjit_feedback_type(op1);
++                feedback_active = qjsjit_feedback_enabled(rt, b);
++                conversion_types[0] = feedback_active ? qjsjit_feedback_type(op1) : 0;
+ #endif
+                 tag = JS_VALUE_GET_TAG(op1);
+                 if (tag == JS_TAG_INT) {
+@@ -22805,10 +22832,12 @@
+                         goto exception;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                conversion_types[1] = qjsjit_feedback_type(sp[-1]);
+-                qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
+-                    (uint32_t)(pc - b->byte_code_buf - 1), 0,
+-                    conversion_types, 2, 0);
++                if (feedback_active && qjsjit_feedback_enabled(rt, b)) {
++                    conversion_types[1] = qjsjit_feedback_type(sp[-1]);
++                    qjsjit_record_feedback(rt, b, JS_JIT_FEEDBACK_CONVERSION,
++                        (uint32_t)(pc - b->byte_code_buf - 1), 0,
++                        conversion_types, 2, 0);
++                }
+ #endif
+             }
+             BREAK;

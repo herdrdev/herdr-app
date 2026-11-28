@@ -1,0 +1,207 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -316,6 +316,20 @@
+ 
+     JSInterruptHandler *interrupt_handler;
+     void *interrupt_opaque;
++#ifdef CONFIG_JIT_ABI
++    /* An interrupt the handler requested inside a JIT native call chain.  The
++       chain retries its CALL in the interpreter, whose next poll delivers it
++       without asking the handler again. */
++    bool jit_interrupt_pending;
++    /* Stack address of the outermost caller of a native call chain that ran
++       out of stack, zero when none.  Chains below it are refused while the
++       interpreter retries that chain, so the doomed recursion is not retried
++       natively at every level.  Cleared by the next stack overflow error
++       (the retry reached the real limit), by a chain at or above it, or
++       after jit_native_floor_refusals refusals. */
++    uintptr_t jit_native_floor;
++    uint32_t jit_native_floor_refusals;
++#endif
+ 
+     JSPromiseHook *promise_hook;
+     void *promise_hook_opaque;
+@@ -9506,6 +9520,10 @@
+ 
+ static JSValue JS_ThrowStackOverflow(JSContext *ctx)
+ {
++#ifdef CONFIG_JIT_ABI
++    /* A retried exhausted native chain has reached the real limit. */
++    ctx->rt->jit_native_floor = 0;
++#endif
+     return JS_ThrowRangeError(ctx, "Maximum call stack size exceeded");
+ }
+ 
+@@ -9591,6 +9609,13 @@
+ {
+     JSRuntime *rt = ctx->rt;
+     ctx->interrupt_counter = JS_INTERRUPT_COUNTER_INIT;
++#ifdef CONFIG_JIT_ABI
++    if (unlikely(rt->jit_interrupt_pending)) {
++        rt->jit_interrupt_pending = false;
++        JS_ThrowInterrupted(ctx);
++        return -1;
++    }
++#endif
+     if (rt->interrupt_handler) {
+         if (rt->interrupt_handler(rt, rt->interrupt_opaque)) {
+             JS_ThrowInterrupted(ctx);
+@@ -68276,3 +68301,157 @@
+ #undef malloc
+ #undef free
+ #undef realloc
++
++#ifdef CONFIG_JIT_ABI
++/* Native-call convention (P3a).  A native call entry is generated code that
++   never runs JavaScript, a JIT helper or an allocator: it only computes on
++   unboxed scalars and calls itself.  One context lives on the stack of the
++   outermost compiled caller and is shared by the whole native call chain.
++   Every failure makes the outermost caller re-execute the CALL in the
++   interpreter, which is exact because nothing observable happened except
++   interrupt-handler polls; a handler request is kept pending in the runtime
++   so the retried CALL delivers it instead of polling the handler again. */
++typedef struct JSJitNativeCallContext {
++    uintptr_t stack_limit;  /* rt->stack_limit, zero when unlimited */
++    int32_t budget;         /* remaining interrupt polls in this chain */
++    uint32_t flags;         /* JS_JIT_NATIVE_CALL_* */
++    JSContext *ctx;
++} JSJitNativeCallContext;
++
++#define JS_JIT_NATIVE_CALL_STACK_EXHAUSTED (1u << 0)
++#define JS_JIT_NATIVE_CALL_INTERRUPT_DUE (1u << 1)
++#define JS_JIT_NATIVE_CALL_BUDGET_LIMITED (1u << 2)
++
++/* Minimum C stack bytes per interpreter level assumed when bounding the
++   refusals charged to an exhausted chain's retry. */
++#define JS_JIT_NATIVE_FLOOR_LEVEL_BYTES 256
++#define JS_JIT_NATIVE_FLOOR_SLACK 64
++
++int JS_JitNativeCallBegin(JSContext *ctx, JSObject *p, JSAtom atom,
++                          JSJitNativeCallContext *nc, uintptr_t sp);
++int JS_JitNativeCallPoll(JSJitNativeCallContext *nc);
++void JS_JitNativeCallEnd(JSJitNativeCallContext *nc, uintptr_t sp);
++size_t JS_JitNativeCallContextLayout(size_t *offsets, size_t count);
++
++/* Proves, once per outermost native call chain, that the callee's self
++   reference `atom` resolves exactly like OP_get_var in the callee realm to a
++   plain data binding holding `p`.  No JavaScript or host code runs inside the
++   chain (the interrupt handler is only polled through JS_JitNativeCallPoll),
++   so every OP_get_var of `atom` in the chain yields the same function
++   without invoking a getter or throwing.  `sp` is the caller's stack
++   pointer.  Returns 0 when admitted. */
++int JS_JitNativeCallBegin(JSContext *ctx, JSObject *p, JSAtom atom,
++                          JSJitNativeCallContext *nc, uintptr_t sp)
++{
++    JSRuntime *rt;
++    JSFunctionBytecode *b;
++    JSShapeProperty *prs;
++    JSProperty *pr;
++
++    if (!ctx || !p || !nc || p->class_id != JS_CLASS_BYTECODE_FUNCTION)
++        return -1;
++    rt = ctx->rt;
++    if (rt->jit_native_floor) {
++        if (sp < rt->jit_native_floor && rt->jit_native_floor_refusals) {
++            rt->jit_native_floor_refusals--;
++            return -1;
++        }
++        rt->jit_native_floor = 0;
++    }
++    b = p->u.func.function_bytecode;
++    /* The chain shares the caller's interrupt counter and global lookup. */
++    if (!b || b->realm != ctx || b->func_kind != JS_FUNC_NORMAL)
++        return -1;
++    /* An undelivered interrupt must reach the interpreter's next poll. */
++    if (rt->jit_interrupt_pending)
++        return -1;
++    prs = find_own_property(&pr, JS_VALUE_GET_OBJ(ctx->global_var_obj), atom);
++    if (!prs) {
++        prs = find_own_property(&pr, JS_VALUE_GET_OBJ(ctx->global_obj), atom);
++        if (!prs)
++            return -1;
++    }
++    /* Accessors, auto-init and var-ref slots can run code or change; an
++       uninitialized lexical binding is not the function object below. */
++    if ((prs->flags & JS_PROP_TMASK) != JS_PROP_NORMAL)
++        return -1;
++    if (JS_VALUE_GET_TAG(pr->u.value) != JS_TAG_OBJECT ||
++        JS_VALUE_GET_OBJ(pr->u.value) != p)
++        return -1;
++    nc->ctx = ctx;
++    nc->stack_limit = rt->stack_limit;
++    nc->flags = 0;
++    if (rt->interrupt_handler) {
++        nc->flags |= JS_JIT_NATIVE_CALL_BUDGET_LIMITED;
++        nc->budget = ctx->interrupt_counter;
++    } else {
++        /* __js_poll_interrupts only resets the counter without a handler. */
++        nc->budget = INT32_MAX;
++    }
++    return 0;
++}
++
++/* Called by a native entry after its interrupt budget reached zero.  This is
++   __js_poll_interrupts without throwing: an interrupt request is recorded in
++   rt->jit_interrupt_pending and makes the chain retry in the interpreter,
++   whose next poll (the retried CALL's entry poll, since End exhausts the
++   counter) throws the uncatchable error without calling the handler again,
++   so a handler's single `true` is never lost.  Returns non-zero to request
++   that retry. */
++int JS_JitNativeCallPoll(JSJitNativeCallContext *nc)
++{
++    JSRuntime *rt = nc->ctx->rt;
++
++    if (!(nc->flags & JS_JIT_NATIVE_CALL_BUDGET_LIMITED)) {
++        nc->budget = INT32_MAX;
++        return 0;
++    }
++    nc->budget = JS_INTERRUPT_COUNTER_INIT;
++    if (rt->interrupt_handler &&
++        rt->interrupt_handler(rt, rt->interrupt_opaque)) {
++        rt->jit_interrupt_pending = true;
++        nc->flags |= JS_JIT_NATIVE_CALL_INTERRUPT_DUE;
++        nc->budget = 0;
++        return 1;
++    }
++    return 0;
++}
++
++/* Publishes the chain's interrupt accounting back to the context.  A due
++   interrupt leaves the counter exhausted so the retried CALL polls first and
++   delivers the pending interrupt.  A chain that ran out of stack records its
++   caller's stack pointer `sp` as the runtime's native floor. */
++void JS_JitNativeCallEnd(JSJitNativeCallContext *nc, uintptr_t sp)
++{
++    JSContext *ctx = nc->ctx;
++    JSRuntime *rt = ctx->rt;
++
++    if ((nc->flags & JS_JIT_NATIVE_CALL_STACK_EXHAUSTED) &&
++        nc->stack_limit && sp > nc->stack_limit) {
++        /* The retry has at most one interpreter level per LEVEL_BYTES of
++           the remaining stack; refusals beyond that are stale. */
++        uintptr_t levels = (sp - nc->stack_limit) /
++            JS_JIT_NATIVE_FLOOR_LEVEL_BYTES + JS_JIT_NATIVE_FLOOR_SLACK;
++        rt->jit_native_floor = sp;
++        rt->jit_native_floor_refusals =
++            levels > UINT32_MAX ? UINT32_MAX : (uint32_t)levels;
++    }
++
++    if (nc->flags & JS_JIT_NATIVE_CALL_INTERRUPT_DUE)
++        ctx->interrupt_counter = 0;
++    else if (nc->flags & JS_JIT_NATIVE_CALL_BUDGET_LIMITED)
++        ctx->interrupt_counter = nc->budget > 0 ? nc->budget : 0;
++}
++
++/* Layout check for generated code: size followed by field offsets. */
++size_t JS_JitNativeCallContextLayout(size_t *offsets, size_t count)
++{
++    if (offsets && count >= 4) {
++        offsets[0] = offsetof(JSJitNativeCallContext, stack_limit);
++        offsets[1] = offsetof(JSJitNativeCallContext, budget);
++        offsets[2] = offsetof(JSJitNativeCallContext, flags);
++        offsets[3] = offsetof(JSJitNativeCallContext, ctx);
++    }
++    return sizeof(JSJitNativeCallContext);
++}
++#endif /* CONFIG_JIT_ABI */

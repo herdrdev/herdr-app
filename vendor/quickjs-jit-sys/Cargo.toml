@@ -1,0 +1,92 @@
+# HERDR: quickjs-jit's `sys` crate at our pinned rev 96593cd with
+# quickjs-ng/quickjs#1613 applied as patches/0033 (build_support/patch.rs,
+# marked HERDR:). Only the library: tests stay upstream. Drop once the pin
+# moves to a quickjs-ng 0.16 base.
+[package]
+name = "quickjs-jit-sys"
+version = "0.12.11"
+authors = ["Mees Delzenne <mees.delzenne@gmail.com>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+autotests = false
+description = "QuickJS native bindings with the versioned JIT ABI"
+keywords = ["quickjs", "ecmascript", "javascript", "es6", "es2020"]
+categories = ["external-ffi-bindings"]
+repository = "https://github.com/longbridge/rquickjs.git"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "build.rs",
+    "build_support/patch.rs",
+    "patches/*.patch",
+    "patches/README.md",
+    "quickjs.bind.h",
+    "quickjs/api-test.c",
+    "quickjs/builtin-array-fromasync.h",
+    "quickjs/builtin-iterator-zip-keyed.h",
+    "quickjs/builtin-iterator-zip.h",
+    "quickjs/cutils.h",
+    "quickjs/dtoa.c",
+    "quickjs/dtoa.h",
+    "quickjs/libregexp-opcode.h",
+    "quickjs/libregexp.c",
+    "quickjs/libregexp.h",
+    "quickjs/libunicode-table.h",
+    "quickjs/libunicode.c",
+    "quickjs/libunicode.h",
+    "quickjs/LICENSE",
+    "quickjs/list.h",
+    "quickjs/quickjs-atom.h",
+    "quickjs/quickjs-c-atomics.h",
+    "quickjs/quickjs-opcode.h",
+    "quickjs/quickjs.c",
+    "quickjs/quickjs.h",
+    "src/**/*.rs",
+]
+
+[lib]
+name = "rquickjs_sys"
+
+[build-dependencies]
+cc = "1"
+
+[build-dependencies.bindgen-rs]
+package = "bindgen"
+version = "0.72"
+optional = true
+
+[build-dependencies.pretty_env_logger]
+version = "0.5"
+optional = true
+
+[features]
+bindgen = ["bindgen-rs"]
+
+# Enable the versioned QuickJS JIT ABI.
+jit-abi = []
+
+# Expose generated-binding source to downstream ABI integration tests.
+jit-test-support = ["jit-abi"]
+
+# Debug logging
+logging = ["pretty_env_logger"]
+# Special case for updating bundled bindings
+update-bindings = ["bindgen"]
+
+# Enable QuickJS dumps
+dump-bytecode = []
+dump-gc = []
+dump-gc-free = []
+dump-free = []
+dump-leaks = []
+dump-mem = []
+dump-objects = []
+dump-atoms = []
+dump-shapes = []
+dump-module-resolve = []
+dump-promise = []
+dump-read-object = []
+
+# Disable QuickJS assertions for better performance
+disable-assertions = []

@@ -1,0 +1,182 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -62127,6 +62127,124 @@
+     return js_int32(p->u.array.count);
+ }
+ 
++#ifdef CONFIG_JIT_ABI
++/* This is a continuing-path guard, not a feedback query. It is deliberately
++ * a leaf: no allocation, refcounting, property access, exception, callback or
++ * VM reentry is permitted here. */
++static int qjsjit_query_typed_array(JSContext *ctx, const JSValue *receiver,
++                                    uint32_t expected_mode, uint32_t flags,
++                                    JSJitArrayMetadata *out)
++{
++    uint32_t caller_size, size_log2;
++    JSClassID expected_class;
++    JSObject *object, *concrete_proto, *base_proto, *getter;
++    JSProperty *property;
++    JSShapeProperty *shape_property;
++    JSTypedArray *typed;
++    JSArrayBuffer *buffer;
++    JSContext *realm;
++    uint64_t byte_count;
++    uint8_t *data;
++
++    if (!ctx || !receiver || !out)
++        return JS_JIT_ARRAY_QUERY_INVALID;
++    memcpy(&caller_size, out, sizeof(caller_size));
++    if (caller_size < sizeof(*out))
++        return JS_JIT_ARRAY_QUERY_INVALID;
++    memset(out, 0, sizeof(*out));
++    out->struct_size = sizeof(*out);
++    if (flags & ~JS_JIT_ARRAY_QUERY_LENGTH)
++        return JS_JIT_ARRAY_QUERY_INVALID;
++    switch (expected_mode) {
++    case JS_JIT_ARRAY_MODE_INT32:
++        expected_class = JS_CLASS_INT32_ARRAY;
++        size_log2 = 2;
++        break;
++    case JS_JIT_ARRAY_MODE_FLOAT64:
++        expected_class = JS_CLASS_FLOAT64_ARRAY;
++        size_log2 = 3;
++        break;
++    default:
++        return JS_JIT_ARRAY_QUERY_INVALID;
++    }
++    if (JS_VALUE_GET_TAG(*receiver) != JS_TAG_OBJECT)
++        return JS_JIT_ARRAY_QUERY_MISS;
++    object = JS_VALUE_GET_OBJ(*receiver);
++    if (object->class_id != expected_class || !object->fast_array)
++        return JS_JIT_ARRAY_QUERY_MISS;
++
++    if (flags & JS_JIT_ARRAY_QUERY_LENGTH) {
++        /* Require the normal two-hop intrinsic chain and the exact built-in
++         * C getter. An own/intermediate replacement therefore misses without
++         * running user code. The getter's realm identifies the authoritative
++         * per-realm concrete prototype, including cross-realm receivers. */
++        if (find_own_property(&property, object, JS_ATOM_length))
++            return JS_JIT_ARRAY_QUERY_MISS;
++        concrete_proto = object->shape->proto;
++        if (!concrete_proto ||
++            find_own_property(&property, concrete_proto, JS_ATOM_length))
++            return JS_JIT_ARRAY_QUERY_MISS;
++        base_proto = concrete_proto->shape->proto;
++        if (!base_proto)
++            return JS_JIT_ARRAY_QUERY_MISS;
++        shape_property = find_own_property(&property, base_proto,
++                                           JS_ATOM_length);
++        if (!shape_property ||
++            (shape_property->flags & JS_PROP_TMASK) != JS_PROP_GETSET ||
++            property->u.getset.setter)
++            return JS_JIT_ARRAY_QUERY_MISS;
++        getter = property->u.getset.getter;
++        if (!getter || getter->class_id != JS_CLASS_C_FUNCTION ||
++            getter->u.cfunc.cproto != JS_CFUNC_getter ||
++            getter->u.cfunc.c_function.getter != js_typed_array_get_length)
++            return JS_JIT_ARRAY_QUERY_MISS;
++        realm = getter->u.cfunc.realm;
++        if (!realm || realm->rt != ctx->rt ||
++            JS_VALUE_GET_TAG(realm->class_proto[expected_class]) !=
++                JS_TAG_OBJECT ||
++            JS_VALUE_GET_OBJ(realm->class_proto[expected_class]) !=
++                concrete_proto)
++            return JS_JIT_ARRAY_QUERY_MISS;
++    }
++
++    typed = object->u.typed_array;
++    if (!typed || typed->obj != object || typed->track_rab || !typed->buffer ||
++        typed->buffer->class_id != JS_CLASS_ARRAY_BUFFER)
++        return JS_JIT_ARRAY_QUERY_MISS;
++    buffer = typed->buffer->u.array_buffer;
++    if (!buffer || buffer->detached || buffer->immutable || buffer->shared ||
++        buffer->max_byte_length >= 0 || buffer->byte_length < 0)
++        return JS_JIT_ARRAY_QUERY_MISS;
++    byte_count = (uint64_t)object->u.array.count << size_log2;
++    if (typed->length != byte_count || typed->offset > (uint64_t)buffer->byte_length ||
++        byte_count > (uint64_t)buffer->byte_length - typed->offset ||
++        (!buffer->data && buffer->byte_length != 0))
++        return JS_JIT_ARRAY_QUERY_MISS;
++    data = buffer->data;
++    if (typed->offset != 0) {
++        if (!data)
++            return JS_JIT_ARRAY_QUERY_MISS;
++        data += typed->offset;
++    }
++    if (object->u.array.u.ptr != data)
++        return JS_JIT_ARRAY_QUERY_MISS;
++
++    out->mode = expected_mode;
++    out->count = object->u.array.count;
++    out->data = data;
++    return JS_JIT_ARRAY_QUERY_OK;
++}
++
++const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version)
++{
++    static const JSJitArrayAPI api = {
++        sizeof(JSJitArrayAPI), QJSJIT_ARRAY_API_VERSION, 0, 0,
++        qjsjit_query_typed_array,
++    };
++    return version == QJSJIT_ARRAY_API_VERSION ? &api : NULL;
++}
++#endif
++
+ static JSValue js_typed_array_get_buffer(JSContext *ctx, JSValueConst this_val)
+ {
+     JSObject *p;
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 23u
++#define QJSJIT_ABI_MINOR 24u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -96,6 +96,41 @@
+     JS_JIT_ARRAY_MODE_FLOAT64 = 3,
+ } JSJitArrayMode;
+ 
++/* Versioned, read-only continuing-path guard for typed-array loads and
++ * length reads. effects == 0 promises no allocation, throw, finalization or
++ * reentry. Feedback may select a candidate but must never replace this live
++ * validation. A miss leaves the metadata payload zeroed. */
++#define QJSJIT_ARRAY_API_VERSION 1u
++#define JS_JIT_ARRAY_QUERY_LENGTH (1U << 0)
++
++typedef enum JSJitArrayQueryStatus {
++    JS_JIT_ARRAY_QUERY_INVALID = -1,
++    JS_JIT_ARRAY_QUERY_MISS = 0,
++    JS_JIT_ARRAY_QUERY_OK = 1,
++} JSJitArrayQueryStatus;
++
++typedef struct JSJitArrayMetadata {
++    uint32_t struct_size;
++    uint32_t mode;
++    uint32_t count;
++    uint32_t reserved;
++    void *data;
++} JSJitArrayMetadata;
++
++typedef int JSJitArrayQueryFunc(JSContext *ctx, const JSValue *receiver,
++                                uint32_t expected_mode, uint32_t flags,
++                                JSJitArrayMetadata *out);
++
++typedef struct JSJitArrayAPI {
++    uint32_t struct_size;
++    uint32_t version;
++    uint32_t effects;
++    uint32_t reserved;
++    JSJitArrayQueryFunc *query;
++} JSJitArrayAPI;
++
++JS_EXTERN const JSJitArrayAPI *JS_JitGetArrayAPI(uint32_t version);
++
+ #define JS_JIT_FEEDBACK_ARRAY_STORE (1U << 6)
+ #define JS_JIT_FEEDBACK_ARRAY_LENGTH (1U << 7)
+ #define JS_JIT_FEEDBACK_ARRAY_EXOTIC (1U << 8)

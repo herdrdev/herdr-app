@@ -825,6 +825,44 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
+    /// The heap ceiling is only a defence while meeting it is an exception.
+    /// An async call that met it between its two promise resolving functions
+    /// freed the first one twice (quickjs-ng/quickjs#1613), which takes the
+    /// host down. The ceiling is walked up one small string at a time, so it
+    /// lands on every allocation the call makes.
+    #[test]
+    fn an_async_call_at_the_heap_ceiling_throws_instead_of_crashing() {
+        let runtime = JsRuntime::new().unwrap();
+        let context = JsContext::full(&runtime).unwrap();
+        let used = runtime.memory_usage().malloc_size as usize;
+        runtime.set_memory_limit(used + 1024 * 1024);
+
+        let counts: Vec<u32> = context.with(|ctx| {
+            ctx.eval(
+                r#"
+                const call = async () => {};
+                const crumbs = [], fill = new Array(256).fill(null), blocks = [];
+                for (let i = 0; i < 512; i++) crumbs.push("c" + i);
+                for (const size of [65536, 1024]) {
+                    try { for (;;) blocks.push(new ArrayBuffer(size)); } catch {}
+                }
+                try { for (let i = 0; i < fill.length; i++) fill[i] = "f" + i; } catch {}
+                let failed = 0, completed = 0;
+                for (let i = 0; i < crumbs.length && completed < 4; i++) {
+                    crumbs[i] = null;
+                    try { call(); completed++; } catch { failed++; }
+                }
+                blocks.length = 0;
+                [failed, completed]
+                "#,
+            )
+            .unwrap()
+        });
+
+        assert!(counts[0] > 0, "no call met the ceiling: {counts:?}");
+        assert_eq!(counts[1], 4, "calls work again below the ceiling: {counts:?}");
+    }
+
     #[test]
     fn the_render_budget_is_tighter_than_the_event_budget() {
         let budgets = Budgets::default();

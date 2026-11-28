@@ -1,0 +1,73 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -112,7 +112,9 @@
+       THROWING | ALLOCATING | REENTRANT | FINALIZING)                      \
+     X(TO_PROPKEY, to_propkey, JS_JitHelperToPropKey, MAP_OUT_IN, 2, OWNED, \
+       CONSUMED, NONE, NONE, OWNED,                                         \
+-      THROWING | ALLOCATING | REENTRANT | FINALIZING)
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
++    X(GET_GLOBAL, get_global, JS_JitHelperGetGlobal, MAP_OUT_INDEX, 1, OWNED, \
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)
+ 
+ typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 13u
++#define QJSJIT_ABI_MINOR 14u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -216,7 +216,7 @@
+  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
+  */
+ #define QJSJIT_RUNTIME_API_MAJOR 1u
+-#define QJSJIT_RUNTIME_API_MINOR 4u
++#define QJSJIT_RUNTIME_API_MINOR 5u
+ 
+ #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -19520,6 +19520,34 @@
+         return qjsjit_finish_output(frame, out);
+     }
+ }
++
++JSJitHelperStatus JS_JitHelperGetGlobal(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t output, uint32_t atom)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, result;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_GET_GLOBAL);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_valid_atom(frame->rt, (JSAtom)atom))
++        return qjsjit_reject_helper(frame, "invalid JIT global get");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT global output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = JS_GetGlobalVar(frame->ctx, (JSAtom)atom, true);
++    if (JS_IsException(result)) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
+ #endif
+ 
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */

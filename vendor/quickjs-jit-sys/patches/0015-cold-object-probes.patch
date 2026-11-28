@@ -1,0 +1,82 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -20811,10 +20811,12 @@
+                 if (unlikely(JS_IsException(ret_val)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_callsite_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf -
+-                        ((opcode >= OP_call0 && opcode <= OP_call3) ? 1 : 3)),
+-                    call_argv[-1], call_argc, vc(call_argv), ret_val);
++                if (qjsjit_feedback_enabled(rt, b)) {
++                    qjsjit_record_callsite_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf -
++                            ((opcode >= OP_call0 && opcode <= OP_call3) ? 1 : 3)),
++                        call_argv[-1], call_argc, vc(call_argv), ret_val);
++                }
+ #endif
+                 if (opcode == OP_tail_call)
+                     goto done;
+@@ -20854,9 +20856,11 @@
+                 if (unlikely(JS_IsException(ret_val)))
+                     goto exception;
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_callsite_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf - 3),
+-                    call_argv[-1], call_argc, vc(call_argv), ret_val);
++                if (qjsjit_feedback_enabled(rt, b)) {
++                    qjsjit_record_callsite_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 3),
++                        call_argv[-1], call_argc, vc(call_argv), ret_val);
++                }
+ #endif
+                 if (opcode == OP_tail_call_method)
+                     goto done;
+@@ -22002,9 +22006,11 @@
+                                 goto get_field_slow_path;
+                             val = js_dup(pr->u.value);
+ #ifdef CONFIG_JIT_ABI
+-                            qjsjit_record_property_feedback(rt, b,
+-                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
+-                                receiver, p, prs, pr, val, 0);
++                            if (qjsjit_feedback_enabled(rt, b)) {
++                                qjsjit_record_property_feedback(rt, b,
++                                    (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                                    receiver, p, prs, pr, val, 0);
++                            }
+ #endif
+                             break;
+                         }
+@@ -22061,9 +22067,11 @@
+                                 goto get_field2_slow_path;
+                             val = js_dup(pr->u.value);
+ #ifdef CONFIG_JIT_ABI
+-                            qjsjit_record_property_feedback(rt, b,
+-                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
+-                                receiver, p, prs, pr, val, 0);
++                            if (qjsjit_feedback_enabled(rt, b)) {
++                                qjsjit_record_property_feedback(rt, b,
++                                    (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                                    receiver, p, prs, pr, val, 0);
++                            }
+ #endif
+                             break;
+                         }
+@@ -22114,10 +22122,12 @@
+                         /* fast path */
+                         set_value(ctx, &pr->u.value, sp[-1]);
+ #ifdef CONFIG_JIT_ABI
+-                        qjsjit_record_property_feedback(rt, b,
+-                            (uint32_t)(pc - b->byte_code_buf - 5), atom,
+-                            p, p, prs, pr, pr->u.value,
+-                            JS_JIT_FEEDBACK_PROPERTY_STORE);
++                        if (qjsjit_feedback_enabled(rt, b)) {
++                            qjsjit_record_property_feedback(rt, b,
++                                (uint32_t)(pc - b->byte_code_buf - 5), atom,
++                                p, p, prs, pr, pr->u.value,
++                                JS_JIT_FEEDBACK_PROPERTY_STORE);
++                        }
+ #endif
+                     } else {
+                         goto put_field_slow_path;

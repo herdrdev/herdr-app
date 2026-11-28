@@ -1,0 +1,185 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2441,6 +2441,14 @@
+     }
+ }
+ 
++/* Check before collecting operand types; slow arithmetic can reenter the VM,
++   so recording checks the current backend state again after the operation. */
++static inline bool qjsjit_feedback_enabled(JSRuntime *rt, JSFunctionBytecode *b)
++{
++    return rt->jit_backend_vtable && !rt->jit_suspended &&
++           !b->jit_feedback_disabled && rt->jit_backend_vtable->record_feedback;
++}
++
+ static void qjsjit_record_feedback(JSRuntime *rt, JSFunctionBytecode *b,
+                                    uint32_t kind, uint32_t pc,
+                                    uint32_t slot, const uint32_t *types,
+@@ -2473,7 +2481,10 @@
+                                           JSValueConst result)
+ {
+     uint32_t types[3], flags = 0;
+-    int result_tag = JS_VALUE_GET_TAG(result);
++    int result_tag;
++    if (!qjsjit_feedback_enabled(rt, b))
++        return;
++    result_tag = JS_VALUE_GET_TAG(result);
+     types[0] = lhs_type;
+     types[1] = rhs_type;
+     types[2] = qjsjit_feedback_type(result);
+@@ -22497,13 +22508,14 @@
+             {
+                 JSValue op1, op2;
+ #ifdef CONFIG_JIT_ABI
+-                uint32_t jit_lhs_type, jit_rhs_type;
++                uint32_t jit_lhs_type, jit_rhs_type; bool jit_feedback_active;
+ #endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                jit_lhs_type = qjsjit_feedback_type(op1);
+-                jit_rhs_type = qjsjit_feedback_type(op2);
++                jit_feedback_active = qjsjit_feedback_enabled(rt, b);
++                jit_lhs_type = jit_feedback_active ? qjsjit_feedback_type(op1) : 0;
++                jit_rhs_type = jit_feedback_active ? qjsjit_feedback_type(op2) : 0;
+ #endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+@@ -22526,9 +22538,10 @@
+                     sp--;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_binary_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf - 1),
+-                    jit_lhs_type, jit_rhs_type, sp[-1]);
++                if (jit_feedback_active)
++                    qjsjit_record_binary_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1),
++                        jit_lhs_type, jit_rhs_type, sp[-1]);
+ #endif
+             }
+             BREAK;
+@@ -22579,13 +22592,14 @@
+             {
+                 JSValue op1, op2;
+ #ifdef CONFIG_JIT_ABI
+-                uint32_t jit_lhs_type, jit_rhs_type;
++                uint32_t jit_lhs_type, jit_rhs_type; bool jit_feedback_active;
+ #endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                jit_lhs_type = qjsjit_feedback_type(op1);
+-                jit_rhs_type = qjsjit_feedback_type(op2);
++                jit_feedback_active = qjsjit_feedback_enabled(rt, b);
++                jit_lhs_type = jit_feedback_active ? qjsjit_feedback_type(op1) : 0;
++                jit_rhs_type = jit_feedback_active ? qjsjit_feedback_type(op2) : 0;
+ #endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int64_t r;
+@@ -22608,9 +22622,10 @@
+                     sp--;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_binary_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf - 1),
+-                    jit_lhs_type, jit_rhs_type, sp[-1]);
++                if (jit_feedback_active)
++                    qjsjit_record_binary_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1),
++                        jit_lhs_type, jit_rhs_type, sp[-1]);
+ #endif
+             }
+             BREAK;
+@@ -22619,13 +22634,14 @@
+                 JSValue op1, op2;
+                 double d;
+ #ifdef CONFIG_JIT_ABI
+-                uint32_t jit_lhs_type, jit_rhs_type;
++                uint32_t jit_lhs_type, jit_rhs_type; bool jit_feedback_active;
+ #endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                jit_lhs_type = qjsjit_feedback_type(op1);
+-                jit_rhs_type = qjsjit_feedback_type(op2);
++                jit_feedback_active = qjsjit_feedback_enabled(rt, b);
++                jit_lhs_type = jit_feedback_active ? qjsjit_feedback_type(op1) : 0;
++                jit_rhs_type = jit_feedback_active ? qjsjit_feedback_type(op2) : 0;
+ #endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int32_t v1, v2;
+@@ -22658,9 +22674,10 @@
+                     sp--;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_binary_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf - 1),
+-                    jit_lhs_type, jit_rhs_type, sp[-1]);
++                if (jit_feedback_active)
++                    qjsjit_record_binary_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1),
++                        jit_lhs_type, jit_rhs_type, sp[-1]);
+ #endif
+             }
+             BREAK;
+@@ -22668,13 +22685,14 @@
+             {
+                 JSValue op1, op2;
+ #ifdef CONFIG_JIT_ABI
+-                uint32_t jit_lhs_type, jit_rhs_type;
++                uint32_t jit_lhs_type, jit_rhs_type; bool jit_feedback_active;
+ #endif
+                 op1 = sp[-2];
+                 op2 = sp[-1];
+ #ifdef CONFIG_JIT_ABI
+-                jit_lhs_type = qjsjit_feedback_type(op1);
+-                jit_rhs_type = qjsjit_feedback_type(op2);
++                jit_feedback_active = qjsjit_feedback_enabled(rt, b);
++                jit_lhs_type = jit_feedback_active ? qjsjit_feedback_type(op1) : 0;
++                jit_rhs_type = jit_feedback_active ? qjsjit_feedback_type(op2) : 0;
+ #endif
+                 if (likely(JS_VALUE_IS_BOTH_INT(op1, op2))) {
+                     int v1, v2;
+@@ -22689,9 +22707,10 @@
+                     sp--;
+                 }
+ #ifdef CONFIG_JIT_ABI
+-                qjsjit_record_binary_feedback(rt, b,
+-                    (uint32_t)(pc - b->byte_code_buf - 1),
+-                    jit_lhs_type, jit_rhs_type, sp[-1]);
++                if (jit_feedback_active)
++                    qjsjit_record_binary_feedback(rt, b,
++                        (uint32_t)(pc - b->byte_code_buf - 1),
++                        jit_lhs_type, jit_rhs_type, sp[-1]);
+ #endif
+             }
+             BREAK;
+@@ -23042,14 +23061,18 @@
+             BREAK;
+ 
+ #ifdef CONFIG_JIT_ABI
+-#define QJSJIT_CMP_DECLARE uint32_t jit_lhs_type, jit_rhs_type;
+-#define QJSJIT_CMP_CAPTURE(op1, op2)                       \
+-                jit_lhs_type = qjsjit_feedback_type(op1); \
+-                jit_rhs_type = qjsjit_feedback_type(op2);
+-#define QJSJIT_CMP_RECORD()                                \
+-                qjsjit_record_binary_feedback(rt, b,      \
+-                    (uint32_t)(pc - b->byte_code_buf - 1),\
+-                    jit_lhs_type, jit_rhs_type, sp[-1]);
++#define QJSJIT_CMP_DECLARE uint32_t jit_lhs_type, jit_rhs_type; bool jit_feedback_active;
++#define QJSJIT_CMP_CAPTURE(op1, op2)                                      \
++                jit_feedback_active = qjsjit_feedback_enabled(rt, b);    \
++                jit_lhs_type = jit_feedback_active ? qjsjit_feedback_type(op1) : 0; \
++                jit_rhs_type = jit_feedback_active ? qjsjit_feedback_type(op2) : 0;
++#define QJSJIT_CMP_RECORD()                                               \
++                do {                                                     \
++                    if (jit_feedback_active)                             \
++                        qjsjit_record_binary_feedback(rt, b,             \
++                            (uint32_t)(pc - b->byte_code_buf - 1),        \
++                            jit_lhs_type, jit_rhs_type, sp[-1]);          \
++                } while (0);
+ #else
+ #define QJSJIT_CMP_DECLARE
+ #define QJSJIT_CMP_CAPTURE(op1, op2)

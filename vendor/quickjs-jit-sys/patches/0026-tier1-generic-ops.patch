@@ -1,0 +1,348 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -151,7 +151,10 @@
+     X(CLOSE_LOC, close_loc, JS_JitHelperCloseLoc, MAP_IN, 0, NONE, NONE,    \
+       NONE, NONE, NONE, 0)                                                  \
+     X(SET_NAME, set_name, JS_JitHelperSetName, MAP_OUT_INDEX, 1, BORROWED,  \
+-      NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)
++      NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)            \
++    X(GENERIC_OP, generic_op, JS_JitHelperGenericOp, MAP_OUT_TWO_OP, 3,    \
++      OWNED, CONSUMED, CONSUMED, NONE, OWNED,                               \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)
+ 
+ typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -402,6 +402,8 @@
+ #endif
+     /* Runtime-owned root; boundary throws always duplicate this value. */
+     JSValue jit_uncatchable_exception;
++    /* Receiver/argument context of the innermost root native entry. */
++    struct QJSJitRootCall *jit_active_root;
+ #endif
+ };
+ 
+@@ -20367,6 +20369,310 @@
+     return qjsjit_finish_output(frame, out);
+ }
+ 
++/* Private call context of one root native entry (never an inline view).
++ * JS_CallInternal publishes it for exactly one pinned entry call so that
++ * GENERIC_OP observes the interpreter's receiver, new.target and caller
++ * arguments. Nothing here is retained after the entry returns. */
++typedef struct QJSJitRootCall {
++    struct QJSJitRootCall *previous;
++    const JSJitExecFrame *frame;
++    JSValueConst this_obj;
++    JSValueConst new_target;
++    JSValueConst *argv;
++    int argc;
++} QJSJitRootCall;
++
++static void qjsjit_generic_release(JSContext *ctx, JSValue *out,
++                                   JSValue *lhs, JSValue *rhs)
++{
++    if (out)
++        qjsjit_consume_slot(ctx, out);
++    if (lhs && lhs != out)
++        qjsjit_consume_slot(ctx, lhs);
++    if (rhs && rhs != out && rhs != lhs)
++        qjsjit_consume_slot(ctx, rhs);
++}
++
++/* Exact interpreter semantics for opcodes without a dedicated native
++ * lowering. operation packs the QuickJS opcode in bits 0..7 and its 8-bit
++ * immediate (the special_object kind) in bits 8..15; bits 16..31 are zero.
++ * Slots per opcode, JS_JIT_SLOT_NONE otherwise:
++ *   push_this, special_object      output (unoccupied)
++ *   get_var_undef, delete_var      output (unoccupied), right = atom
++ *   put_var                        left (consumed), right = atom
++ *   typeof, typeof_is_undefined,
++ *   typeof_is_function, to_object  output == left (replaced in place)
++ *   to_propkey2                    output = key (replaced in place),
++ *                                  left = output - 1 = object (kept)
++ *   in, instanceof, delete         output == left, right == left + 1
++ * push_this and special_object read the root entry's call context and are
++ * rejected in inline views. MAPPED_ARGUMENTS aliases frame slots and
++ * IMPORT_META needs module state; both remain interpreter-only. On a
++ * language exception every named slot is released and cleared, so callers
++ * may keep them inside the exception depth. */
++JSJitHelperStatus JS_JitHelperGenericOp(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t output, uint32_t left,
++                                        uint32_t right, uint32_t operation)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSContext *ctx;
++    QJSJitRootCall *root = NULL;
++    JSValue *out = NULL, *lhs = NULL, *rhs = NULL;
++    JSValue result = JS_UNDEFINED;
++    JSAtom atom = JS_ATOM_NULL;
++    uint32_t opcode = operation & 0xffu, imm = (operation >> 8) & 0xffu;
++    bool uses_out = false, uses_left = false, uses_right = false;
++    bool uses_atom = false, fresh_out = false;
++    uint32_t tag;
++    int ret = 0;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_GENERIC_OP);
++    if ((operation >> 16) != 0 || (opcode != OP_special_object && imm != 0))
++        return qjsjit_reject_helper(frame, "invalid JIT generic operation");
++    switch (opcode) {
++    case OP_push_this:
++    case OP_special_object:
++        uses_out = fresh_out = true;
++        break;
++    case OP_get_var_undef:
++    case OP_delete_var:
++        uses_out = fresh_out = uses_atom = true;
++        break;
++    case OP_put_var:
++        uses_left = uses_atom = true;
++        break;
++    case OP_typeof:
++    case OP_typeof_is_undefined:
++    case OP_typeof_is_function:
++    case OP_to_object:
++    case OP_to_propkey2:
++        uses_out = uses_left = true;
++        break;
++    case OP_in:
++    case OP_instanceof:
++    case OP_delete:
++        uses_out = uses_left = uses_right = true;
++        break;
++    default:
++        return qjsjit_reject_helper(frame, "invalid JIT generic opcode");
++    }
++    if ((uses_out ? !qjsjit_resolve_slot(frame, b, output, &out)
++                  : output != JS_JIT_SLOT_NONE) ||
++        (uses_left ? !qjsjit_resolve_slot(frame, b, left, &lhs)
++                   : left != JS_JIT_SLOT_NONE))
++        return qjsjit_reject_helper(frame, "invalid JIT generic slots");
++    if (uses_atom) {
++        atom = (JSAtom)right;
++        if (!qjsjit_valid_atom(frame->rt, atom))
++            return qjsjit_reject_helper(frame, "invalid JIT generic atom");
++    } else if (uses_right ? !qjsjit_resolve_slot(frame, b, right, &rhs)
++                          : right != JS_JIT_SLOT_NONE) {
++        return qjsjit_reject_helper(frame, "invalid JIT generic slots");
++    }
++    if (fresh_out && !JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT generic output");
++    switch (opcode) {
++    case OP_typeof:
++    case OP_typeof_is_undefined:
++    case OP_typeof_is_function:
++    case OP_to_object:
++        if (lhs != out)
++            return qjsjit_reject_helper(frame, "invalid JIT generic slots");
++        break;
++    case OP_to_propkey2:
++        if (lhs + 1 != out)
++            return qjsjit_reject_helper(frame, "invalid JIT generic slots");
++        break;
++    case OP_in:
++    case OP_instanceof:
++    case OP_delete:
++        if (lhs != out || rhs != lhs + 1)
++            return qjsjit_reject_helper(frame, "invalid JIT generic slots");
++        break;
++    case OP_push_this:
++    case OP_special_object:
++        root = frame->rt->jit_active_root;
++        if (!root || root->frame != frame)
++            return qjsjit_reject_helper(frame,
++                                        "JIT generic operation outside a root frame");
++        if (opcode == OP_special_object &&
++            imm != OP_SPECIAL_OBJECT_ARGUMENTS &&
++            imm != OP_SPECIAL_OBJECT_THIS_FUNC &&
++            imm != OP_SPECIAL_OBJECT_NEW_TARGET &&
++            imm != OP_SPECIAL_OBJECT_HOME_OBJECT &&
++            imm != OP_SPECIAL_OBJECT_VAR_OBJECT &&
++            imm != OP_SPECIAL_OBJECT_NULL_PROTO)
++            return qjsjit_reject_helper(frame, "invalid JIT special object");
++        break;
++    default:
++        break;
++    }
++    ctx = frame->ctx;
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_generic_release(ctx, fresh_out ? NULL : out, lhs, rhs);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++
++    switch (opcode) {
++    case OP_push_this:
++        /* The interpreter's normal_this path for strict code and objects. */
++        tag = JS_VALUE_GET_TAG(root->this_obj);
++        if (b->is_strict_mode || tag == JS_TAG_OBJECT)
++            result = js_dup(root->this_obj);
++        else if (tag == JS_TAG_NULL || tag == JS_TAG_UNDEFINED)
++            result = js_dup(ctx->global_obj);
++        else
++            result = JS_ToObject(ctx, root->this_obj);
++        ret = JS_IsException(result) ? -1 : 0;
++        break;
++    case OP_special_object:
++        switch (imm) {
++        case OP_SPECIAL_OBJECT_ARGUMENTS:
++            result = js_build_arguments(ctx, root->argc, root->argv);
++            break;
++        case OP_SPECIAL_OBJECT_THIS_FUNC:
++            result = js_dup(sf->cur_func);
++            break;
++        case OP_SPECIAL_OBJECT_NEW_TARGET:
++            result = js_dup(root->new_target);
++            break;
++        case OP_SPECIAL_OBJECT_HOME_OBJECT:
++            {
++                JSObject *home =
++                    JS_VALUE_GET_OBJ(sf->cur_func)->u.func.home_object;
++                result = home ? js_dup(JS_MKPTR(JS_TAG_OBJECT, home))
++                              : JS_UNDEFINED;
++            }
++            break;
++        case OP_SPECIAL_OBJECT_VAR_OBJECT:
++            result = JS_NewObjectProto(ctx, JS_NULL);
++            break;
++        default:
++            result = JS_NewObjectProtoClass(ctx, JS_NULL, JS_CLASS_OBJECT);
++            break;
++        }
++        ret = JS_IsException(result) ? -1 : 0;
++        break;
++    case OP_get_var_undef:
++        result = JS_GetGlobalVar(ctx, atom, false);
++        ret = JS_IsException(result) ? -1 : 0;
++        break;
++    case OP_delete_var:
++        ret = JS_DeleteGlobalVar(ctx, atom);
++        if (ret >= 0) {
++            result = js_bool(ret);
++            ret = 0;
++        }
++        break;
++    case OP_put_var:
++        /* JS_SetGlobalVar consumes the value on every path. */
++        ret = JS_SetGlobalVar(ctx, atom, *lhs, 0);
++        *lhs = JS_UNDEFINED;
++        break;
++    case OP_typeof:
++        atom = js_operator_typeof(ctx, *lhs);
++        qjsjit_consume_slot(ctx, lhs);
++        result = JS_AtomToString(ctx, atom);
++        ret = JS_IsException(result) ? -1 : 0;
++        break;
++    case OP_typeof_is_undefined:
++    case OP_typeof_is_function:
++        atom = js_operator_typeof(ctx, *lhs);
++        qjsjit_consume_slot(ctx, lhs);
++        result = js_bool(atom == (opcode == OP_typeof_is_undefined ?
++                                  JS_ATOM_undefined : JS_ATOM_function));
++        break;
++    case OP_to_object:
++        if (JS_VALUE_GET_TAG(*lhs) == JS_TAG_OBJECT)
++            break;
++        result = JS_ToObject(ctx, *lhs);
++        if (JS_IsException(result)) {
++            ret = -1;
++            break;
++        }
++        JS_FreeValue(ctx, *lhs);
++        *lhs = result;
++        break;
++    case OP_to_propkey2:
++        /* The object-coercible check precedes key conversion. */
++        if (JS_IsUndefined(*lhs) || JS_IsNull(*lhs)) {
++            JS_ThrowTypeError(ctx, "value has no property");
++            ret = -1;
++            break;
++        }
++        switch (JS_VALUE_GET_TAG(*out)) {
++        case JS_TAG_INT:
++        case JS_TAG_STRING:
++        case JS_TAG_SYMBOL:
++            break;
++        default:
++            result = JS_ToPropertyKey(ctx, *out);
++            if (JS_IsException(result)) {
++                ret = -1;
++                break;
++            }
++            JS_FreeValue(ctx, *out);
++            *out = result;
++            break;
++        }
++        break;
++    case OP_in:
++        ret = js_operator_in(ctx, rhs + 1);
++        break;
++    case OP_instanceof:
++        ret = js_operator_instanceof(ctx, rhs + 1);
++        break;
++    default:
++        ret = js_operator_delete(ctx, rhs + 1);
++        break;
++    }
++    if (ret < 0) {
++        qjsjit_generic_release(ctx, fresh_out ? NULL : out, lhs, rhs);
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    if (rhs) {
++        /* The operator consumed both operands and stored its boolean in the
++         * left slot; the right slot only holds a stale copy. */
++        *rhs = JS_UNDEFINED;
++    }
++    if (fresh_out || opcode == OP_typeof || opcode == OP_typeof_is_undefined ||
++        opcode == OP_typeof_is_function)
++        *out = result;
++    if (out)
++        return qjsjit_finish_output(frame, out);
++    return qjsjit_stress_gc(frame);
++}
++
++/* Publish the root call context for exactly one pinned native entry. Kept
++ * out of line so the interpreter loop's frame and code layout do not change;
++ * the context lives on this wrapper's stack for the duration of the call. */
++static no_inline JSJitExit qjsjit_call_root_entry(JSRuntime *rt,
++                                                  JSJitExecFrame *frame,
++                                                  JSValueConst this_obj,
++                                                  JSValueConst new_target,
++                                                  int argc,
++                                                  JSValueConst *argv)
++{
++    QJSJitRootCall root_call;
++    JSJitExit exit;
++
++    root_call.previous = rt->jit_active_root;
++    root_call.frame = frame;
++    root_call.this_obj = this_obj;
++    root_call.new_target = new_target;
++    root_call.argv = argv;
++    root_call.argc = argc;
++    rt->jit_active_root = &root_call;
++    exit = frame->entry.entry(frame);
++    rt->jit_active_root = root_call.previous;
++    return exit;
++}
++
+ #endif
+ 
+ #ifdef CONFIG_JIT_ABI
+@@ -21216,7 +21522,8 @@
+                 jit_vtable->native_enter(jit_opaque, entry_function_id,
+                                          entry_generation, entry_pc_offset);
+             }
+-            jit_exit = entry.entry(&frame);
++            jit_exit = qjsjit_call_root_entry(rt, &frame, this_obj, new_target,
++                                              argc, argv);
+             if (qjsjit_inline_abort_root(&frame)) {
+                 qjsjit_reject_exit(ctx, &frame.result,
+                                    "unconsumed inline activation at native exit");

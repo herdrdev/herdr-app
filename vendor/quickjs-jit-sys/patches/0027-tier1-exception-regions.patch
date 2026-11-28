@@ -1,0 +1,219 @@
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -644,6 +644,28 @@
+  * table only after validating the main JIT ABI, table size/version and effects. */
+ JS_EXTERN const JSJitInlineAPI *JS_JitGetInlineAPI(uint32_t version);
+ 
++/* Tier 1 exception regions (ABI 1.25). These calls take a validated active
++ * frame and stack-map id. ThrowValue consumes the named operand-stack slot as
++ * the pending exception (OP_throw) and always returns EXCEPTION.
++ * CatchException requires a pending exception. It returns OK only after it
++ * performed the interpreter's exception prologue for this frame (backtrace at
++ * frame->pc), proved the innermost catch offset is catch_slot for handler_pc,
++ * released every operand above it and stored the caught value in catch_slot;
++ * stack_top is then catch_slot + 1. For an uncatchable exception it returns
++ * EXCEPTION with the frame untouched so ordinary unwinding continues. */
++JS_EXTERN JSJitHelperStatus JS_JitThrowValue(JSJitExecFrame *frame,
++                                             uint32_t stack_map_id,
++                                             uint32_t slot);
++/* ThrowError raises OP_throw_error's error for atom/type (JS_THROW_* codes)
++ * and always returns EXCEPTION. */
++JS_EXTERN JSJitHelperStatus JS_JitThrowError(JSJitExecFrame *frame,
++                                             uint32_t stack_map_id,
++                                             uint32_t atom, uint32_t type);
++JS_EXTERN JSJitHelperStatus JS_JitCatchException(JSJitExecFrame *frame,
++                                                 uint32_t stack_map_id,
++                                                 uint32_t catch_slot,
++                                                 uint32_t handler_pc);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -21120,6 +21120,155 @@
+     return version == QJSJIT_INLINE_RECOVERY_VERSION ? &api : NULL;
+ }
+ 
++/* Tier 1 exception regions.  ThrowValue/ThrowError raise exactly like
++ * OP_throw/OP_throw_error.  CatchException replays the interpreter's
++ * `exception:` label for the active root frame up to and including the
++ * innermost catch offset, but only after proving that the unwinding would
++ * stop at the caller-named slot and handler.  An uncatchable exception is
++ * returned with the frame untouched, so the ordinary native exception exit
++ * lets the interpreter unwind it; malformed requests raise the usual
++ * uncatchable invariant error. */
++JSJitHelperStatus JS_JitThrowValue(JSJitExecFrame *frame,
++                                   uint32_t stack_map_id, uint32_t slot)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *in, value;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!qjsjit_resolve_slot(frame, b, slot, &in) || in < frame->stack_base)
++        return qjsjit_reject_helper(frame, "invalid JIT throw slot");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, in);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    value = *in;
++    *in = JS_UNDEFINED;
++    JS_Throw(frame->ctx, value);
++    qjsjit_stress_gc_after_exception(frame);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
++/* True when the interpreter's exception label would build a backtrace only
++ * to store it in ctx->error_back_trace, which catching releases unread:
++ * building it can neither call Error.prepareStackTrace nor convert a
++ * non-numeric Error.stackTraceLimit, and cannot define `stack` on `exc`. */
++static bool qjsjit_backtrace_is_discarded(JSContext *ctx, JSValueConst exc)
++{
++    int limit_tag = JS_VALUE_GET_TAG(ctx->error_stack_trace_limit);
++
++    if (ctx->rt->in_build_stack_trace)
++        return false;
++    if (can_add_backtrace(exc))
++        return false;
++    if (limit_tag != JS_TAG_INT && limit_tag != JS_TAG_FLOAT64)
++        return false;
++    return JS_IsNull(ctx->error_ctor) ||
++        !JS_IsFunction(ctx, ctx->error_prepare_stack);
++}
++
++/* OP_throw_error; `type` uses the interpreter's JS_THROW_* numbering. */
++JSJitHelperStatus JS_JitThrowError(JSJitExecFrame *frame,
++                                   uint32_t stack_map_id, uint32_t atom,
++                                   uint32_t type)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSContext *ctx;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (!qjsjit_valid_atom(frame->rt, (JSAtom)atom))
++        return qjsjit_reject_helper(frame, "invalid JIT throw_error atom");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    ctx = frame->ctx;
++    if (type == 0) /* JS_THROW_VAR_RO */
++        JS_ThrowTypeErrorReadOnly(ctx, JS_PROP_THROW, (JSAtom)atom);
++    else if (type == 1) /* JS_THROW_VAR_REDECL */
++        JS_ThrowSyntaxErrorVarRedeclaration(ctx, (JSAtom)atom);
++    else if (type == 2) /* JS_THROW_VAR_UNINITIALIZED */
++        JS_ThrowReferenceErrorUninitialized(ctx, (JSAtom)atom);
++    else if (type == 3) /* JS_THROW_ERROR_DELETE_SUPER */
++        JS_ThrowReferenceError(ctx, "unsupported reference to 'super'");
++    else if (type == 4) /* JS_THROW_ERROR_ITERATOR_THROW */
++        JS_ThrowTypeError(ctx, "iterator does not have a throw method");
++    else
++        JS_ThrowInternalError(ctx, "invalid throw var type %d", (int)type);
++    qjsjit_stress_gc_after_exception(frame);
++    return JS_JIT_HELPER_EXCEPTION;
++}
++
++JSJitHelperStatus JS_JitCatchException(JSJitExecFrame *frame,
++                                       uint32_t stack_map_id,
++                                       uint32_t catch_slot,
++                                       uint32_t handler_pc)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSRuntime *rt;
++    JSContext *ctx;
++    JSValue *catch_value, *sp;
++
++    if (qjsjit_validate_helper_frame_state(frame, true, stack_map_id, &b, &sf,
++                                          QJSJIT_VALIDATE_RESUME) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    rt = frame->rt;
++    ctx = frame->ctx;
++    if (!JS_HasException(ctx))
++        return qjsjit_reject_helper(frame, "JIT catch without exception");
++    /* Uncatchable errors bypass every handler; propagate unchanged. */
++    if (qjsjit_is_uncatchable_sentinel(rt, rt->current_exception) ||
++        JS_IsUncatchableError(rt->current_exception))
++        return JS_JIT_HELPER_EXCEPTION;
++    if (handler_pc == 0 || handler_pc >= (uint32_t)b->byte_code_len ||
++        !qjsjit_resolve_slot(frame, b, catch_slot, &catch_value) ||
++        catch_value < frame->stack_base ||
++        JS_VALUE_GET_TAG(*catch_value) != JS_TAG_CATCH_OFFSET ||
++        (uint32_t)JS_VALUE_GET_INT(*catch_value) != handler_pc)
++        return qjsjit_reject_helper(frame, "invalid JIT catch slot");
++    for (sp = frame->stack_top; sp > catch_value + 1; sp--) {
++        if (JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_CATCH_OFFSET)
++            return qjsjit_reject_helper(frame, "invalid JIT catch nesting");
++    }
++    /* Exception label prologue, in interpreter order: backtrace first (it
++     * observes this frame's current pc), then catchability.  A backtrace that
++     * would only populate ctx->error_back_trace is released again below
++     * without ever being read; skip building it when doing so cannot run
++     * user code (no Error.prepareStackTrace, numeric Error.stackTraceLimit)
++     * and cannot define a `stack` property on the caught value. */
++    if (needs_backtrace(rt->current_exception) ||
++        (JS_IsUndefined(ctx->error_back_trace) &&
++         !qjsjit_backtrace_is_discarded(ctx, rt->current_exception))) {
++        sf->cur_pc = (uint8_t *)frame->pc;
++        build_backtrace(ctx, rt->current_exception, JS_UNDEFINED,
++                        NULL, 0, 0, 0);
++    }
++    if (!JS_HasException(ctx) ||
++        qjsjit_is_uncatchable_sentinel(rt, rt->current_exception) ||
++        JS_IsUncatchableError(rt->current_exception))
++        return JS_JIT_HELPER_EXCEPTION;
++    /* Stress collection runs before any frame mutation: a failure leaves the
++     * catch offset in place for the interpreter's own unwinding. */
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    /* Release operands above the catch offset from the top, like the
++     * interpreter, then replace the offset with the caught value. */
++    for (sp = frame->stack_top; sp > catch_value + 1;) {
++        JSValue value = *--sp;
++        *sp = JS_UNDEFINED;
++        frame->stack_top = sp;
++        JS_FreeValue(ctx, value);
++    }
++    *catch_value = rt->current_exception;
++    rt->current_exception = JS_UNINITIALIZED;
++    JS_FreeValueRT(rt, ctx->error_back_trace);
++    ctx->error_back_trace = JS_UNDEFINED;
++    frame->stack_top = catch_value + 1;
++    return JS_JIT_HELPER_OK;
++}
++
+ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
+     JSValueConst this_obj, JSValueConst new_target, int argc,
+     JSValueConst *argv, int flags)
+@@ -21385,12 +21534,25 @@
+             b->jit_feedback_disabled = 1;
+         if ((request_snapshot & 1U) && hot_vtable->submit_snapshot) {
+             JSJitFunctionSnapshot *snapshot = NULL;
+-            if (JS_JitSnapshotFunction(ctx, func_obj, &snapshot) ==
+-                    JS_JIT_SNAPSHOT_OK && snapshot) {
++            /* Generator and async resumes pass their state, not the
++             * function object, as func_obj; classify them by bytecode. */
++            int snapshot_status = b->func_kind != JS_FUNC_NORMAL ?
++                JS_JIT_SNAPSHOT_ASYNC :
++                JS_JitSnapshotFunction(ctx, func_obj, &snapshot);
++            if (snapshot_status == JS_JIT_SNAPSHOT_OK && snapshot) {
+                 /* Ownership transfers for exactly this callback. */
+                 rt->jit_backend_active_depth++;
+                 hot_vtable->submit_snapshot(hot_opaque, snapshot);
+                 rt->jit_backend_active_depth--;
++            } else if (snapshot_status == JS_JIT_SNAPSHOT_GENERATOR ||
++                       snapshot_status == JS_JIT_SNAPSHOT_ASYNC ||
++                       snapshot_status == JS_JIT_SNAPSHOT_EVAL ||
++                       snapshot_status == JS_JIT_SNAPSHOT_WITH) {
++                /* These refusals are properties of this immutable bytecode
++                 * generation, never reported to the backend. Stop hot and
++                 * feedback probes locally instead of re-requesting a
++                 * snapshot at every later call, resume and loop poll. */
++                b->jit_feedback_disabled = 1;
+             }
+         }
+     }

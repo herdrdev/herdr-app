@@ -1,0 +1,224 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -66,6 +66,17 @@
+     JS_JIT_COMPARE_STRICT_NEQ = 7,
+ } JSJitCompareOp;
+ 
++/* Closure-variable access modes (ABI 1.25). GET_VAR_REF accepts PLAIN and
++ * CHECK; PUT_VAR_REF accepts all three. They mirror OP_get_var_ref*,
++ * OP_put_var_ref*, including the exact TDZ ReferenceError. For PUT_VAR_REF the
++ * MAP_OUT_IN_OP slots are (value, closure index, mode) and the value slot is
++ * consumed on success and on language exception. */
++typedef enum JSJitVarRefMode {
++    JS_JIT_VAR_REF_PLAIN = 0,
++    JS_JIT_VAR_REF_CHECK = 1,
++    JS_JIT_VAR_REF_CHECK_INIT = 2,
++} JSJitVarRefMode;
++
+ /* id, table field, C adapter, signature, value arity, four ownership entries,
+  * output ownership, behavioral flags */
+ #define QJSJIT_HELPER_LIST(X)                                                \
+@@ -129,7 +140,18 @@
+       THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
+     X(UNARY_ARITH_SLOW, unary_arith_slow, JS_JitHelperUnaryArithSlow,      \
+       MAP_OUT_IN_OP, 2, OWNED, CONSUMED, NONE, NONE, OWNED,                 \
+-      THROWING | ALLOCATING | REENTRANT | FINALIZING)
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
++    X(FCLOSURE, fclosure, JS_JitHelperFClosure, MAP_OUT_INDEX, 1, OWNED,    \
++      NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)           \
++    X(GET_VAR_REF, get_var_ref, JS_JitHelperGetVarRef, MAP_OUT_IN_OP, 1,   \
++      OWNED, NONE, NONE, NONE, OWNED, THROWING | ALLOCATING | REENTRANT)    \
++    X(PUT_VAR_REF, put_var_ref, JS_JitHelperPutVarRef, MAP_OUT_IN_OP, 1,   \
++      CONSUMED, NONE, NONE, NONE, NONE,                                     \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
++    X(CLOSE_LOC, close_loc, JS_JitHelperCloseLoc, MAP_IN, 0, NONE, NONE,    \
++      NONE, NONE, NONE, 0)                                                  \
++    X(SET_NAME, set_name, JS_JitHelperSetName, MAP_OUT_INDEX, 1, BORROWED,  \
++      NONE, NONE, NONE, NONE, THROWING | ALLOCATING | REENTRANT)
+ 
+ typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -276,7 +276,7 @@
+  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
+  */
+ #define QJSJIT_RUNTIME_API_MAJOR 1u
+-#define QJSJIT_RUNTIME_API_MINOR 9u
++#define QJSJIT_RUNTIME_API_MINOR 10u
+ 
+ #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -19983,6 +19983,167 @@
+     return qjsjit_finish_output(frame, out);
+ }
+ 
++/* Closure helpers (ABI 1.25) mirror OP_fclosure, OP_get_var_ref*,
++ * OP_put_var_ref* and OP_close_loc on the validated current stack frame.
++ * Attached var refs point into sf->var_buf/sf->arg_buf, so the caller must
++ * publish every local/argument before the call and reload them afterwards. */
++static JSVarRef *qjsjit_closure_var_ref(JSFunctionBytecode *b,
++                                        JSStackFrame *sf, uint32_t index)
++{
++    JSVarRef **var_refs;
++
++    if (index >= (uint32_t)b->closure_var_count)
++        return NULL;
++    var_refs = JS_VALUE_GET_OBJ(sf->cur_func)->u.func.var_refs;
++    if (!var_refs || !var_refs[index] || !var_refs[index]->pvalue)
++        return NULL;
++    return var_refs[index];
++}
++
++JSJitHelperStatus JS_JitHelperFClosure(JSJitExecFrame *frame,
++                                       uint32_t stack_map_id,
++                                       uint32_t output, uint32_t index)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, result;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_FCLOSURE);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        index >= (uint32_t)b->cpool_count ||
++        JS_VALUE_GET_TAG(b->cpool[index]) != JS_TAG_FUNCTION_BYTECODE)
++        return qjsjit_reject_helper(frame, "invalid JIT closure constant");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT closure output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    result = js_closure(frame->ctx, js_dup(b->cpool[index]),
++                        JS_VALUE_GET_OBJ(sf->cur_func)->u.func.var_refs, sf);
++    if (JS_IsException(result)) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = result;
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperGetVarRef(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t output, uint32_t index,
++                                        uint32_t mode)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSVarRef *var_ref;
++    JSValue *out, value;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_GET_VAR_REF);
++    var_ref = qjsjit_closure_var_ref(b, sf, index);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) || !var_ref ||
++        (mode != JS_JIT_VAR_REF_PLAIN && mode != JS_JIT_VAR_REF_CHECK))
++        return qjsjit_reject_helper(frame, "invalid JIT closure variable get");
++    if (!JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT closure output");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    value = *var_ref->pvalue;
++    if (mode == JS_JIT_VAR_REF_CHECK && unlikely(JS_IsUninitialized(value))) {
++        JS_ThrowReferenceErrorUninitialized2(frame->ctx, b, (int)index, true);
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    *out = js_dup(value);
++    return qjsjit_finish_output(frame, out);
++}
++
++JSJitHelperStatus JS_JitHelperPutVarRef(JSJitExecFrame *frame,
++                                        uint32_t stack_map_id,
++                                        uint32_t input, uint32_t index,
++                                        uint32_t mode)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSVarRef *var_ref;
++    JSValue *in, value;
++    bool uninitialized;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_PUT_VAR_REF);
++    var_ref = qjsjit_closure_var_ref(b, sf, index);
++    if (!qjsjit_resolve_slot(frame, b, input, &in) || !var_ref ||
++        mode > JS_JIT_VAR_REF_CHECK_INIT)
++        return qjsjit_reject_helper(frame, "invalid JIT closure variable put");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, in);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    uninitialized = JS_IsUninitialized(*var_ref->pvalue);
++    if ((mode == JS_JIT_VAR_REF_CHECK && unlikely(uninitialized)) ||
++        (mode == JS_JIT_VAR_REF_CHECK_INIT && unlikely(!uninitialized))) {
++        JS_ThrowReferenceErrorUninitialized2(frame->ctx, b, (int)index, true);
++        qjsjit_consume_slot(frame->ctx, in);
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    value = *in;
++    *in = JS_UNDEFINED;
++    set_value(frame->ctx, var_ref->pvalue, value);
++    return qjsjit_stress_gc(frame);
++}
++
++JSJitHelperStatus JS_JitHelperCloseLoc(JSJitExecFrame *frame,
++                                       uint32_t stack_map_id, uint32_t index)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    int var_ref_idx;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_CLOSE_LOC);
++    if (index >= (uint32_t)b->var_count || !b->vardefs)
++        return qjsjit_reject_helper(frame, "invalid JIT close_loc index");
++    var_ref_idx = b->vardefs[b->arg_count + index].var_ref_idx;
++    if (var_ref_idx >= sf->var_ref_count ||
++        (sf->var_ref_count != 0 && !sf->var_refs))
++        return qjsjit_reject_helper(frame, "invalid JIT close_loc frame");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    close_lexical_var(frame->ctx, b, sf, (int)index);
++    return qjsjit_stress_gc(frame);
++}
++
++/* OP_set_name names the closure just produced by OP_fclosure (and other
++ * anonymous function/class definitions); the object slot stays borrowed. */
++JSJitHelperStatus JS_JitHelperSetName(JSJitExecFrame *frame,
++                                      uint32_t stack_map_id,
++                                      uint32_t object, uint32_t atom)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *target;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_SET_NAME);
++    if (!qjsjit_resolve_slot(frame, b, object, &target) ||
++        !qjsjit_valid_atom(frame->rt, (JSAtom)atom))
++        return qjsjit_reject_helper(frame, "invalid JIT set_name");
++    if (qjsjit_stress_gc(frame) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    if (JS_DefineObjectName(frame->ctx, *target, (JSAtom)atom,
++                            JS_PROP_CONFIGURABLE) < 0) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_stress_gc(frame);
++}
++
+ JSJitHelperStatus JS_JitHelperCallConstructor(
+     JSJitExecFrame *frame, uint32_t stack_map_id, uint32_t output,
+     uint32_t function, uint32_t new_target, uint32_t argv, uint32_t argc)

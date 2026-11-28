@@ -1,0 +1,288 @@
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -379,6 +379,11 @@
+     struct JSJitInlineState *jit_inline_top;
+     size_t jit_inline_bytes;
+     uint32_t jit_inline_depth;
++    /* LIFO storage for inline shadow frames; retained between calls and
++     * released with the runtime. Heap fallback when absent or full. */
++    uint8_t *jit_inline_arena;
++    size_t jit_inline_arena_size;
++    size_t jit_inline_arena_used;
+     uint64_t jit_helper_dup_count;
+     uint64_t jit_helper_free_count;
+ #ifdef CONFIG_JIT_TEST_SUPPORT
+@@ -437,6 +442,7 @@
+     uint32_t value_count, argc, argument_slots;
+     uint32_t call_base, call_operands, continuation_pc;
+     uint64_t function_id, generation;
++    size_t arena_mark, arena_bytes; /* arena_bytes == 0: heap allocation */
+     bool resumed_exception, values_consumed;
+ } JSJitInlineState;
+ #endif
+@@ -890,6 +896,10 @@
+     uint64_t jit_generation;
+     uint8_t jit_feedback_disabled;
+     int jit_validated_pc_offset; /* known instruction boundary, initially zero */
++    /* Lazily built instruction-boundary bitmap, (byte_code_len + 1) bits.
++     * Bit byte_code_len marks a cleanly decoded end. Owned by this bytecode
++     * and freed with it; NULL until the first helper-boundary query. */
++    uint8_t *jit_pc_boundary_map;
+ #endif
+ } JSFunctionBytecode;
+ 
+@@ -3501,6 +3511,10 @@
+     JS_FreeValueRT(rt, rt->current_exception);
+ #ifdef CONFIG_JIT_ABI
+     JS_FreeValueRT(rt, rt->jit_uncatchable_exception);
++    js_free_rt(rt, rt->jit_inline_arena);
++    rt->jit_inline_arena = NULL;
++    rt->jit_inline_arena_size = 0;
++    rt->jit_inline_arena_used = 0;
+ #endif
+ 
+     list_for_each_safe(el, el1, &rt->job_list) {
+@@ -8463,6 +8477,12 @@
+     if (b->byte_code_buf) {
+         hp->js_func_code_size += b->byte_code_len;
+     }
++#ifdef CONFIG_JIT_ABI
++    if (b->jit_pc_boundary_map) {
++        memory_used_count++;
++        js_func_size += (b->byte_code_len >> 3) + 1;
++    }
++#endif
+     memory_used_count++;
+     js_func_size += b->source_len + 1;
+     if (b->pc2line_len) {
+@@ -18926,16 +18946,13 @@
+         *stack_top = scratch;
+ }
+ 
+-static bool qjsjit_valid_pc(JSFunctionBytecode *b, const uint8_t *pc,
+-                            bool allow_end)
++static bool qjsjit_valid_pc_scan(JSFunctionBytecode *b, const uint8_t *pc,
++                                 bool allow_end)
+ {
+     uintptr_t start = (uintptr_t)b->byte_code_buf;
+-    uintptr_t end = start + (size_t)b->byte_code_len;
+     uintptr_t value = (uintptr_t)pc;
+     int offset = 0;
+ 
+-    if (value < start || (allow_end ? value > end : value >= end))
+-        return false;
+     /* Published bytecode instruction lengths are immutable. Reuse only a
+        proven boundary at or before this query; backward branches rescan. */
+     if (value - start >= (uintptr_t)b->jit_validated_pc_offset)
+@@ -18959,6 +18976,61 @@
+     return allow_end && pc == b->byte_code_buf + b->byte_code_len;
+ }
+ 
++/* Decode the instruction stream once with exactly the scan's rules. Offsets
++ * after an undecodable instruction stay clear, so every query answers as the
++ * linear scan would. Allocation failure leaves the map absent (scan
++ * fallback); it never raises an exception or changes JS-visible state. */
++static uint8_t *qjsjit_build_pc_boundary_map(JSFunctionBytecode *b)
++{
++    uint8_t *map;
++    int offset = 0;
++
++    if (!b->realm || b->byte_code_len < 0)
++        return NULL;
++    map = js_mallocz_rt(b->realm->rt, ((size_t)b->byte_code_len >> 3) + 1);
++    if (!map)
++        return NULL;
++    for (;;) {
++        const JSJitOpcodeInfo *info;
++        uint8_t opcode;
++
++        /* Mark first: reaching byte_code_len means an exact decode. */
++        map[(size_t)offset >> 3] |= (uint8_t)(1u << (offset & 7));
++        if (offset >= b->byte_code_len)
++            break;
++        opcode = b->byte_code_buf[offset];
++        if (opcode >= countof(qjsjit_opcode_table))
++            break;
++        info = &qjsjit_opcode_table[opcode];
++        if (!info->size || info->size > b->byte_code_len - offset)
++            break;
++        offset += info->size;
++    }
++    b->jit_pc_boundary_map = map;
++    return map;
++}
++
++static inline bool qjsjit_valid_pc(JSFunctionBytecode *b, const uint8_t *pc,
++                                   bool allow_end)
++{
++    uintptr_t start = (uintptr_t)b->byte_code_buf;
++    uintptr_t end = start + (size_t)b->byte_code_len;
++    uintptr_t value = (uintptr_t)pc;
++    const uint8_t *map;
++    size_t offset;
++
++    if (value < start || (allow_end ? value > end : value >= end))
++        return false;
++    map = b->jit_pc_boundary_map;
++    if (unlikely(!map)) {
++        map = qjsjit_build_pc_boundary_map(b);
++        if (!map)
++            return qjsjit_valid_pc_scan(b, pc, allow_end);
++    }
++    offset = value - start;
++    return (map[offset >> 3] >> (offset & 7)) & 1;
++}
++
+ static bool qjsjit_is_uncatchable_sentinel(JSRuntime *rt, JSValueConst value)
+ {
+     return JS_VALUE_GET_TAG(value) == JS_TAG_OBJECT &&
+@@ -19003,8 +19075,10 @@
+  * a forged identity/cookie/map/index can never read, duplicate or free the
+  * value used by a caller to detect accidental touching.
+  */
+-static JSJitHelperStatus qjsjit_reject_helper(JSJitExecFrame *frame,
+-                                              const char *message)
++/* Rejection is cold; keeping it out of line keeps the validated fast path
++ * free of spills and stack-protector setup. */
++static no_inline JSJitHelperStatus qjsjit_reject_helper(JSJitExecFrame *frame,
++                                                        const char *message)
+ {
+     JSValue result = JS_UNDEFINED;
+ 
+@@ -19059,8 +19133,10 @@
+         return qjsjit_reject_helper(frame, "invalid JIT helper entry");
+     if (has_stack_map && stack_map_id >= frame->entry.stack_map_count)
+         return qjsjit_reject_helper(frame, "invalid JIT helper stack map");
++    /* Same predicate as JS_HasException(ctx), without an out-of-line call. */
+     if (!JS_IsUndefined(frame->result) ||
+-        (validation != QJSJIT_VALIDATE_RESUME && JS_HasException(ctx)))
++        (validation != QJSJIT_VALIDATE_RESUME &&
++         !JS_IsUninitialized(rt->current_exception)))
+         return qjsjit_reject_helper(frame, "invalid JIT helper state");
+ 
+     sf = rt->current_stack_frame;
+@@ -20113,6 +20189,72 @@
+     rt->jit_active_helper_abi_version = view ? view->entry.helper_abi_version : 0;
+ }
+ 
++#define QJSJIT_INLINE_ARENA_ALIGN 16
++#define QJSJIT_INLINE_ARENA_MIN_SIZE (32 * 1024)
++
++#if defined(__SANITIZE_ADDRESS__)
++#define QJSJIT_INLINE_ARENA_ENABLED 0
++#elif defined(__has_feature)
++#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
++#define QJSJIT_INLINE_ARENA_ENABLED 0
++#endif
++#endif
++#ifndef QJSJIT_INLINE_ARENA_ENABLED
++#define QJSJIT_INLINE_ARENA_ENABLED 1
++#endif
++
++/* Reserve zeroed shadow-frame storage. Frames are strictly nested, so the
++ * arena is a bump stack: a frame's storage never moves while it is live
++ * (captured JSVarRef pointers rely on this). The arena only grows while it
++ * is empty; a frame that does not fit uses the heap. Failure is a pre-effect
++ * miss, exactly like the previous per-call allocation. */
++static JSJitInlineState *qjsjit_inline_alloc(JSRuntime *rt, size_t bytes)
++{
++    JSJitInlineState *state;
++    size_t aligned, used, size;
++
++    aligned = (bytes + QJSJIT_INLINE_ARENA_ALIGN - 1) &
++        ~(size_t)(QJSJIT_INLINE_ARENA_ALIGN - 1);
++    used = rt->jit_inline_arena_used;
++    if (QJSJIT_INLINE_ARENA_ENABLED && aligned >= bytes &&
++        aligned <= JS_JIT_INLINE_MAX_BYTES + QJSJIT_INLINE_ARENA_ALIGN) {
++        if (used == 0 && aligned > rt->jit_inline_arena_size) {
++            size = QJSJIT_INLINE_ARENA_MIN_SIZE;
++            while (size < aligned)
++                size <<= 1;
++            js_free_rt(rt, rt->jit_inline_arena);
++            rt->jit_inline_arena_size = 0;
++            rt->jit_inline_arena = js_malloc_rt(rt, size);
++            if (rt->jit_inline_arena)
++                rt->jit_inline_arena_size = size;
++        }
++        if (rt->jit_inline_arena &&
++            aligned <= rt->jit_inline_arena_size - used) {
++            state = (JSJitInlineState *)(rt->jit_inline_arena + used);
++            memset(state, 0, bytes);
++            state->arena_mark = used;
++            state->arena_bytes = aligned;
++            rt->jit_inline_arena_used = used + aligned;
++            return state;
++        }
++    }
++    return js_mallocz_rt(rt, bytes);
++}
++
++/* Callers release after their depth decrement, so depth zero proves that no
++ * reserved frame (published or not) still uses the arena. */
++static void qjsjit_inline_release(JSRuntime *rt, JSJitInlineState *state)
++{
++    if (!state->arena_bytes) {
++        js_free_rt(rt, state);
++        return;
++    }
++    if (state->arena_mark + state->arena_bytes == rt->jit_inline_arena_used)
++        rt->jit_inline_arena_used = state->arena_mark;
++    if (rt->jit_inline_depth == 0)
++        rt->jit_inline_arena_used = 0;
++}
++
+ /* Free only runtime-owned storage, never a pointer supplied in the mutable
+  * public view. Interpreter completion has already consumed its local range. */
+ static void qjsjit_inline_destroy(JSRuntime *rt, JSJitInlineState *state)
+@@ -20132,7 +20274,7 @@
+     JS_FreeValueRT(rt, state->sf.cur_func);
+     JS_FreeValueRT(rt, state->this_value);
+     JS_FreeValueRT(rt, state->new_target);
+-    js_free_rt(rt, state);
++    qjsjit_inline_release(rt, state);
+ }
+ 
+ /* Native code must never leave a live shadow frame behind. Reject without
+@@ -20172,10 +20314,10 @@
+     rt = caller->rt;
+     if (call_kind > JS_JIT_INLINE_CALL_METHOD || argc > UINT16_MAX)
+         return JS_JIT_HELPER_GUARD_MISS;
++    /* Frame validation proved caller->pc is an instruction boundary; the
++     * continuation is proven below as the next boundary after that call. */
+     if (call_pc >= (uint32_t)caller_b->byte_code_len ||
+         continuation_pc >= (uint32_t)caller_b->byte_code_len ||
+-        !qjsjit_valid_pc(caller_b, caller_b->byte_code_buf + call_pc, false) ||
+-        !qjsjit_valid_pc(caller_b, caller_b->byte_code_buf + continuation_pc, false) ||
+         caller->pc != caller_b->byte_code_buf + call_pc)
+         return qjsjit_reject_helper(caller, "invalid inline call PC");
+     opcode = caller_b->byte_code_buf[call_pc];
+@@ -20224,7 +20366,7 @@
+         return JS_JIT_HELPER_GUARD_MISS;
+     /* Unlike js_malloc(ctx), this does not manufacture an OOM exception for
+      * an optional optimization. Quota/allocation failure is pre-effect miss. */
+-    state = js_mallocz_rt(rt, bytes);
++    state = qjsjit_inline_alloc(rt, bytes);
+     if (!state)
+         return JS_JIT_HELPER_GUARD_MISS;
+     /* Every decline happens before this exactly-once entry checkpoint: a
+@@ -20306,7 +20448,7 @@
+ poll_failed:
+     rt->jit_inline_depth--;
+     rt->jit_inline_bytes -= bytes;
+-    js_free_rt(rt, state);
++    qjsjit_inline_release(rt, state);
+     return JS_JIT_HELPER_EXCEPTION;
+ }
+ 
+@@ -39998,6 +40140,10 @@
+     JS_FreeAtomRT(rt, b->filename);
+     js_free_rt(rt, b->pc2line_buf);
+     js_free_rt(rt, b->source);
++#ifdef CONFIG_JIT_ABI
++    js_free_rt(rt, b->jit_pc_boundary_map);
++    b->jit_pc_boundary_map = NULL;
++#endif
+ 
+     remove_gc_object(&b->header);
+     if (rt->gc_phase == JS_GC_PHASE_REMOVE_CYCLES && b->header.ref_count != 0) {

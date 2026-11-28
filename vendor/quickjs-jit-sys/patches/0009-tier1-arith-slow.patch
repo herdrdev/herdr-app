@@ -1,0 +1,206 @@
+diff --git a/quickjs-jit-helpers.h b/quickjs-jit-helpers.h
+--- a/quickjs-jit-helpers.h
++++ b/quickjs-jit-helpers.h
+@@ -123,7 +123,13 @@
+       THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
+     X(ATOM_VALUE, atom_value, JS_JitHelperAtomValue, MAP_OUT_INDEX, 1,      \
+       OWNED, NONE, NONE, NONE, OWNED,                                       \
+-      THROWING | ALLOCATING | REENTRANT)
++      THROWING | ALLOCATING | REENTRANT)                                    \
++    X(BINARY_ARITH_SLOW, binary_arith_slow, JS_JitHelperBinaryArithSlow,   \
++      MAP_OUT_TWO_OP, 3, OWNED, CONSUMED, CONSUMED, NONE, OWNED,            \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)                       \
++    X(UNARY_ARITH_SLOW, unary_arith_slow, JS_JitHelperUnaryArithSlow,      \
++      MAP_OUT_IN_OP, 2, OWNED, CONSUMED, NONE, NONE, OWNED,                 \
++      THROWING | ALLOCATING | REENTRANT | FINALIZING)
+ 
+ typedef enum JSJitHelperId {
+ #define QJSJIT_HELPER_ID(id, field, c_name, signature, value_arity, own0,    \
+@@ -159,6 +165,10 @@
+                                      uint32_t stack_map_id, uint32_t output, \
+                                      uint32_t input)
+ #define QJSJIT_DECLARE_MAP_OUT_INDEX(name) QJSJIT_DECLARE_MAP_OUT_IN(name)
++#define QJSJIT_DECLARE_MAP_OUT_IN_OP(name)                                   \
++    JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
++                                     uint32_t stack_map_id, uint32_t output, \
++                                     uint32_t input, uint32_t opcode)
+ #define QJSJIT_DECLARE_MAP_OUT_TWO(name)                                     \
+     JS_EXTERN JSJitHelperStatus name(JSJitExecFrame *frame,                  \
+                                      uint32_t stack_map_id, uint32_t output, \
+diff --git a/quickjs-jit.h b/quickjs-jit.h
+--- a/quickjs-jit.h
++++ b/quickjs-jit.h
+@@ -17,7 +17,7 @@
+ #endif
+ 
+ #define QJSJIT_ABI_MAJOR 1u
+-#define QJSJIT_ABI_MINOR 18u
++#define QJSJIT_ABI_MINOR 19u
+ 
+ /* Frame flags are append-only. Stress collection is a test/debug contract:
+  * every helper performs an allocating cycle-GC point before and after its
+@@ -217,7 +217,7 @@
+  * prefix and helper ID zero; every later helper is an append-only v1.1 tail.
+  */
+ #define QJSJIT_RUNTIME_API_MAJOR 1u
+-#define QJSJIT_RUNTIME_API_MINOR 8u
++#define QJSJIT_RUNTIME_API_MINOR 9u
+ 
+ #define QJSJIT_RUNTIME_FIELD_FRAME(field)                                   \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame)
+@@ -233,6 +233,10 @@
+                                uint32_t input)
+ #define QJSJIT_RUNTIME_FIELD_MAP_OUT_INDEX(field)                           \
+     QJSJIT_RUNTIME_FIELD_MAP_OUT_IN(field)
++#define QJSJIT_RUNTIME_FIELD_MAP_OUT_IN_OP(field)                           \
++    JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
++                               uint32_t stack_map_id, uint32_t output,      \
++                               uint32_t input, uint32_t opcode)
+ #define QJSJIT_RUNTIME_FIELD_MAP_OUT_TWO(field)                             \
+     JSJitHelperStatus (*field)(JSJitExecFrame *frame,                       \
+                                uint32_t stack_map_id, uint32_t output,      \
+diff --git a/quickjs.c b/quickjs.c
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -2613,6 +2613,7 @@
+ #define QJSJIT_ABI_COUNT_MAP_OUT 4
+ #define QJSJIT_ABI_COUNT_MAP_OUT_IN 5
+ #define QJSJIT_ABI_COUNT_MAP_OUT_INDEX 5
++#define QJSJIT_ABI_COUNT_MAP_OUT_IN_OP 6
+ #define QJSJIT_ABI_COUNT_MAP_OUT_TWO 6
+ #define QJSJIT_ABI_COUNT_MAP_OUT_TWO_OP 7
+ #define QJSJIT_ABI_COUNT_MAP_OUT_OBJECT_ATOM 6
+@@ -2633,6 +2634,7 @@
+ #define QJSJIT_ABI_TYPES_MAP_OUT QJSJIT_ABI_TYPES_2
+ #define QJSJIT_ABI_TYPES_MAP_OUT_IN QJSJIT_ABI_TYPES_3
+ #define QJSJIT_ABI_TYPES_MAP_OUT_INDEX QJSJIT_ABI_TYPES_3
++#define QJSJIT_ABI_TYPES_MAP_OUT_IN_OP QJSJIT_ABI_TYPES_4
+ #define QJSJIT_ABI_TYPES_MAP_OUT_TWO QJSJIT_ABI_TYPES_4
+ #define QJSJIT_ABI_TYPES_MAP_OUT_TWO_OP QJSJIT_ABI_TYPES_5
+ #define QJSJIT_ABI_TYPES_MAP_OUT_OBJECT_ATOM QJSJIT_ABI_TYPES_4
+@@ -19677,6 +19679,125 @@
+     return qjsjit_finish_output(frame, out);
+ }
+ 
++/* Exact interpreter slow paths for the non-add binary arithmetic and bitwise
++ * opcodes. The operands occupy two adjacent slots and the result replaces the
++ * left one, exactly as in the interpreter: the slow path consumes both
++ * operands on success and on language exception, so the adapter only clears
++ * the stale right slot and never frees either operand itself. */
++JSJitHelperStatus JS_JitHelperBinaryArithSlow(JSJitExecFrame *frame,
++                                              uint32_t stack_map_id,
++                                              uint32_t output, uint32_t left,
++                                              uint32_t right, uint32_t opcode)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *lhs, *rhs;
++    int status;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_BINARY_ARITH_SLOW);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, left, &lhs) ||
++        !qjsjit_resolve_slot(frame, b, right, &rhs) ||
++        out != lhs || rhs != lhs + 1)
++        return qjsjit_reject_helper(frame, "invalid JIT binary slots");
++    switch (opcode) {
++    case OP_sub:
++    case OP_mul:
++    case OP_div:
++    case OP_mod:
++    case OP_pow:
++    case OP_shl:
++    case OP_sar:
++    case OP_shr:
++    case OP_and:
++    case OP_or:
++    case OP_xor:
++        break;
++    default:
++        return qjsjit_reject_helper(frame, "invalid JIT binary opcode");
++    }
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, lhs);
++        qjsjit_consume_slot(frame->ctx, rhs);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    switch (opcode) {
++    case OP_shr:
++        status = js_shr_slow(frame->ctx, rhs + 1);
++        break;
++    case OP_shl:
++    case OP_sar:
++    case OP_and:
++    case OP_or:
++    case OP_xor:
++        status = js_binary_logic_slow(frame->ctx, rhs + 1, (OPCodeEnum)opcode);
++        break;
++    default:
++        status = js_binary_arith_slow(frame->ctx, rhs + 1, (OPCodeEnum)opcode);
++        break;
++    }
++    *rhs = JS_UNDEFINED;
++    if (status < 0) {
++        *out = JS_UNDEFINED;
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_finish_output(frame, out);
++}
++
++/* Exact interpreter slow paths for the unary arithmetic opcodes. The input
++ * is moved into the output slot first so the only owner stays in a
++ * C-visible frame slot across user coercion, allocation, and re-entrancy;
++ * the slow path consumes it on both success and language exception. */
++JSJitHelperStatus JS_JitHelperUnaryArithSlow(JSJitExecFrame *frame,
++                                             uint32_t stack_map_id,
++                                             uint32_t output, uint32_t input,
++                                             uint32_t opcode)
++{
++    JSFunctionBytecode *b;
++    JSStackFrame *sf;
++    JSValue *out, *in;
++    int status;
++
++    if (qjsjit_validate_helper_frame(frame, true, stack_map_id, &b, &sf) < 0)
++        return JS_JIT_HELPER_EXCEPTION;
++    qjsjit_count_helper(frame, JS_JIT_HELPER_UNARY_ARITH_SLOW);
++    if (!qjsjit_resolve_slot(frame, b, output, &out) ||
++        !qjsjit_resolve_slot(frame, b, input, &in))
++        return qjsjit_reject_helper(frame, "invalid JIT unary slots");
++    switch (opcode) {
++    case OP_neg:
++    case OP_inc:
++    case OP_dec:
++    case OP_plus:
++    case OP_not:
++        break;
++    default:
++        return qjsjit_reject_helper(frame, "invalid JIT unary opcode");
++    }
++    if (out != in && !JS_IsUndefined(*out))
++        return qjsjit_reject_helper(frame, "occupied JIT unary output");
++    if (qjsjit_stress_gc(frame) < 0) {
++        qjsjit_consume_slot(frame->ctx, in);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    if (out != in) {
++        *out = *in;
++        *in = JS_UNDEFINED;
++    }
++    if (opcode == OP_not)
++        status = js_not_slow(frame->ctx, out + 1);
++    else
++        status = js_unary_arith_slow(frame->ctx, out + 1, (OPCodeEnum)opcode);
++    if (status < 0) {
++        qjsjit_stress_gc_after_exception(frame);
++        return JS_JIT_HELPER_EXCEPTION;
++    }
++    return qjsjit_finish_output(frame, out);
++}
++
+ #endif
+ 
+ /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */

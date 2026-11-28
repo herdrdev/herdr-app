@@ -2,8 +2,8 @@ Herdr third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: 4feac2839121c2e88d4313e313de8ac1b55c240d43df86d8b0889970c52fcf8b Cargo.lock
-Input-SHA256: 26d779ba9ae8b6dcd4a5ca62e3d66f7385711ac0b06777a124ccdda71aa5aa83 Cargo.toml
+Input-SHA256: 1ddc74b1213087eb6b5c0d7087789328352e18029449f4283501f30f8bea0b8f Cargo.lock
+Input-SHA256: 911f932ab594d80736acaaa73ff48fc442834524741d9096eb23634ed51cc061 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
 Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 assets/fonts/LICENSE-SymbolsNerdFont.txt
@@ -32,7 +32,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 5cc983eea257055ae04183e9f066b25b2e8c54293d56cb677debe84ac3d7188c licenses/inventory.json
+Input-SHA256: cd1b13368bfc6ad090a5de988d24e98161b6c7d207925c2d49e65faaa686cc8a licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -71,6 +71,8 @@ Input-SHA256: 2c32d9cb11e942a607b3a98ae918ef6a1bbfdefd111f3a99a71711622d7bf972 v
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre/LICENSE-APACHE
 Input-SHA256: d98d4bb75c6a1f9fcd3d8db8febb95eaa15dbddf1e5ce02c06fd1bf41d33b751 vendor/quickjs-jit-runtime/Cargo.toml
 Input-SHA256: 976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70 vendor/quickjs-jit-runtime/LICENSE
+Input-SHA256: 27386f5dce30be0d9b85431f6366d1ac2483b6005a530f63ef59d7aa84c69f42 vendor/quickjs-jit-sys/Cargo.toml
+Input-SHA256: 976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70 vendor/quickjs-jit-sys/LICENSE
 Input-SHA256: b5f726d2bd6269550f37f6c87697958ed7f43d18c104350211a7b3a6cedcf5d7 vendor/taffy/Cargo.toml
 Input-SHA256: f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a vendor/taffy/LICENSE
 
@@ -16069,6 +16071,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 MIT License (MIT)
   quickjs-jit 0.12.11 — https://github.com/longbridge/rquickjs.git
   quickjs-jit-runtime 0.12.11 — https://github.com/longbridge/rquickjs.git
+  quickjs-jit-sys 0.12.11 — https://github.com/longbridge/rquickjs.git
 
 MIT License
 
@@ -19246,6 +19249,35 @@ QuickJS JIT runtime
 https://github.com/longbridge/quickjs-jit
 
 --- vendor/quickjs-jit-runtime/LICENSE ---
+MIT License
+
+Copyright (c) 2020 Mees Delzenne
+Copyright (c) 2025 Rquickjs Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+----------------------------------------------------------------------
+QuickJS JIT bindings (quickjs-jit-sys)
+https://github.com/longbridge/quickjs-jit/tree/96593cd7a54440ac060a391b8baea7e9a3cf1393/sys
+
+--- vendor/quickjs-jit-sys/LICENSE ---
 MIT License
 
 Copyright (c) 2020 Mees Delzenne
