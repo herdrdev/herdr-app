@@ -263,6 +263,14 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-v", Paste, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-c", Copy, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-insert", Copy, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-v", Paste, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("shift-insert", Paste, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("ctrl-a", MoveHome, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
@@ -8681,6 +8689,34 @@ mod tests {
             assert!(!state.selecting);
             assert!(state.column_select_start.is_none());
         });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn test_terminal_copy_and_paste_keys_edit_text_fields(cx: &mut TestAppContext) {
+        for (copy, paste) in [("ctrl-shift-c", "ctrl-shift-v"), ("ctrl-insert", "shift-insert")] {
+            let view = InputView::<EditorMode>::new(cx);
+            let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+            setup_cursors(&mut cx, &view.input, "a|b");
+            cx.update(|window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string("P".to_string()));
+                view.input.update(cx, |state, cx| state.focus(window, cx));
+            });
+            cx.simulate_keystrokes(paste);
+            cx.run_until_parked();
+            view.input.read_with(&cx, |state, _| assert_eq!(state.value().trim_end(), "aPb", "{paste} pastes"));
+
+            cx.update(|window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                view.input.update(cx, |state, cx| state.select_all(window, cx));
+            });
+            cx.simulate_keystrokes(copy);
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                let copied = cx.read_from_clipboard().and_then(|item| item.text());
+                assert_eq!(copied.as_deref().map(str::trim_end), Some("aPb"), "{copy} copies");
+            });
+        }
     }
 
     #[gpui::test]
