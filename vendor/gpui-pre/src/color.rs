@@ -823,6 +823,44 @@ impl Default for Background {
     }
 }
 
+// HERDR: one solid color whose quads replace what's below them instead of
+// blending over it, so a see-through window's menus show the desktop, not the
+// window's own content. `u64::MAX` is none; otherwise the color's RGBA8.
+static REPLACING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn rgba8(color: Hsla) -> u64 {
+    let c = Rgba::from(color);
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u64;
+    (b(c.r) << 24) | (b(c.g) << 16) | (b(c.b) << 8) | b(c.a)
+}
+
+/// HERDR: quads painted solid in exactly this color (after element opacity,
+/// so a fading or hidden element blends as usual) replace what's below them,
+/// on renderers that support it (Metal); `None` turns it off. Compared at 8
+/// bits per channel.
+pub fn set_replacing_color(color: Option<Hsla>) {
+    REPLACING.store(color.map_or(u64::MAX, rgba8), std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Background {
+    /// HERDR: marks a solid background in the replacing color.
+    pub(crate) fn mark_replacing(mut self) -> Self {
+        let r = REPLACING.load(std::sync::atomic::Ordering::Relaxed);
+        // Runs for every quad: the alpha byte rejects nearly all of them
+        // (opaque or clear) before the HSL→RGB conversion.
+        let alpha = || (self.solid.a.clamp(0.0, 1.0) * 255.0).round() as u64;
+        if r != u64::MAX && self.tag == BackgroundTag::Solid && alpha() == r & 255 && rgba8(self.solid) == r {
+            self.pad = 1;
+        }
+        self
+    }
+
+    /// HERDR: whether this quad replaces what's below it (see `set_replacing_color`).
+    pub fn replaces_below(&self) -> bool {
+        self.pad == 1
+    }
+}
+
 /// Creates a hash pattern background
 pub fn pattern_slash(color: impl Into<Hsla>, width: f32, interval: f32) -> Background {
     let width_scaled = (width * 255.0) as u32;
