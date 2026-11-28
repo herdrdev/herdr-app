@@ -896,6 +896,14 @@ pub const BUNDLED_FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/GeistMono-Variable.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Italic-Variable.ttf"),
     include_bytes!("../assets/fonts/Geist.ttf"),
+    // Separate faces, not a variable font: on macOS GPUI picks the nearest face
+    // a family has, draws a variable font at its default weight and never makes
+    // a face bolder or slanted, so without them bold, semibold and italic UI
+    // text draws regular.
+    include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Bold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+    include_bytes!("../assets/fonts/Geist-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Italic-Variable.ttf"),
     SYMBOLS_FONT_FILE,
@@ -912,6 +920,28 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[cfg(test)]
 mod tests {
+    // The native macOS text system needs the main thread; the faces a weight
+    // and style resolve to are checked with real fonts on Linux instead.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ui_font_bundles_its_bold_and_italic_faces() {
+        use super::*;
+        use gpui::{Font, FontStyle, FontWeight, TextSystem};
+        use std::{borrow::Cow, sync::Arc};
+
+        let system = TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(DEFAULT_FONT)));
+        system.add_fonts(BUNDLED_FONTS.iter().map(|f| Cow::Borrowed(*f)).collect()).unwrap();
+        let ui = Settings::default().ui_font_family;
+        let face = |weight, style| system.resolve_font(&Font { weight, style, ..gpui::font(ui.clone()) });
+        let (regular, semibold, bold) = (face(FontWeight::NORMAL, FontStyle::Normal), face(FontWeight::SEMIBOLD, FontStyle::Normal), face(FontWeight::BOLD, FontStyle::Normal));
+        let (italic, bold_italic) = (face(FontWeight::NORMAL, FontStyle::Italic), face(FontWeight::BOLD, FontStyle::Italic));
+        assert_ne!(regular, semibold, "semibold {ui} draws with the regular face");
+        assert_ne!(regular, bold, "bold {ui} draws with the regular face");
+        assert_ne!(semibold, bold);
+        assert_ne!(regular, italic, "italic {ui} draws with the regular face");
+        assert_ne!(bold, bold_italic, "bold italic {ui} draws with the bold face");
+    }
+
     #[test]
     fn terminal_ligatures_default_off_and_can_be_enabled() {
         use super::*;
