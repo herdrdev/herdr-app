@@ -27,6 +27,11 @@ const MAC_LIGHTS: [f32; 2] = [12.0, 7.0];
 /// The grab band along the edges when the app resizes the window (Linux).
 #[cfg(not(any(target_os = "macos", windows)))]
 const EDGE: f32 = 6.0;
+/// The margin the window keeps around itself for its shadow when the app
+/// draws its own frame (Linux), px. Compositors leave the shadow to such
+/// windows, so without it the window has none (#901).
+#[cfg(not(any(target_os = "macos", windows)))]
+const SHADOW: f32 = 10.0;
 /// Windows' caption height and button width, px at zoom 1.
 #[cfg(windows)]
 const WIN_STRIP: f32 = 32.0;
@@ -136,34 +141,62 @@ impl AppWindow {
         }
     }
 
-    /// Wraps the layout in what the window itself needs: on macOS a strip for the
-    /// window buttons (system title bar), on Linux resize edges (client decorations).
-    pub(super) fn window_frame(&self, tree: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        #[cfg(target_os = "macos")]
+    /// The room the window keeps for its own shadow on each side: on Linux
+    /// with client decorations, except on sides that touch a screen edge
+    /// (tiled, maximized, fullscreen). Elsewhere none.
+    pub(super) fn frame_margin(&self, window: &mut Window) -> Edges<Pixels> {
+        #[cfg(any(target_os = "macos", windows))]
         {
             let _ = window;
+            Edges::default()
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let Decorations::Client { tiling } = window.window_decorations() else { return Edges::default() };
+            // Cheap when unchanged. GPUI uses it for client decorations only.
+            window.set_client_inset(px(SHADOW));
+            if window.is_maximized() || window.is_fullscreen() {
+                return Edges::default();
+            }
+            let side = |tiled: bool| if tiled { px(0.0) } else { px(SHADOW) };
+            Edges { top: side(tiling.top), right: side(tiling.right), bottom: side(tiling.bottom), left: side(tiling.left) }
+        }
+    }
+
+    /// Puts the layout and its overlays in what the window itself needs: on
+    /// macOS a strip for the window buttons (system title bar), on Linux
+    /// resize edges and, with a `margin`, a frame with a shadow
+    /// (client decorations).
+    pub(super) fn window_frame(&self, tree: AnyElement, overlays: Vec<AnyElement>, margin: Edges<Pixels>, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let framed = |tree: AnyElement, overlays: Vec<AnyElement>| std::iter::once(tree).chain(overlays).collect::<Vec<_>>();
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (window, margin);
             if self.titlebar() == Titlebar::System {
                 let strip = self.window_drag(div().flex_none().h(px(MAC_STRIP)).w_full(), cx);
-                return div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element();
+                return framed(div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element(), overlays);
             }
-            tree
+            framed(tree, overlays)
         }
         #[cfg(windows)]
         {
+            let _ = margin;
             if self.titlebar() == Titlebar::Layout || window.is_fullscreen() {
-                return tree;
+                return framed(tree, overlays);
             }
             let strip = win::strip(window.is_maximized(), cx);
-            div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element()
+            framed(div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element(), overlays)
         }
         #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = cx;
-            let Decorations::Client { tiling } = window.window_decorations() else { return tree };
+            let Decorations::Client { tiling } = window.window_decorations() else { return framed(tree, overlays) };
             if window.is_maximized() || window.is_fullscreen() {
-                return tree;
+                return framed(tree, overlays);
             }
-            let e = px(EDGE);
+            // The grab bands reach from the window's edge over the shadow and a little into the frame.
+            let band = |m: Pixels| m + px(EDGE);
+            let (et, eb, el, er) = (band(margin.top), band(margin.bottom), band(margin.left), band(margin.right));
             let grip = |id: &'static str, edge: ResizeEdge, cursor: CursorStyle| {
                 div()
                     .id(id)
@@ -178,31 +211,56 @@ impl AppWindow {
             let mut grips: Vec<AnyElement> = Vec::new();
             let (top, bottom, left, right) = (!tiling.top, !tiling.bottom, !tiling.left, !tiling.right);
             if top {
-                grips.push(grip("rz-t", ResizeEdge::Top, CursorStyle::ResizeUpDown).top_0().left(e).right(e).h(e).into_any_element());
+                grips.push(grip("rz-t", ResizeEdge::Top, CursorStyle::ResizeUpDown).top_0().left(el).right(er).h(et).into_any_element());
             }
             if bottom {
-                grips.push(grip("rz-b", ResizeEdge::Bottom, CursorStyle::ResizeUpDown).bottom_0().left(e).right(e).h(e).into_any_element());
+                grips.push(grip("rz-b", ResizeEdge::Bottom, CursorStyle::ResizeUpDown).bottom_0().left(el).right(er).h(eb).into_any_element());
             }
             if left {
-                grips.push(grip("rz-l", ResizeEdge::Left, CursorStyle::ResizeLeftRight).left_0().top(e).bottom(e).w(e).into_any_element());
+                grips.push(grip("rz-l", ResizeEdge::Left, CursorStyle::ResizeLeftRight).left_0().top(et).bottom(eb).w(el).into_any_element());
             }
             if right {
-                grips.push(grip("rz-r", ResizeEdge::Right, CursorStyle::ResizeLeftRight).right_0().top(e).bottom(e).w(e).into_any_element());
+                grips.push(grip("rz-r", ResizeEdge::Right, CursorStyle::ResizeLeftRight).right_0().top(et).bottom(eb).w(er).into_any_element());
             }
-            let corner = |id, edge, cursor| grip(id, edge, cursor).w(e * 2.).h(e * 2.);
+            // Corners are twice as deep as the frame's part of a band, so they're easy to hit.
+            let corner = |id, edge, cursor, w: Pixels, h: Pixels| grip(id, edge, cursor).w(w + px(EDGE)).h(h + px(EDGE));
             if top && left {
-                grips.push(corner("rz-tl", ResizeEdge::TopLeft, CursorStyle::ResizeUpLeftDownRight).top_0().left_0().into_any_element());
+                grips.push(corner("rz-tl", ResizeEdge::TopLeft, CursorStyle::ResizeUpLeftDownRight, el, et).top_0().left_0().into_any_element());
             }
             if top && right {
-                grips.push(corner("rz-tr", ResizeEdge::TopRight, CursorStyle::ResizeUpRightDownLeft).top_0().right_0().into_any_element());
+                grips.push(corner("rz-tr", ResizeEdge::TopRight, CursorStyle::ResizeUpRightDownLeft, er, et).top_0().right_0().into_any_element());
             }
             if bottom && left {
-                grips.push(corner("rz-bl", ResizeEdge::BottomLeft, CursorStyle::ResizeUpRightDownLeft).bottom_0().left_0().into_any_element());
+                grips.push(corner("rz-bl", ResizeEdge::BottomLeft, CursorStyle::ResizeUpRightDownLeft, el, eb).bottom_0().left_0().into_any_element());
             }
             if bottom && right {
-                grips.push(corner("rz-br", ResizeEdge::BottomRight, CursorStyle::ResizeUpLeftDownRight).bottom_0().right_0().into_any_element());
+                grips.push(corner("rz-br", ResizeEdge::BottomRight, CursorStyle::ResizeUpLeftDownRight, er, eb).bottom_0().right_0().into_any_element());
             }
-            div().size_full().relative().flex().child(tree).children(grips).into_any_element()
+            if margin == Edges::default() {
+                return vec![div().size_full().relative().flex().child(tree).children(overlays).children(grips).into_any_element()];
+            }
+            let frame = div()
+                .absolute()
+                .top(margin.top)
+                .bottom(margin.bottom)
+                .left(margin.left)
+                .right(margin.right)
+                .flex()
+                .bg(c("background"))
+                .border_1()
+                .border_color(c("border"))
+                .shadow(vec![BoxShadow {
+                    // Zed's: a tight shadow, mostly faded out where the margin ends.
+                    color: hsla(0.0, 0.0, 0.0, 0.4),
+                    offset: point(px(0.0), px(0.0)),
+                    blur_radius: px(SHADOW / 2.0),
+                    spread_radius: px(0.0),
+                    inset: false,
+                }])
+                .overflow_hidden()
+                .child(tree)
+                .children(overlays);
+            vec![div().size_full().relative().child(frame).children(grips).into_any_element()]
         }
     }
 
