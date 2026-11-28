@@ -103,7 +103,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the focused one) "right", "down", or "canvas" (new horizontal canvas column) with a new terminal, or with a mod (`mod`, its `props`) beside it.
 
 | Argument | Required |
 |---|---|
@@ -123,7 +123,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal: as a new tab (place "tab", default), "right"/"down" of the focused pane, or "canvas" (new horizontal canvas column).
 
 | Argument | Required |
 |---|---|
@@ -134,7 +134,7 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 
 ## `terminal.keep`
 
-Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down".
+Give a running terminal without a pane (a sub-agent) a pane: a new tab, "right"/"down", or "canvas".
 
 | Argument | Required |
 |---|---|

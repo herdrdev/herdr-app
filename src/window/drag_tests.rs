@@ -118,7 +118,7 @@ fn squeezed_layout_drag(cx: &mut gpui::TestAppContext) {
                         let total = f32::from(bounds[&a.id].size.height + bounds[&b.id].size.height) / super::settings::zoom();
                         drop(bounds);
                         let before = serde_json::to_value(parent).unwrap();
-                        this.drag = Some(super::Drag { container: container.into(), index, axis: super::Axis::Column });
+                        this.drag = Some(super::Drag { container: container.into(), index, axis: super::Axis::Column, canvas_column: false, min_width: 24.0 });
                         this.drag_to(point(px(100.0), px(y)));
                         let after = this.chrome.find(container).unwrap();
                         if container == "sidebar" || total <= 48.0 {

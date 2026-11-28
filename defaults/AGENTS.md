@@ -424,6 +424,7 @@ The tab block says how each pane of the shown tab is wrapped:
   mod keeps its divider on the terminal-facing edge and reads the frame
   position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
+- `canvas`: `true` or `{ "column_width": 680, "min_width": 280 }` on the tab block turns the tab's top-level row into an infinite horizontal scrolling canvas with a bottom horizontal scrollbar. Top-level columns keep explicit pixel widths and resize independently without squeezing neighbors; `pane.split { direction: "canvas" }` or `terminal.open { place: "canvas" }` adds a new column to the right, while `"right"` / `"down"` (or dragging a pane onto Top/Bottom) still splits inside a column.
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
 
