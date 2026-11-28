@@ -88,6 +88,12 @@ function diffRows(lines) {
   });
 }
 
+// What each folder showed when you left it, so coming back draws it at once
+// while it rescans (#1464). Oldest first; a few dozen folders at most.
+const seen = new Map();
+const SEEN_MAX = 32;
+const VIEW = ["root", "on", "hasHead", "files", "open", "closed", "limited", "rows", "longest", "gutterChars"];
+
 export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.longest = 0; this.gutterChars = 4; this.message = ""; this.handle = cx.focus_handle();
@@ -146,9 +152,16 @@ export default class Changes extends View {
     const visiting = next !== this.context?.key;
     if (visiting) {
       this.context?.watch?.pending?.cancel();
+      if (this.context && this.root) {
+        seen.delete(this.context.key);
+        seen.set(this.context.key, Object.fromEntries(VIEW.map(k => [k, this[k]])));
+        if (seen.size > SEEN_MAX) seen.delete(seen.keys().next().value);
+      }
       this.context = { key: next, on, dirtyAt: 0 }; this.root = null; this.files = []; this.open = null;
       this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.closed = false; this.limited = false;
       this.loading = false;
+      // The scan below replaces this; a file gone by then is dropped as usual.
+      Object.assign(this, seen.get(next));
     }
     // A load left behind in another folder (a slow git, a read that never ends) must not hold this one.
     const context = this.context;
