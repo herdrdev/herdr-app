@@ -613,54 +613,70 @@ mod tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
+    fn absolute_test_path(parts: &[&str]) -> PathBuf {
+        let mut path = if cfg!(windows) {
+            PathBuf::from(r"C:\")
+        } else {
+            PathBuf::from("/")
+        };
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
     #[test]
     fn a_user_dependency_cache_lives_in_the_shell_cache() {
+        let home = absolute_test_path(&["home", "example"]);
         assert_eq!(
-            dependency_cache_root(Path::new("/home/example")),
-            PathBuf::from("/home/example/.gpui-shell/cache/dependencies")
+            dependency_cache_root(&home),
+            home.join(".gpui-shell").join("cache").join("dependencies")
         );
     }
 
     #[test]
     fn for_user_wires_home_to_the_shell_cache_root() {
+        let home = absolute_test_path(&["home", "example"]);
         let store = GitDependencyStore::for_user_with_environment(|variable| match variable {
-            "HOME" => Some(OsString::from("/home/example")),
+            "HOME" => Some(home.as_os_str().to_os_string()),
             _ => None,
         })
         .expect("an absolute HOME should select a private cache root");
 
         assert_eq!(
             store.root,
-            PathBuf::from("/home/example/.gpui-shell/cache/dependencies")
+            home.join(".gpui-shell").join("cache").join("dependencies")
         );
     }
 
     #[test]
     fn for_user_uses_userprofile_when_home_is_missing() {
+        let profile = absolute_test_path(&["profiles", "example"]);
         let store = GitDependencyStore::for_user_with_environment(|variable| match variable {
-            "USERPROFILE" => Some(OsString::from("/profiles/example")),
+            "USERPROFILE" => Some(profile.as_os_str().to_os_string()),
             _ => None,
         })
         .expect("an absolute USERPROFILE should select a private cache root");
 
         assert_eq!(
             store.root,
-            PathBuf::from("/profiles/example/.gpui-shell/cache/dependencies")
+            profile.join(".gpui-shell").join("cache").join("dependencies")
         );
     }
 
     #[test]
     fn for_user_ignores_an_empty_home_before_userprofile() {
+        let profile = absolute_test_path(&["profiles", "example"]);
         let store = GitDependencyStore::for_user_with_environment(|variable| match variable {
             "HOME" => Some(OsString::new()),
-            "USERPROFILE" => Some(OsString::from("/profiles/example")),
+            "USERPROFILE" => Some(profile.as_os_str().to_os_string()),
             _ => None,
         })
         .expect("an empty HOME should allow an absolute USERPROFILE");
 
         assert_eq!(
             store.root,
-            PathBuf::from("/profiles/example/.gpui-shell/cache/dependencies")
+            profile.join(".gpui-shell").join("cache").join("dependencies")
         );
     }
 
@@ -683,9 +699,10 @@ mod tests {
 
     #[test]
     fn for_user_rejects_a_relative_selected_home() {
+        let profile = absolute_test_path(&["profiles", "example"]);
         let result = GitDependencyStore::for_user_with_environment(|variable| match variable {
             "HOME" => Some(OsString::from("relative/home")),
-            "USERPROFILE" => Some(OsString::from("/profiles/example")),
+            "USERPROFILE" => Some(profile.as_os_str().to_os_string()),
             _ => None,
         });
         let error = result

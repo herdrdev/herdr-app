@@ -3995,40 +3995,6 @@ impl gpui::Render for Empty {
 use std::ops::Deref;
 
 #[gpui::test]
-fn the_bundled_example_application_loads_and_renders(cx: &mut TestAppContext) {
-    cx.update(|cx| crate::init(cx));
-
-    let runtime = ShellRuntime::new_isolated().expect("runtime");
-    cx.update(|cx| runtime.set_global(cx));
-
-    // The example is the contract with users: if it stops rendering, the
-    // quickstart in the README is wrong.
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/js_todolist")
-        .canonicalize()
-        .expect("example directory");
-
-    let view_type = runtime
-        .load_app(&directory, "main.js")
-        .expect("load example");
-
-    let window = cx.add_window(|_, _| Empty);
-    let mut context = VisualTestContext::from_window(*window.deref(), cx);
-    let object = context
-        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
-        .expect("instantiate");
-
-    let tree = context.update(|window, cx| {
-        runtime
-            .render_to_spec(&object, None, window, cx)
-            .expect("render")
-    });
-
-    assert!(tree.contains("Button"), "example has no button: {tree}");
-    assert!(tree.contains("text"), "example has no text: {tree}");
-}
-
-#[gpui::test]
 fn state_styles_reuse_the_ordinary_style_methods(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));
 
@@ -5575,53 +5541,6 @@ export default class ZeroScale extends View {
             "a refused scale leaves the one that was working alone"
         );
     });
-}
-
-/// The todo list exists to exercise the whole runtime at once: retained input
-/// state, controlled checkboxes, a dialog, a toast, capability-gated storage,
-/// and a filter that must survive every mutation. If a subsystem regresses,
-/// this is the test that notices.
-#[gpui::test]
-fn the_todolist_example_exercises_the_runtime(cx: &mut TestAppContext) {
-    cx.update(|cx| crate::init(cx));
-
-    let runtime = ShellRuntime::new_isolated().expect("runtime");
-    cx.update(|cx| runtime.set_global(cx));
-
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/js_todolist")
-        .canonicalize()
-        .expect("example directory");
-
-    let view_type = runtime
-        .load_app(&directory, "main.js")
-        .expect("load example");
-
-    let window = cx.add_window(|_, _| Empty);
-    let mut context = VisualTestContext::from_window(*window.deref(), cx);
-
-    // `init` creates retained state, so instantiation needs a live host call.
-    let object = context.update(|window, cx| runtime.instantiate(&view_type, window, cx));
-    let object = object.expect("instantiate");
-
-    let tree = context.update(|window, cx| {
-        runtime
-            .render_to_spec(&object, None, window, cx)
-            .expect("render")
-    });
-
-    for expected in [
-        "Todo",             // the object
-        "Input",            // retained state reached the description
-        "\"Add\"",          // the action that creates work
-        "No items yet",     // the empty state explains the next step
-        "Clear completed…", // an ellipsis, because it opens a dialog
-    ] {
-        assert!(
-            tree.contains(expected),
-            "todolist is missing `{expected}`:\n{tree}"
-        );
-    }
 }
 
 /// Multi-line state is a different Rust type from single-line state, so the

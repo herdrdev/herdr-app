@@ -91,15 +91,21 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`terminal.send_key {keys, terminal?}` sends one key such as `ctrl-b` in keys.json
+syntax. It defaults to the focused terminal, requires an attached view, and uses
+the program's current keyboard mode and the same connection as typing.
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;
 Linux and Windows have no default, so Ctrl+A stays with the shell.
 
-`terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
-replaces the selection, at the program cursor by default. Cells are zero-based; rows
-count from the oldest retained history through the active screen. Word and line
-match double/triple click. `terminal.adjust_selection {terminal?, direction}` moves
+`terminal.select {terminal?, at?: {row, col} | "cursor", to?: {row, col}, mode?: "cell" | "word" | "line"}`
+replaces the selection, at the program cursor by default. Cells are zero-based and rows
+count from the oldest retained history through the active screen. With `to`, the view
+follows the exact moving end. Line mode with `to` covers whole screen rows, including blank
+and soft-wrapped rows. Without `to`, word and line act like double and triple click.
+`terminal.adjust_selection {terminal?, direction}` moves
 the inclusive moving end and follows it in the view: left, right, up, down, page_up,
 page_down, home, end, line_start, line_end. It fails without a selection.
 `terminal.clear_selection {terminal?}` clears it; `terminal.copy` copies the focused terminal's selection.
@@ -107,6 +113,9 @@ These add no default keys or built-in copy mode. Mods read the inclusive selecti
 endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update
 when the selection changes, without refreshing readers on ordinary terminal output.
+A copy-mode mod can read an attached view with `terminalRows(terminal, from, count)`.
+It returns up to 128 rows at a time in the same coordinate space as the selection,
+with cell text, wide-character flags, and soft-wrap boundaries.
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
