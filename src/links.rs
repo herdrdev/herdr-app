@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Ghostty's default link pattern (`src/config/url.zig`), plus the editor
+/// Based on Ghostty's default link pattern (`src/config/url.zig`), with editor
 /// remote schemes (`cursor://vscode-remote/...`, `vscode://vscode-remote/...`).
 static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:|cursor://|vscode://";
@@ -17,7 +17,7 @@ static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     let scheme_chars = r"[\w\-.~:/?#@!$&*+,;=%]";
     let path_chars = r"[\w\-.~:\/?#@!$&*+;=%]";
     let bracketed = r"(?:[\(\[]\w*[\)\]])?";
-    let no_trailing_punctuation = r"(?<![,.])";
+    let no_trailing_punctuation = r"(?<![,.:])";
     let no_trailing_colon = r"(?<!:)";
     let dotted = r"(?=[\w\-.~:\/?#@!$&*+;=%]*\.)";
     let undotted = r"(?![\w\-.~:\/?#@!$&*+;=%]*\.)";
@@ -883,6 +883,17 @@ mod tests {
                 _ => Target::Url(url.into()),
             };
             assert_eq!(native_target(&text[range], None), Some(expected));
+        }
+    }
+
+    #[test]
+    fn plain_urls_leave_trailing_colons_outside_the_link() {
+        for url in ["https://g.co/sc", "http://[::1]:8080/item:123?q=a:b", "https://example.com/ends-in%3A"] {
+            let text = format!("code by visiting {url}:");
+            let at = text.find(url).unwrap();
+            let range = find(&text, at).unwrap();
+            assert_eq!(native_target(&text[range], None), Some(Target::Url(url.into())));
+            assert_eq!(find(&text, at + url.len()), None);
         }
     }
 
