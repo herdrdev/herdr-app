@@ -550,6 +550,11 @@ shortcuts must then be added by hand.
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
   `terminal` (a terminal has focus), `mod:<name>`. The more specific section
   wins: `layout:terminals` over `global`, `terminal` over both.
+- A key can be a double tap: `"shift shift": "app.palette"` runs when Shift is
+  pressed and released twice within 300 ms, with no other key or click between
+  (either Shift; holding Shift to type capitals never counts). `ctrl ctrl`,
+  `alt alt`, `cmd cmd` (or `super`, `win`) and `fn fn` work the same, in any
+  section.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
