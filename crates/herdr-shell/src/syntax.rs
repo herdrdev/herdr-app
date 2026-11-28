@@ -10,9 +10,11 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-/// Loading the default syntax definitions deserializes a few megabytes, so share
-/// one set across every highlighter instance.
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+/// Loading the syntax definitions deserializes a few megabytes, so share one
+/// set across every highlighter instance. two-face is syntect's defaults plus
+/// the grammars those defaults lack (TypeScript, TSX). Colors stay in
+/// `SyntaxStyles`; this set is only the grammars.
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
 /// A small, WASM-compatible example adapter for Base's parser-independent
 /// highlighting API. Syntect identifies scopes; the application-owned resolver
@@ -79,6 +81,12 @@ impl SyntectHighlighter {
 }
 
 fn find_syntax(language: &str) -> Option<&'static SyntaxReference> {
+    // JavaScript (Babel), two-face's JSX grammar, is oniguruma-only. The
+    // fancy-regex set still has TypeScriptReact, which understands JSX.
+    let language = match language {
+        "jsx" => "TypeScriptReact",
+        other => other,
+    };
     SYNTAX_SET
         .find_syntax_by_token(language)
         .or_else(|| SYNTAX_SET.find_syntax_by_extension(language))
@@ -411,5 +419,87 @@ mod tests {
             ("heading".into(), heading),
         ]));
         assert_eq!(styles.style("heading").unwrap().color, Some(heading));
+    }
+
+    fn syntax_name(language: &str) -> &'static str {
+        find_syntax(language)
+            .unwrap_or_else(|| panic!("no syntax for {language}"))
+            .name
+            .as_str()
+    }
+
+    /// The tokens the Files preview sends (`defaults/mods/files/main.js`) and
+    /// the extensions themselves. `.mts` / `.cts` are TypeScript extensions;
+    /// `.jsx` aliases to TypeScriptReact because the fancy-regex set has no
+    /// separate JSX grammar.
+    #[test]
+    fn typescript_and_jsx_resolve_to_their_grammars() {
+        assert_eq!(syntax_name("ts"), "TypeScript");
+        assert_eq!(syntax_name("mts"), "TypeScript");
+        assert_eq!(syntax_name("cts"), "TypeScript");
+        assert_eq!(syntax_name("TypeScript"), "TypeScript");
+        assert_eq!(syntax_name("tsx"), "TypeScriptReact");
+        assert_eq!(syntax_name("TypeScriptReact"), "TypeScriptReact");
+        assert_eq!(syntax_name("jsx"), "TypeScriptReact");
+        assert_eq!(syntax_name("js"), "JavaScript");
+        assert!(find_syntax("yaml").is_some());
+        assert!(find_syntax("json").is_some());
+        assert!(find_syntax("html").is_some());
+    }
+
+    fn scopes_at_end(language: &str, text: &str) -> Vec<String> {
+        let syntax = find_syntax(language).unwrap_or_else(|| panic!("no syntax for {language}"));
+        let mut parser = ParseState::new(syntax);
+        let mut scopes = ScopeStack::new();
+        for line in LinesWithEndings::from(text) {
+            let operations = parser
+                .parse_line(line, &SYNTAX_SET)
+                .unwrap_or_else(|error| panic!("{language}: {error}"));
+            for (_, operation) in operations {
+                scopes
+                    .apply(&operation)
+                    .unwrap_or_else(|error| panic!("{language}: {error}"));
+            }
+        }
+        scopes
+            .scopes
+            .iter()
+            .map(|scope| scope.build_string())
+            .collect()
+    }
+
+    /// A generic, a JSX element and a template literal that ends on a backtick
+    /// used to leave the JavaScript grammar inside a string for every line
+    /// after it.
+    #[test]
+    fn tsx_generic_jsx_and_template_literal_do_not_stick_in_a_string() {
+        let text = "\
+export function Card({ className = '', ...props }: ComponentProps<'article'>) {\n\
+  return <article className={`card ${className}`} {...props} />;\n\
+}\n\
+const ready = 1;\n";
+        for language in ["tsx", "jsx", "TypeScriptReact"] {
+            let scopes = scopes_at_end(language, text);
+            assert!(
+                scopes.iter().all(|scope| !scope.starts_with("string")),
+                "{language} stayed inside a string: {scopes:?}"
+            );
+            let names = highlight_names(language, text);
+            assert!(
+                names.contains(&("return", "keyword")),
+                "{language}: {names:?}"
+            );
+            assert!(
+                names.contains(&("const", "keyword")),
+                "{language}: {names:?}"
+            );
+            assert!(names.contains(&("1", "number")), "{language}: {names:?}");
+            assert!(
+                !names
+                    .iter()
+                    .any(|(snippet, name)| *name == "string" && snippet.contains("ready")),
+                "{language}: {names:?}"
+            );
+        }
     }
 }
