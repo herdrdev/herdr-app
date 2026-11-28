@@ -1252,10 +1252,17 @@ fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
         Some("this.hosts = Array.from({length: 30}, (_, i) => ({alias: `host-${i}`, aliases: []}));"),
     ).unwrap();
     let scroll = tree.lines().find(|line| line.contains("ma-hosts")).unwrap();
-    assert!(scroll.contains("overflow_y_scroll") && !scroll.contains("overflow_y_scrollbar"), "{tree}");
+    assert!(scroll.contains("overflow_y_scroll"), "{tree}");
     assert!(scroll.contains(".min_h[Number(0.0)]"), "{tree}");
+    let bar = tree.lines().find(|line| line.contains("Scrollbar \"ma-hosts\"")).expect("the host list needs a scrollbar");
+    assert!(bar.contains("always"), "{bar}");
     assert!(tree.contains("ma-row-host-29"), "{tree}");
     assert_eq!(tree.matches(".flex_none").count(), 60, "rows must not shrink into the viewport: {tree}");
+
+    for setup in ["this.hosts = [];", "this.hosts = [{alias: 'host', aliases: []}]; this.added = [{name: 'host'}];"] {
+        let tree = describe(cx, &staged, "mods/machine-add", false, props(), updates("current", "current"), Some(setup)).unwrap();
+        assert!(!tree.contains("Scrollbar \"ma-hosts\""), "no available hosts: {tree}");
+    }
 }
 
 #[gpui::test]
