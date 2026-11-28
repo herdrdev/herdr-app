@@ -797,12 +797,14 @@ fn person_text(person: &Person, previous: &str) -> std::io::Result<String> {
 ///
 /// Overlays (`popover`) take the window's opacity where the renderer can make
 /// them replace what's below (`REPLACES_BELOW`): they show the desktop, never
-/// the window's own text under them. Elsewhere they stay solid.
+/// the window's own text under them. Elsewhere they stay solid. A theme that
+/// sets `popover` itself keeps it: menus are the person's choice, not the
+/// window's.
 ///
 /// `raised` becomes the lift it paints as a tint (white on a dark theme, black
 /// on a light one), like `hover` and `selected`: a solid one would be the one
 /// opaque patch in a see-through dialog or card.
-fn see_through(theme: &mut Theme, opacity: f32) {
+fn see_through(theme: &mut Theme, opacity: f32, keep_popover: bool) {
     if let (Some((bg, _)), Some((raised, 255))) = (theme.get("background").and_then(|v| hex_parts(v)), theme.get("raised").and_then(|v| hex_parts(v))) {
         theme.insert("raised".to_owned(), tint(bg, raised));
     }
@@ -813,7 +815,7 @@ fn see_through(theme: &mut Theme, opacity: f32) {
             }
         }
     }
-    if REPLACES_BELOW {
+    if REPLACES_BELOW && !keep_popover {
         if let Some(v) = theme.get_mut("popover") {
             if let Some((rgb, _)) = hex_parts(v) {
                 *v = format!("#{rgb:06x}{:02x}", (opacity.clamp(0.0, 1.0) * 255.0).round() as u32);
@@ -855,7 +857,8 @@ pub fn set(s: Settings) -> bool {
         colors.extend(s.colors.clone());
         let mut theme = resolve(&p, &colors);
         if s.window_opacity < 1.0 {
-            see_through(&mut theme, s.window_opacity);
+            // A theme's own `popover` is kept: only the derived one follows the window.
+            see_through(&mut theme, s.window_opacity, colors.contains_key("popover"));
         }
         if *c.borrow().0 == s && *c.borrow().1 == theme {
             return false;
@@ -1203,7 +1206,7 @@ mod tests {
         assert_eq!(s.terminal_opacity, 0.0);
         let opaque = resolve(&GRAPHITE, &BTreeMap::new());
         let mut theme = opaque.clone();
-        see_through(&mut theme, 0.8);
+        see_through(&mut theme, 0.8, false);
         for name in ["background", "surface", "canvas", "chrome"] {
             assert_eq!(parse_hex(&theme[name]).unwrap().a, 0.0, "{name}");
             assert_eq!(rgb(&theme[name]), rgb(&opaque[name]), "{name}");
@@ -1218,10 +1221,21 @@ mod tests {
     }
 
     #[test]
-    fn see_through_leaves_a_value_that_is_no_color_as_written() {
-        let colors = [("background".to_owned(), "日本語x".to_owned())].into();
+    fn a_theme_that_sets_popover_keeps_it_in_a_see_through_window() {
+        let colors: BTreeMap<String, String> = [("popover".to_owned(), "#000000e6".to_owned())].into();
         let mut theme = resolve(&GRAPHITE, &colors);
-        see_through(&mut theme, 0.8);
+        see_through(&mut theme, 0.8, true);
+        assert_eq!(theme["popover"], "#000000e6");
+        // Without it, the derived popover follows the window.
+        let mut derived = resolve(&GRAPHITE, &BTreeMap::new());
+        see_through(&mut derived, 0.8, false);
+        assert!((parse_hex(&derived["popover"]).unwrap().a - if REPLACES_BELOW { 0.8 } else { 1.0 }).abs() < 0.01);
+    }
+
+    #[test]
+    fn see_through_leaves_a_value_that_is_no_color_as_written() {        let colors = [("background".to_owned(), "日本語x".to_owned())].into();
+        let mut theme = resolve(&GRAPHITE, &colors);
+        see_through(&mut theme, 0.8, false);
         assert_eq!(theme["background"], "日本語x");
     }
 
@@ -1231,7 +1245,7 @@ mod tests {
         let cleared = forms.map(|v| {
             let colors = [("background".to_owned(), v.to_owned())].into();
             let mut theme = resolve(&GRAPHITE, &colors);
-            see_through(&mut theme, 0.8);
+            see_through(&mut theme, 0.8, false);
             theme["background"].clone()
         });
         assert_eq!(cleared, ["#12345600"; 4]);

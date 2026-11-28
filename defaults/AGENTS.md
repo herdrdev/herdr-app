@@ -388,7 +388,8 @@ layout's look and a block can differ:
   that opacity. Terminals, cards and bars become see-through together, and
   `terminal_opacity` stops applying. On macOS dialogs and menus (`popover`)
   show the desktop at that opacity but hide the window's content under them;
-  elsewhere they stay solid. Nothing dims the window behind a dialog, so
+  elsewhere they stay solid. A theme that sets `popover` itself keeps its own
+  value, and menus stay as opaque as it says. Nothing dims the window behind a dialog, so
   dialogs, windows and popups hung from the top (the palette) take an
   `accent` border instead; menus at the pointer, toasts and `frame: "none"`
   overlays keep theirs. Cells a program colors stay solid too. A default background a program sets (OSC 11)
