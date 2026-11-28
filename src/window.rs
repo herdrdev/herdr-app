@@ -1609,8 +1609,9 @@ impl AppWindow {
                 }
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
-                TerminalEvent::ContextMenu(at) => {
-                    this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
+                TerminalEvent::ContextMenu(at, link) => {
+                    let target = json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr, "link": link });
+                    this.open_menu("pane", target, Some(*at), window, cx)
                 }
                 TerminalEvent::Notice { title, body } => this.error_notice(title, body, window, cx),
             });

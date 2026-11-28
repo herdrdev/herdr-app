@@ -314,6 +314,38 @@ pub struct Click {
 }
 
 impl Resolved<'_> {
+    /// The link as a terminal menu's `target.link` shows it: `{kind: "url", raw, url}`
+    /// or `{kind: "file", raw, path, line?, column?}`, like a link handler's view.
+    /// `path` is null when the file isn't on this computer: a remote terminal's
+    /// file (any path it prints, as this computer can't check it), or a
+    /// `file:` URL naming a file that isn't here.
+    pub fn describe(&self) -> Option<Value> {
+        let (raw, remote) = (self.raw, self.remote);
+        let file = |path: Option<&Path>| {
+            let mut link = json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)});
+            if !has_scheme(raw)
+                && let Some((line, column)) = place(raw, self.spelling)
+            {
+                link["line"] = line.into();
+                if let Some(column) = column {
+                    link["column"] = column.into();
+                }
+            }
+            link
+        };
+        match &self.native {
+            Some(Target::File(path)) => {
+                // Rebuilt from its components, `<cwd>/./x` reads `<cwd>/x`.
+                let path: PathBuf = path.components().collect();
+                Some(file((!remote).then_some(path.as_path())))
+            }
+            Some(Target::Url(_)) if handler_file_uri(raw).is_some() => Some(file(None)),
+            Some(Target::Url(url)) => Some(json!({"kind": "url", "raw": raw, "url": url})),
+            None if remote => Some(file(None)),
+            None => None,
+        }
+    }
+
     pub fn click(self, active: &Handlers) -> Option<Click> {
         let Self { raw, spelling, remote, native } = self;
         if active.is_empty() {
@@ -960,6 +992,33 @@ mod tests {
         assert_eq!(&text[range.clone()], "build.box/t1");
         assert_eq!(terminal_address(&text[range.clone()], "t2", ["box/t1"]), None);
         assert_eq!(terminal_address(&text[range], "t2", ["box/t1", "build.box/t1"]), Some("build.box/t1".into()));
+    }
+
+    #[test]
+    fn menu_links_describe_urls_and_existing_files() {
+        assert_eq!(resolve("https://herdr.dev/x", None, false).describe(), Some(json!({"kind":"url", "raw":"https://herdr.dev/x", "url":"https://herdr.dev/x"})));
+        let dir = std::env::temp_dir().join(format!("herdr-menu-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.md");
+        std::fs::write(&file, "").unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(resolve("notes.md", Some(&dir), false).describe(), Some(json!({"kind":"file", "raw":"notes.md", "path":path})));
+        assert_eq!(
+            resolve("./notes.md:12:3", Some(&dir), false).describe(),
+            Some(json!({"kind":"file", "raw":"./notes.md:12:3", "path":path, "line":12, "column":3}))
+        );
+        assert_eq!(resolve("notes.md", Some(&dir), true).describe(), Some(json!({"kind":"file", "raw":"notes.md", "path":null})));
+        assert_eq!(resolve("missing.md", Some(&dir), false).describe(), None);
+        // A remote terminal's paths can't be checked here: they count, without a path.
+        assert_eq!(
+            resolve("src/main.rs:9", Some(&dir), true).describe(),
+            Some(json!({"kind":"file", "raw":"src/main.rs:9", "path":null, "line":9}))
+        );
+        assert_eq!(
+            resolve("file:///nowhere/x.txt", None, false).describe(),
+            Some(json!({"kind":"file", "raw":"file:///nowhere/x.txt", "path":null}))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

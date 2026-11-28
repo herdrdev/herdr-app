@@ -71,7 +71,7 @@ export function playSound(sound: string): null;
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
- *   Pane menus get target { pane, terminal }.
+ *   Pane menus get target { pane, terminal, link }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
@@ -501,8 +501,17 @@ export interface LinkClick {
 /** Signature of the named handleLink export from link.js. */
 export type HandleLink = (click: LinkClick) => "handled" | "pass" | Promise<"handled" | "pass">;
 
+/** The link a terminal menu was opened on, in its `target.link`. `raw` is the destination
+ *  as printed or as an OSC 8 link names it; `text` is what shows on screen (an OSC 8 link's
+ *  label, else `raw`). `path` is absolute; null when the file isn't on this computer
+ *  (a remote terminal's path, or a `file:` URL naming a missing file). */
+export type TerminalMenuLink =
+  | { kind: "url"; raw: string; url: string; text: string }
+  | { kind: "file"; raw: string; path: string | null; line?: number; column?: number; text: string };
+
 /** The props this copy of the mod was given in the layout (or overlay).
- *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
+ *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string, link: TerminalMenuLink | null}, overlay: string}.
+ *  `link` is the URL or file under the pointer (as a Ctrl-click finds it), null when there is none.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
  *  Close the popup with closeOverlay(props().overlay). */
 /** Size is not a prop: root div/h_flex/v_flex.on_size_change reports logical px.

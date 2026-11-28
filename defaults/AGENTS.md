@@ -306,7 +306,12 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 `{"place":"none","overlay":{"width":280,"height":100}}`), then set the layout root's
 `"terminal_menu": "my-menu"`. It opens as a pointer popup, default 220×260 px;
 its `mod.json` overlay width/height override those defaults. It gets
-`props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
+`props()` = `{tab: "pane", target: {pane, terminal, link}, overlay}`.
+`target.link` is the URL or file under the pointer, found as a Ctrl-click
+finds it, else null: `{kind: "url", raw, url, text}` or `{kind: "file", raw,
+path, line?, column?, text}`. `text` is what shows (an OSC 8 link's label);
+`path` is absolute; null when the file isn't on this computer (a remote
+terminal prints it, or a `file:` URL names a missing file). Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
 right-clicking a different terminal must act on the one clicked. A terminal
 shown outside a tab (a layout terminal block, a window) has no pane:

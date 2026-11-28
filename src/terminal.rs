@@ -77,7 +77,9 @@ pub enum TerminalEvent {
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
-    ContextMenu(Point<Pixels>),
+    /// A right-click at a window position, with the link under it as
+    /// [`links::Resolved::describe`] shows it, plus its on-screen `text`.
+    ContextMenu(Point<Pixels>, Option<Value>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
 }
@@ -1209,6 +1211,37 @@ impl TerminalView {
         // OSC 8 bypasses text detection. The URI is already the full destination.
         let target = target.or_else(|| links::resolve(&hit.target, cwd, remote).click(&active).map(LinkTarget::External))?;
         Some((target, hit.spans))
+    }
+
+    /// The URL or file under a window position, for the terminal menu. Found as
+    /// a Ctrl-click finds it without link mods; terminal addresses aren't links here.
+    fn menu_link(&self, pos: Point<Pixels>) -> Option<Value> {
+        let g = self.grid.borrow();
+        let (x, y) = local(&g, pos);
+        let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
+        let cwd = self.cwd.as_deref();
+        // A remote terminal's files aren't here to check: a path it prints on one
+        // line counts. Lines it broke join only into a file that exists here, as
+        // for Ctrl-click: an unchecked join glues the next line's words on.
+        let remote = self.address.contains('/');
+        use vt::LinkScan;
+        let hit = g.vt.link_at(col as u16, row as u16, |text, at, scan| {
+            let range = links::find(text, at)?;
+            // A terminal address peeks; it isn't a link to copy.
+            if crate::mods::terminal_address(&text[range.clone()], &self.address).is_some() {
+                return None;
+            }
+            let native = links::resolve(&text[range.clone()], cwd, remote).native;
+            match scan {
+                LinkScan::Plain => remote || native.is_some(),
+                LinkScan::Joined => matches!(native, Some(links::Target::File(_))),
+                LinkScan::Unresolved => false,
+            }
+            .then_some(range)
+        })?;
+        let mut link = links::resolve(&hit.target, cwd, remote).describe()?;
+        link["text"] = hit.text.into();
+        Some(link)
     }
 
     /// Starts a mouse selection. With `extend` (a single Shift+click) and a selection on
@@ -2670,7 +2703,8 @@ impl Render for TerminalView {
                 if this.right_click_to_program && this.takes_mouse(ev.modifiers) {
                     this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
                 } else {
-                    cx.emit(TerminalEvent::ContextMenu(ev.position));
+                    let link = this.menu_link(ev.position);
+                    cx.emit(TerminalEvent::ContextMenu(ev.position, link));
                 }
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
@@ -3003,6 +3037,50 @@ mod tests {
             let Some(LinkTarget::External(file)) = hit(view, 5.0, 3.0) else { panic!("missing joined link") };
             assert_eq!(file.handlers[0].1["raw"], "./abc/defg/x.png");
             assert_eq!(file.native, Some(links::Target::File(joined)));
+        });
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[gpui::test]
+    fn the_menu_link_is_the_url_or_file_under_the_pointer(cx: &mut gpui::TestAppContext) {
+        use super::TerminalView;
+        use gpui::*;
+
+        let cwd = std::env::temp_dir().join(format!("herdr-terminal-menu-link-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let file = cwd.join("docs/plan.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        let view = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 4), cx));
+        view.update(cx, |view, _| {
+            view.cwd = Some(cwd.clone());
+            view.grid.borrow_mut().vt.write(b"wrote docs/plan.md:4 ok\r\n\x1b]8;;https://herdr.dev\x1b\\docs\x1b]8;;\x1b\\ and peer.test/t7");
+            let at = |col: f32, row: f32| view.menu_link(point(px(9.0 * col + 1.0), px(18.0 * row + 1.0)));
+            // The path as the platform writes it (`docs\\plan.md` on Windows).
+            let path: std::path::PathBuf = file.components().collect();
+            assert_eq!(
+                at(8.0, 0.0),
+                Some(json!({"kind":"file", "raw":"docs/plan.md:4", "path":path.to_str().unwrap(), "line":4, "text":"docs/plan.md:4"}))
+            );
+            assert_eq!(at(1.0, 1.0), Some(json!({"kind":"url", "raw":"https://herdr.dev", "url":"https://herdr.dev", "text":"docs"})));
+            assert_eq!(at(1.0, 0.0), None);
+            // A terminal address peeks on Ctrl-click but isn't a link to copy.
+            crate::mods::publish_terminals(json!([{"address":"peer.test/t7"}]));
+            assert_eq!(at(12.0, 1.0), None);
+            crate::mods::publish_terminals(json!([]));
+        });
+        // A remote terminal's file isn't here: it still counts, without a path.
+        let remote = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "box/t1".into(), (40, 4), cx));
+        remote.update(cx, |view, _| {
+            view.cwd = Some("/home/me/project".into());
+            view.grid.borrow_mut().vt.write(b"edited src/main.rs:9 ok");
+            let link = view.menu_link(point(px(9.0 * 9.0 + 1.0), px(1.0)));
+            assert_eq!(link, Some(json!({"kind":"file", "raw":"src/main.rs:9", "path":null, "line":9, "text":"src/main.rs:9"})));
+            // A live terminal address there still peeks rather than reading as a file.
+            view.grid.borrow_mut().vt.write(b"\r\nsee peer.test/t7 now");
+            crate::mods::publish_terminals(json!([{"address":"peer.test/t7"}]));
+            assert_eq!(view.menu_link(point(px(9.0 * 5.0 + 1.0), px(18.0 + 1.0))), None);
+            crate::mods::publish_terminals(json!([]));
         });
         std::fs::remove_dir_all(cwd).unwrap();
     }
