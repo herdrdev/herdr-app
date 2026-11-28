@@ -72,7 +72,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.scroll", &[opt("lines"), opt("pages"), opt("to"), opt("terminal")], "Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: \"top\" (oldest history) or \"bottom\" (the live screen). This scrolls Herdr's view, not the program."),
     cmd("terminal.send_key", &[req("keys"), opt("terminal")], "Send one key in keys.json syntax, such as ctrl-b, to a terminal (default: the focused one). It uses the program's current keyboard mode and goes through the same connection as typing. The terminal must have a view."),
     cmd("terminal.paste", &[], "Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it)."),
-    cmd("terminal.paste_image", &[], "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal."),
+    cmd("terminal.paste_image", &[], "Ctrl+V sends a clipboard image to a remote terminal as a file. It also pastes clipboard text on Windows and into remote terminals from Linux. Otherwise the program receives Ctrl+V."),
     cmd("terminal.search", &[], "Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal."),
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),
     cmd("agent.next", &[], "Show the next agent, in the order the agents list shows them."),
