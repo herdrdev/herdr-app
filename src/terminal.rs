@@ -1065,7 +1065,6 @@ impl TerminalView {
     }
 
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
         let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows, crate::settings::get().terminal_scroll_speed);
         let n = steps.y.unsigned_abs() as usize;
@@ -1074,6 +1073,7 @@ impl TerminalView {
         }
         let up = steps.y > 0;
         if g.vt.mouse_tracking() {
+            cx.stop_propagation();
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, ev.modifiers, x, y, size);
             if let Some(ch) = g.channel {
@@ -1082,6 +1082,7 @@ impl TerminalView {
         } else if n == 0 {
             return;
         } else if g.vt.alt_screen() {
+            cx.stop_propagation();
             let key = if up { GHOSTTY_KEY_ARROW_UP } else { GHOSTTY_KEY_ARROW_DOWN };
             let mut out = Vec::new();
             for _ in 0..n {
@@ -1091,6 +1092,7 @@ impl TerminalView {
                 g.core.input(ch, &out);
             }
         } else {
+            cx.stop_propagation();
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
         drop(g);

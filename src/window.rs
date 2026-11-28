@@ -19,6 +19,7 @@ use crate::layout_sync;
 use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_base::{ElementExt as _, InteractiveElementExt as _, h_flex};
 use herdr_shell::action::ShellAction;
 use herdr_shell::{ShellRoot, ShellRuntime, Watcher};
 use serde_json::{Value, json};
@@ -287,7 +288,7 @@ struct Term {
 }
 
 enum TerminalChange {
-    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
+    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis, canvas_width: Option<f32> },
     Park,
 }
 
@@ -368,6 +369,8 @@ struct Drag {
     container: String,
     index: usize,
     axis: Axis,
+    canvas_column: bool,
+    min_width: f32,
 }
 
 #[derive(Default)]
@@ -426,6 +429,8 @@ pub struct AppWindow {
     seen: BTreeSet<String>,
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     hidden_fit: pane_size::HiddenFit,
+    canvas_scrolls: RefCell<HashMap<String, ScrollHandle>>,
+    canvas_reveal_pane: RefCell<Option<String>>,
     drag: Option<Drag>,
     written_layout: String,
     /// The shown layout as its file has it; `chrome` is this plus the clicks
@@ -558,6 +563,8 @@ impl AppWindow {
             seen,
             bounds: Default::default(),
             hidden_fit: Default::default(),
+            canvas_scrolls: RefCell::new(HashMap::new()),
+            canvas_reveal_pane: RefCell::new(None),
             drag: None,
             written_layout: String::new(),
             file_chrome: default_layout("main"),
@@ -2777,6 +2784,22 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
+    fn canvas_options(&self) -> Option<(f32, f32)> {
+        self.chrome.visible_blocks().into_iter().find_map(|n| match n.content() {
+            Some(Content::Context { canvas: Some(cfg), .. }) => cfg.options(),
+            _ => None,
+        })
+    }
+
+    fn canvas_scroll_for(&self, tab_id: &str) -> ScrollHandle {
+        let mut map = self.canvas_scrolls.borrow_mut();
+        map.entry(tab_id.to_owned()).or_insert_with(ScrollHandle::new).clone()
+    }
+
+    fn reveal_canvas_pane(&self, pane: &str) {
+        *self.canvas_reveal_pane.borrow_mut() = Some(pane.to_owned());
+    }
+
     fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
@@ -2796,6 +2819,28 @@ impl AppWindow {
         Ok(json!({ "pane": new, "terminal": addr }))
     }
 
+    fn add_canvas_column(&mut self, pane: Option<String>, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+        let Some((col_w, _)) = self.canvas_options() else {
+            return self.split(pane, Axis::Row, argv, folder, window);
+        };
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane in active tab")?;
+        let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
+        let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
+        let target_addr = self.model.address_of(&target);
+        let follow = folder.is_none();
+        let cwd = folder.unwrap_or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(fallback));
+        let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
+        let new = self.model.fresh_id_on("p", on.as_deref());
+        let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
+        root.insert_column(root.column_index_of(&target).map(|i| i + 1), Node::block(new.clone(), Content::Terminal { terminal: String::new() }), col_w);
+        let size = self.model.active_tab().filter(|tab| tab.id == ctx)
+            .and_then(|_| self.initial_size(&root, &new, window));
+        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        self.model.add_canvas_column(&target, model::pane(&new, &addr), col_w);
+        self.reveal_canvas_pane(&new);
+        Ok(json!({ "pane": new, "terminal": addr }))
+    }
+
     /// A mod as a pane beside the target (a viewer next to the shell).
     fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
@@ -2812,6 +2857,24 @@ impl AppWindow {
         Ok(json!({ "pane": new }))
     }
 
+    fn add_canvas_mod_column(&mut self, pane: Option<String>, name: String, props: Value) -> Result<Value, String> {
+        let Some((col_w, _)) = self.canvas_options() else {
+            return self.split_mod(pane, Axis::Row, name, props);
+        };
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane in active tab")?;
+        if self.model.tab_of(&target).is_none() {
+            return Err(format!("no pane {target:?}"));
+        }
+        if self.view_mod(&name).is_none() {
+            return Err(format!("no mod {name:?} in mods/"));
+        }
+        let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
+        self.require_document(machine.as_deref())?;
+        let new = self.model.fresh_id_on("p", machine.as_deref());
+        self.model.add_canvas_column(&target, Node::block(new.clone(), Content::Mod { name, props }), col_w);
+        self.reveal_canvas_pane(&new);
+        Ok(json!({ "pane": new }))
+    }
     /// Ask only whether a missing terminal is closed. Core owns restarting it.
     fn check_closed(&mut self, missing: Vec<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
         self.checking_closed = true;
@@ -2876,16 +2939,17 @@ impl AppWindow {
             return Err("A terminal's pane must stay on its own machine.".into());
         }
         self.require_document(machine.as_deref())?;
-        let target = matches!(place, "right" | "down").then(|| self.model.focused_pane()).flatten();
+        let target = matches!(place, "right" | "down" | "canvas").then(|| self.model.focused_pane()).flatten();
         let ctx = target.as_deref().and_then(|p| self.model.tab_of(p)).map(|t| t.id.clone())
             .unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let name = self.live.get(addr).and_then(|r| r["name"].as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
             .or_else(|| self.model.agents.get(addr).and_then(|a| a.app.as_deref()).map(crate::programs::name)).unwrap_or_else(|| addr.to_owned());
         let (address, place) = (addr.to_owned(), place.to_owned());
+        let canvas_width = (place == "canvas").then(|| self.canvas_options().map(|(w, _)| w)).flatten();
         let reply = json!({"pending":true,"terminal":addr,"pane":pane,"tab":ctx});
         self.start_terminal_change(address, TerminalChange::Keep {
-            space, tab: ctx, pane, name, target, axis: if place == "right" { Axis::Row } else { Axis::Column },
+            space, tab: ctx, pane, name, target, axis: if place == "down" { Axis::Column } else { Axis::Row }, canvas_width,
         }, window, cx);
         Ok(reply)
     }
@@ -2939,7 +3003,7 @@ impl AppWindow {
             return;
         }
         match change {
-            TerminalChange::Keep { space, tab, pane, name, target, axis } => {
+            TerminalChange::Keep { space, tab, pane, name, target, axis, canvas_width } => {
                 if !self.live.contains_key(&address) { return; }
                 if self.model.space(&space).is_none() {
                     if let Err(error) = self.park_terminal(&address, window, cx) {
@@ -2951,12 +3015,19 @@ impl AppWindow {
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
-                        self.model.split(&target, axis, &pane, &address);
+                        if let Some(col_w) = canvas_width {
+                            self.model.add_canvas_column(&target, model::pane(&pane, &address), col_w);
+                        } else {
+                            self.model.split(&target, axis, &pane, &address);
+                        }
                     } else {
                         self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
                     }
                 }
-                if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
+                if let Some(pane) = self.model.pane_of(&address) {
+                    self.model.focus_pane(&pane);
+                    self.reveal_canvas_pane(&pane);
+                }
             }
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
@@ -3319,14 +3390,20 @@ impl AppWindow {
             }
             // ---- panes
             "pane.split" => {
-                let axis = match Self::arg(a, "direction") {
-                    Some("right") => Axis::Row,
-                    Some("down") => Axis::Column,
-                    other => return self.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
-                };
-                let r = match Self::owned(a, "mod") {
-                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
+                let dir = Self::arg(a, "direction");
+                let r = match dir {
+                    Some("canvas") => match Self::owned(a, "mod") {
+                        Some(name) => self.add_canvas_mod_column(Self::owned(a, "pane"), name, a.get("props").cloned().unwrap_or(Value::Null)),
+                        None => self.add_canvas_column(Self::owned(a, "pane"), Self::argv(a), None, window),
+                    },
+                    Some("right") | Some("down") => {
+                        let axis = if dir == Some("right") { Axis::Row } else { Axis::Column };
+                        match Self::owned(a, "mod") {
+                            Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
+                            None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
+                        }
+                    }
+                    other => return self.fail(format!("pane.split direction is \"right\", \"down\", or \"canvas\", not {other:?}")),
                 };
                 self.answer(r);
             }
@@ -3369,6 +3446,7 @@ impl AppWindow {
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
                 self.focused_block = None;
                 self.model.focus_pane(&p);
+                self.reveal_canvas_pane(&p);
                 self.focused_pane = None;
                 self.agent = self.model.address_of(&p);
                 self.swapped.remove(&p);
@@ -3412,6 +3490,7 @@ impl AppWindow {
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
+                    "canvas" => self.add_canvas_column(None, argv, Self::owned(a, "folder"), window),
                     "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
                     "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
                     _ => {
@@ -3856,6 +3935,7 @@ impl AppWindow {
         }
         self.focused_block = None;
         self.model.focus_pane(&to);
+        self.reveal_canvas_pane(&to);
         self.focused_pane = None;
         self.sync(window, cx);
     }
@@ -3918,37 +3998,47 @@ impl AppWindow {
             let root = &tab.root;
             let path = root.path_to(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
             let mut found = None;
+            let canvas_min = self.canvas_options().map(|(_, min_w)| min_w);
             for i in (0..path.len().saturating_sub(1)).rev() {
                 let Some(node) = root.find(&path[i]) else { continue };
                 if node.axis() != Some(axis) || !node.resizable() {
                     continue;
                 }
+                let is_canvas_root = axis == Axis::Row && node.id == root.id && canvas_min.is_some();
                 let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
-                if shown.len() < 2 {
+                if shown.len() < 2 && !is_canvas_root {
                     continue;
                 }
                 let Some(idx) = shown.iter().position(|c| c.id == path[i + 1]) else { continue };
-                let index = if sign > 0.0 {
+                let index = if is_canvas_root {
+                    idx
+                } else if sign > 0.0 {
                     if idx + 1 < shown.len() { idx } else { idx - 1 }
                 } else if idx > 0 {
                     idx - 1
                 } else {
                     idx
                 };
-                found = Some((node.id.clone(), index, shown[index].id.clone()));
+                found = Some((node.id.clone(), index, shown[index].id.clone(), is_canvas_root));
                 break;
             }
             found
         };
         // Nothing split that way: a no-op, like a keyboard resize in a terminal multiplexer.
-        let Some((container, index, a_id)) = found else { return Ok(()) };
+        let Some((container, index, a_id, is_canvas_root)) = found else { return Ok(()) };
         let b = self.bounds.borrow().get(&a_id).copied().ok_or("that pane isn't on screen")?;
         let delta = px(sign * amount * settings::zoom());
         let pos = match axis {
             Axis::Row => point(b.right() + delta, b.top()),
             Axis::Column => point(b.left(), b.bottom() + delta),
         };
-        self.drag = Some(Drag { container, index, axis });
+        self.drag = Some(Drag {
+            container,
+            index,
+            axis,
+            canvas_column: is_canvas_root,
+            min_width: self.canvas_options().map(|(_, m)| m).unwrap_or(24.0),
+        });
         self.drag_to(pos);
         self.drag = None;
         Ok(())
@@ -4740,7 +4830,10 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
+                Some(c) => match self.canvas_options().filter(|_| c.zoomed.is_none()) {
+                    Some((col_w, min_w)) => self.render_canvas_tab(c, col_w, min_w, focused, self.pane_frame(), rendered_dividers, cx),
+                    None => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
+                },
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4828,6 +4921,221 @@ impl AppWindow {
         row.into_any_element()
     }
 
+    fn canvas_reveal_delta(start: Pixels, end: Pixels, near: Pixels, far: Pixels) -> Pixels {
+        if start < near {
+            near - start
+        } else if end > far {
+            (far - end).max(near - start)
+        } else {
+            px(0.0)
+        }
+    }
+
+    fn render_canvas_tab(
+        &self,
+        tab: &Tab,
+        col_w: f32,
+        min_w: f32,
+        focused: &HashSet<String>,
+        frame: Option<&PaneFrame>,
+        rendered_dividers: &mut HashSet<(String, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let n = &tab.root;
+        let shown: Vec<&Node> = n.children().iter().filter(|c| !c.hidden).collect();
+        let gap = pane_size::gap(n, frame);
+        let scroll = self.canvas_scroll_for(&tab.id);
+        let bounds_map = self.bounds.clone();
+        let root_id = n.id.clone();
+
+        let mut row = h_flex()
+            .id(SharedString::from(format!("canvas-row-{}", tab.id)))
+            .h_full()
+            .w_auto()
+            .min_w_full()
+            .flex_grow_1()
+            .flex_shrink_0()
+            .child(canvas(move |b, _, _| { bounds_map.borrow_mut().insert(root_id, b); }, |_, _, _, _| {}).absolute().size_full());
+
+        for (i, child) in shown.iter().enumerate() {
+            let mut slot = div().relative().flex().h_full().min_h_0();
+            if shown.len() == 1 && !matches!(child.size, Some(Span::Px { .. })) {
+                slot = slot.flex_1().min_w(settings::z(min_w));
+            } else {
+                let w = match child.size {
+                    Some(Span::Px { px }) => px.max(min_w),
+                    _ => col_w.max(min_w),
+                };
+                slot = slot.flex_grow(w).flex_shrink_0().flex_basis(settings::z(w)).min_w(settings::z(w));
+            }
+            row = row.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
+            let has_next = i + 1 < shown.len();
+            row = row.child(self.canvas_separator(n, gap, i, min_w, has_next, rendered_dividers, cx));
+        }
+
+        if self.pane_drag.as_ref().is_some_and(|d| d.moving) {
+            let bounds_map = self.bounds.clone();
+            let end_id = pane_drag::CANVAS_END_DROP.to_owned();
+            row = row.child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(settings::z(88.0))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_color(c("border"))
+                    .rounded(settings::z(8.0))
+                    .text_size(settings::z(11.5))
+                    .text_color(c("dim"))
+                    .child("+ Column")
+                    .child(canvas(move |b, _, _| { bounds_map.borrow_mut().insert(end_id, b); }, |_, _, _, _| {}).absolute().size_full()),
+            );
+        }
+
+        if let Some(target_pane) = self.canvas_reveal_pane.borrow_mut().take()
+            && let Some(col_idx) = n.column_index_of(&target_pane)
+            && let Some(col_node) = n.children().get(col_idx)
+        {
+            let col_id = col_node.id.clone();
+            let bounds_map = self.bounds.clone();
+            let area = scroll.clone();
+            row = row.on_prepaint(move |_, window, _| {
+                let Some(col_bounds) = bounds_map.borrow().get(&col_id).copied() else { return };
+                let vp = area.bounds();
+                if vp.size.width <= px(0.0) {
+                    return;
+                }
+                let dx = Self::canvas_reveal_delta(col_bounds.left(), col_bounds.right(), vp.left(), vp.right());
+                if dx != px(0.0) {
+                    let mut off = area.offset();
+                    off.x += dx;
+                    window.on_next_frame(move |window, _| {
+                        area.set_offset(off);
+                        window.refresh();
+                    });
+                }
+            });
+        }
+
+        let scroll_area = div()
+            .id(SharedString::from(format!("canvas-scroll-{}", tab.id)))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_row()
+            .overflow_x_scroll()
+            .track_scroll(&scroll)
+            .lock_scroll_axis()
+            .child(row);
+
+        let clear = gpui::transparent_black();
+        let thumb = c("foreground").opacity(0.14);
+        let thumb_hover = c("foreground").opacity(0.32);
+        let thumb_active = c("foreground").opacity(0.48);
+        let scrollbar = div()
+            .relative()
+            .w_full()
+            .h(settings::z(6.0))
+            .mt(settings::z(2.0))
+            .flex_none()
+            .child(
+                gpui_base::Scrollbar::horizontal(&scroll)
+                    .id(SharedString::from(format!("canvas-sb-{}", tab.id)))
+                    .viewport_from_layout()
+                    .mode(gpui_base::ScrollbarMode::Always)
+                    .styles(move |s| {
+                        s.track(move |t| t.bg(clear).border_color(clear).width(px(6.0)))
+                            .track_hover(move |t| t.bg(clear).border_color(clear).width(px(6.0)))
+                            .track_active(move |t| t.bg(clear).border_color(clear).width(px(6.0)))
+                            .thumb(move |t| t.bg(thumb).width(px(2.5)).inset(px(1.5)).radius(px(99.0)))
+                            .thumb_hover(move |t| t.bg(thumb_hover).width(px(3.5)).inset(px(1.0)).radius(px(99.0)))
+                            .thumb_active(move |t| t.bg(thumb_active).width(px(3.5)).inset(px(1.0)).radius(px(99.0)))
+                    }),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(scroll_area)
+            .child(scrollbar)
+            .into_any_element()
+    }
+
+    fn canvas_separator(
+        &self,
+        n: &Node,
+        gap: f32,
+        index: usize,
+        min_width: f32,
+        has_next: bool,
+        rendered_dividers: &mut HashSet<(String, usize)>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let zoom = settings::zoom();
+        let resizable = n.resizable();
+        let width = if has_next { pane_size::separator_width(n, gap).max(6.0) } else { 8.0 } * zoom;
+        let hover_key = (resizable && n.divider.as_ref().is_some_and(|d| d.hover.is_some()))
+            .then(|| (n.id.clone(), index));
+        let hovered = self.divider_window_hovered && self.drag.is_none()
+            && hover_key.as_ref().is_some_and(|key| self.divider_hover.contains(key));
+        let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.canvas_column);
+        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
+        let mut sep = div().flex_none().relative().w(px(width)).h_full().flex().items_center().justify_center();
+        if let Some((w, color)) = line && has_next {
+            sep = sep.child(separator_line(true, w, color, 0.0));
+        }
+        if resizable {
+            let container = n.id.clone();
+            let hit = HANDLE.max(width);
+            let handle = div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px((width - hit) / 2.0))
+                .w(px(hit))
+                .cursor_col_resize()
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    if let Some(space) = this.model.space_of(&container)
+                        && this.require_document(space.machine.as_deref()).is_err() { return; }
+                    this.drag = Some(Drag {
+                        container: container.clone(),
+                        index,
+                        axis: Axis::Row,
+                        canvas_column: true,
+                        min_width,
+                    });
+                    cx.stop_propagation();
+                    cx.notify();
+                }));
+            if let Some(key) = hover_key {
+                let epoch = self.divider_hover_epoch;
+                let id = SharedString::from(format!("canvas-divider-{epoch}-{}-{index}", n.id));
+                rendered_dividers.insert(key.clone());
+                sep = sep.child(handle.id(id).on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    if this.divider_hover_epoch != epoch {
+                        return;
+                    }
+                    let changed = if *over {
+                        this.divider_hover.insert(key.clone())
+                    } else {
+                        this.divider_hover.remove(&key)
+                    };
+                    if changed {
+                        cx.notify();
+                    }
+                })));
+            } else {
+                sep = sep.child(handle);
+            }
+        }
+        sep.into_any_element()
+    }
+
     fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
@@ -4861,7 +5169,7 @@ impl AppWindow {
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
                     if let Some(space) = this.model.space_of(&container)
                         && this.require_document(space.machine.as_deref()).is_err() { return; }
-                    this.drag = Some(Drag { container: container.clone(), index, axis });
+                    this.drag = Some(Drag { container: container.clone(), index, axis, canvas_column: false, min_width: 24.0 });
                     cx.stop_propagation();
                     if tracks_drag_color {
                         cx.notify();
@@ -4903,10 +5211,32 @@ impl AppWindow {
 
     fn drag_to(&mut self, pos: Point<Pixels>) {
         let Some(d) = &self.drag else { return };
-        let (container, index, axis) = (d.container.clone(), d.index, d.axis);
+        let (container, index, axis, canvas_column, min_width) = (d.container.clone(), d.index, d.axis, d.canvas_column, d.min_width);
         let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
         if !node.resizable() { return; }
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
+        if canvas_column {
+            let Some(a) = shown.get(index) else { return };
+            let bounds = self.bounds.borrow();
+            let Some(ba) = bounds.get(&a.id).copied() else { return };
+            drop(bounds);
+            let zoom = settings::zoom();
+            let mut new_w = ((f32::from(pos.x) - f32::from(ba.left())) / zoom).max(min_width);
+            if let Some(min) = a.min {
+                new_w = new_w.max(min);
+            }
+            if let Some(max) = a.max {
+                new_w = new_w.min(max);
+            }
+            let a_id = a.id.clone();
+            let Some(parent) = self.find_node_mut(&container) else { return };
+            if let Some(children) = parent.children_mut()
+                && let Some(n) = children.iter_mut().find(|n| n.id == a_id)
+            {
+                n.size = Some(Span::Px { px: new_w.round() });
+            }
+            return;
+        }
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
@@ -5420,7 +5750,7 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
-        "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
+        "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down" | "canvas")),
         _ => false,
     }
 }
@@ -8521,5 +8851,118 @@ export default class Probe extends View { render() { return div().child("probe")
             "popup lost its left margin: left = {:?}",
             bounds.left(),
         );
+    }
+
+    #[test]
+    fn canvas_mode() {
+        in_own_process("canvas_mode_adds_resizes_splits_and_scrolls_columns");
+    }
+
+    #[gpui::test]
+    fn canvas_mode_adds_resizes_splits_and_scrolls_columns(cx: &mut TestAppContext) {
+        use serde_json::json;
+        if !running_alone("canvas_mode_adds_resizes_splits_and_scrolls_columns") {
+            return;
+        }
+        let layout = json!({
+            "id": "root",
+            "type": "row",
+            "children": [{
+                "id": "work",
+                "type": "block",
+                "content": {
+                    "tab": "active",
+                    "canvas": { "column_width": 800.0, "min_width": 240.0 },
+                    "pane": { "gap": 8, "lone": true }
+                }
+            }]
+        });
+        let (view, cx) = open_window(cx, "canvas-test", "", layout);
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        view.update_in(cx, |this, _window, cx| {
+            this.model.add_space(
+                "sp1",
+                "Canvas",
+                "/tmp",
+                super::Tab::new("tb1", "1", "p1", "t1"),
+            );
+            assert!(this.model.add_canvas_column("p1", super::model::pane("p2", "t2"), 300.0));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |this, _| {
+            let tab = this.model.tab("tb1").unwrap();
+            let vp_b = this.canvas_scroll_for("tb1").bounds();
+            let c1_b = this.bounds.borrow()[&tab.root.children()[1].id];
+            assert!(
+                (f32::from(vp_b.right()) - f32::from(c1_b.right())).abs() <= 16.0,
+                "two narrow columns should expand to fill viewport: vp={vp_b:?}, col1={c1_b:?}"
+            );
+        });
+        view.update_in(cx, |this, _window, cx| {
+            assert!(this.model.add_canvas_column("p2", super::model::pane("p3", "t3"), 800.0));
+            if let Some(col0) = this.model.tab_mut("tb1").unwrap().root.children_mut().and_then(|c| c.get_mut(0)) {
+                col0.size = Some(super::Span::Px { px: 800.0 });
+            }
+            if let Some(col1) = this.model.tab_mut("tb1").unwrap().root.children_mut().and_then(|c| c.get_mut(1)) {
+                col1.size = Some(super::Span::Px { px: 800.0 });
+            }
+            // Vertical split inside p2's column keeps 3 top-level columns while adding a nested split.
+            assert!(this.model.split("p2", super::Axis::Column, "p4", "t4"));
+            let tab = this.model.tab("tb1").unwrap();
+            assert_eq!(tab.root.children().len(), 3);
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 800.0 }));
+            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 800.0 }));
+            assert_eq!(tab.root.children()[1].axis(), Some(super::Axis::Column));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Resizing column 0 via canvas drag grows column 0 without shrinking column 2.
+        view.update(cx, |this, _| {
+            let tab = this.model.tab("tb1").unwrap();
+            let col0 = tab.root.children()[0].id.clone();
+            let col0_bounds = this.bounds.borrow()[&col0];
+            let target_x = col0_bounds.left() + px(950.0);
+            this.drag = Some(super::Drag {
+                container: tab.root.id.clone(),
+                index: 0,
+                axis: super::Axis::Row,
+                canvas_column: true,
+                min_width: 240.0,
+            });
+            this.drag_to(point(target_x, col0_bounds.top() + px(10.0)));
+            this.drag = None;
+            let tab = this.model.tab("tb1").unwrap();
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 950.0 }));
+            assert_eq!(tab.root.children()[2].size, Some(super::Span::Px { px: 800.0 }));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Horizontal wheel scrolling shifts the canvas scroll handle.
+        let scroll_pt = gpui::point(px(400.), px(300.));
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: scroll_pt,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-220.0), px(0.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let off_x = view.update(cx, |this, _| this.canvas_scroll_for("tb1").offset().x);
+        assert_eq!(off_x, px(-220.0), "horizontal wheel should scroll the canvas");
+
+        // Drag-moving p4 to Left of p1 promotes p4 into its own top-level Canvas column at index 0.
+        view.update(cx, |this, _| {
+            assert!(this.model.move_pane_canvas("p4", Some("p1"), Some(crate::layout::Edge::Left), 800.0));
+            let tab = this.model.tab("tb1").unwrap();
+            assert_eq!(tab.root.children().len(), 4);
+            assert_eq!(tab.root.children()[0].id, "p4");
+            assert_eq!(tab.root.children()[0].size, Some(super::Span::Px { px: 800.0 }));
+            assert_eq!(tab.root.children()[2].id, "p2");
+        });
     }
 }

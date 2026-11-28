@@ -2,11 +2,13 @@
 use super::*;
 use crate::layout::Edge;
 
+pub(super) const CANVAS_END_DROP: &str = "__canvas_end__";
+
 pub(super) struct PaneDrag {
     pane: String,
     tab: String,
     down: Point<Pixels>,
-    moving: bool,
+    pub(super) moving: bool,
     target: Option<(String, Option<Edge>)>,
 }
 
@@ -101,8 +103,18 @@ impl AppWindow {
         let d = self.pane_drag.as_ref()?;
         let tab = self.model.active_tab().filter(|t| t.id == d.tab && t.zoomed.is_none())?;
         let bounds = self.bounds.borrow();
-        tab.shown().visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != d.pane)
+        if let Some(hit) = tab.shown().visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != d.pane)
             .find_map(|n| Some((n.id.clone(), drop_zone(*bounds.get(&n.id)?, at)?)))
+        {
+            return Some(hit);
+        }
+        if self.canvas_options().is_some()
+            && let Some(end_bounds) = bounds.get(CANVAS_END_DROP)
+            && end_bounds.contains(&at)
+        {
+            return Some((CANVAS_END_DROP.to_owned(), Some(Edge::Right)));
+        }
+        None
     }
 
     fn pane_move(&mut self, at: Point<Pixels>, pressed: bool, cx: &mut Context<Self>) {
@@ -135,9 +147,17 @@ impl AppWindow {
         }
         if self.pane_movable(&d.pane)
             && let Some((target, edge)) = target
-            && self.model.move_pane(&d.pane, &target, edge)
         {
-            self.sync(window, cx);
+            let moved = if let Some((col_w, _)) = self.canvas_options() {
+                let target_opt = (target != CANVAS_END_DROP).then_some(target.as_str());
+                self.model.move_pane_canvas(&d.pane, target_opt, edge, col_w)
+            } else {
+                self.model.move_pane(&d.pane, &target, edge)
+            };
+            if moved {
+                self.reveal_canvas_pane(&d.pane);
+                self.sync(window, cx);
+            }
         }
         cx.defer_in(window, |this, window, cx| this.restore_focus(window, cx));
         cx.notify();
@@ -145,8 +165,28 @@ impl AppWindow {
     }
 
     pub(super) fn pane_drag_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let canvas_mode = self.canvas_options().is_some();
         let preview = self.pane_drag.as_ref().and_then(|d| d.target.as_ref()).and_then(|(id, edge)| {
-            let mut b = *self.bounds.borrow().get(id)?;
+            let bounds_map = self.bounds.borrow();
+            if id == CANVAS_END_DROP {
+                let b = *bounds_map.get(id)?;
+                return Some(div().absolute().left(b.origin.x).top(b.origin.y).w(b.size.width).h(b.size.height)
+                    .bg(c("accent").opacity(0.18)).border_2().border_color(c("accent")).into_any_element());
+            }
+            let mut b = *bounds_map.get(id)?;
+            if canvas_mode && matches!(edge, Some(Edge::Left | Edge::Right)) {
+                let col_b = self.model.active_tab()
+                    .and_then(|t| t.root.column_index_of(id).and_then(|idx| t.root.children().get(idx)))
+                    .and_then(|col| bounds_map.get(&col.id).copied())
+                    .unwrap_or(b);
+                let strip = settings::z(48.).min(col_b.size.width / 3.);
+                let x = match edge {
+                    Some(Edge::Left) => col_b.origin.x,
+                    _ => col_b.origin.x + col_b.size.width - strip,
+                };
+                return Some(div().absolute().left(x).top(col_b.origin.y).w(strip).h(col_b.size.height)
+                    .bg(c("accent").opacity(0.22)).border_2().border_color(c("accent")).into_any_element());
+            }
             match edge {
                 Some(Edge::Left) => b.size.width /= 2.,
                 Some(Edge::Right) => { b.size.width /= 2.; b.origin.x += b.size.width; }

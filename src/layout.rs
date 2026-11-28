@@ -9,6 +9,31 @@ use serde_json::Value;
 /// What a block shows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+pub enum Canvas {
+    Enabled(bool),
+    Config {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        column_width: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_width: Option<f32>,
+    },
+}
+
+impl Canvas {
+    pub fn options(&self) -> Option<(f32, f32)> {
+        match self {
+            Canvas::Enabled(false) => None,
+            Canvas::Enabled(true) => Some((680.0, 280.0)),
+            Canvas::Config { column_width, min_width } => Some((
+                column_width.unwrap_or(680.0).max(200.0),
+                min_width.unwrap_or(280.0).max(160.0),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
     Mod {
@@ -25,6 +50,8 @@ pub enum Content {
         tab: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane: Option<PaneFrame>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canvas: Option<Canvas>,
     },
     /// An agent's terminal, full size (`"focused"`: the selected agent).
     Agent { agent: String },
@@ -699,6 +726,26 @@ impl Node {
         }
         true
     }
+
+    /// Inserts `block` as a top-level column in a row container (`Tab.root`) at `index`,
+    /// promoting any unsized siblings to `col_width` so columns stay side-by-side without shrinking.
+    pub fn insert_column(&mut self, index: Option<usize>, mut block: Node, col_width: f32) -> bool {
+        let Some(children) = self.children_mut() else { return false };
+        for child in children.iter_mut() {
+            if !matches!(child.size, Some(Size::Px { .. })) {
+                child.size = Some(Size::Px { px: col_width });
+            }
+        }
+        block.size = Some(Size::Px { px: col_width });
+        let at = index.unwrap_or(children.len()).min(children.len());
+        children.insert(at, block);
+        true
+    }
+
+    /// Top-level column index containing `id` (direct child of `self`).
+    pub fn column_index_of(&self, id: &str) -> Option<usize> {
+        self.children().iter().position(|c| c.id == id || c.find(id).is_some())
+    }
 }
 
 fn active_child<'a>(children: &'a [Node], active: Option<&str>) -> Option<&'a Node> {
@@ -855,7 +902,7 @@ mod tests {
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.find("sidebar").unwrap().size, Some(Size::Px { px: 260.0 }));
         assert!(n.window_blur && !n.find("sidebar").unwrap().window_blur);
-        assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None }));
+        assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None, canvas: None }));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
     }

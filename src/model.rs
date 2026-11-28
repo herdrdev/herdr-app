@@ -347,6 +347,54 @@ impl Model {
         true
     }
 
+    /// Adds `block` as a top-level column in `target`'s tab (`Tab.root`), right after `target`'s column.
+    pub fn add_canvas_column(&mut self, target: &str, block: Node, col_width: f32) -> bool {
+        let new_pane = block.id.clone();
+        let Some(c) = self.tab_of_mut(target) else { return false };
+        let at = c.root.column_index_of(target).map(|i| i + 1);
+        if !c.root.insert_column(at, block, col_width) {
+            return false;
+        }
+        c.zoomed = None;
+        c.focus(&new_pane);
+        true
+    }
+
+    /// Canvas-aware drag rearrange: Left/Right (or None target) creates/moves a top-level Canvas column;
+    /// Top/Bottom splits vertically inside `target`'s column; None edge swaps panes.
+    pub fn move_pane_canvas(&mut self, source: &str, target: Option<&str>, edge: Option<crate::layout::Edge>, col_width: f32) -> bool {
+        use crate::layout::Edge;
+        match (target, edge) {
+            (Some(t), Some(Edge::Top | Edge::Bottom)) | (Some(t), None) => self.move_pane(source, t, edge),
+            (t, edge) => {
+                if t == Some(source) {
+                    return false;
+                }
+                let Some(tab) = self.tab_of(source) else { return false };
+                if !tab.root.find(source).is_some_and(Node::is_pane) {
+                    return false;
+                }
+                if let Some(t) = t && !tab.root.find(t).is_some_and(Node::is_pane) {
+                    return false;
+                }
+                let mut root = tab.root.clone();
+                let mut pane = root.remove(source).unwrap();
+                pane.size = None;
+                let at = t.and_then(|tid| root.column_index_of(tid)).map(|idx| match edge {
+                    Some(Edge::Left) => idx,
+                    _ => idx + 1,
+                });
+                if !root.insert_column(at, pane, col_width) {
+                    return false;
+                }
+                let tab = self.tab_of_mut(source).unwrap();
+                tab.root = root;
+                tab.focus(source);
+                true
+            }
+        }
+    }
+
     /// Rearranges existing panes in one tab without changing their terminal addresses.
     /// No edge swaps their places; an edge places the source beside the target.
     pub fn move_pane(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>) -> bool {
@@ -403,6 +451,12 @@ impl Model {
     pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
         let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
         c.root.remove(pane_id);
+        if c.root.children().len() == 1
+            && let Some(children) = c.root.children_mut()
+            && matches!(children[0].size, Some(crate::layout::Size::Px { .. }))
+        {
+            children[0].size = None;
+        }
         // One pane left is all there is to show: the zoom ends with the split.
         if c.zoomed.as_deref() == Some(pane_id) || c.root.panes().len() < 2 {
             c.zoomed = None;
