@@ -530,8 +530,10 @@ impl Model {
     /// Applies a status word from core (Herdr's seen rules).
     pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, looking: bool) -> bool {
         let a = self.agents.entry(address.to_owned()).or_insert_with(|| Agent { seen: true, ..Default::default() });
-        a.app = app.or(a.app.take());
-        if a.word == word {
+        let app = if word.is_none() { app } else { app.or_else(|| a.app.clone()) };
+        let identity_changed = a.app != app;
+        a.app = app;
+        if a.word == word && !identity_changed {
             return false;
         }
         let was_busy = matches!(a.word.as_deref(), Some("working" | "blocked"));
@@ -1041,6 +1043,29 @@ mod tests {
         m.remove_pane("x5");
         m.remove_pane("x2");
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn an_agent_returning_to_a_shell_clears_its_program_identity() {
+        let mut m = model_with_one();
+        m.set_word("t1", Some("working".into()), Some("codex".into()), false);
+        m.set_word("t1", Some("idle".into()), None, false);
+        assert_eq!(m.agents["t1"].app.as_deref(), Some("codex"), "status-only reports keep the current agent");
+        assert!(m.set_word("t1", None, None, false));
+        assert_eq!(m.status("t1"), None);
+        assert_eq!(m.agents["t1"].app, None);
+        assert!(!m.set_word("t1", None, None, false), "an unchanged shell sends no new model update");
+    }
+
+    #[test]
+    fn a_program_change_at_the_same_status_is_published() {
+        let mut m = model_with_one();
+        m.set_word("t1", Some("idle".into()), Some("codex".into()), true);
+        let before = m.agents["t1"].seq;
+        assert!(m.set_word("t1", Some("idle".into()), Some("claude-code".into()), true));
+        assert_eq!(m.agents["t1"].app.as_deref(), Some("claude-code"));
+        assert!(m.agents["t1"].seq > before);
+        assert!(!m.set_word("t1", Some("idle".into()), None, true));
     }
 
     #[test]
