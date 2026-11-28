@@ -58,7 +58,8 @@ An address such as `t7` means a terminal on the same machine as the terminal sho
 
 The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
-After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
+After a reboot or core crash, kept panes come back in their last folders.
+A program that tells the terminal how to resume it ([OSC 7577](https://www.superlogical.com/rex/docs/build/program-resume), pi does) starts again there; other panes get a fresh shell.
 
 ## Work on another machine
 

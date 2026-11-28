@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, terminals, exec, home, appHome, readTextFile } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -194,7 +194,7 @@ export default class Worktree extends View {
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = remove ? await this.remove() : await this.create(); }
+    try { this.error = remove ? await this.remove(cx) : await this.create(); }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
@@ -228,7 +228,7 @@ export default class Worktree extends View {
     else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
 
-  async remove() {
+  async remove(cx) {
     const s = this.space();
     const status = await git(this.repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on);
     if (!status.ok) return status.err || "git status failed.";
@@ -247,15 +247,20 @@ export default class Worktree extends View {
     const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 
-    // Git on a remote Windows machine reports a drive-letter or UNC path.
-    const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
-    const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
-    // A shell sitting in the folder can keep it busy on Windows.
-    if (windows) closeSpace();
+    if (s?.id) {
+      const tabs = new Set(s.tabs.map((tab) => tab.id));
+      this.closingTerminals = new Set(panes().filter((p) => p.terminal && tabs.has(p.tab)).map((p) => p.terminal));
+      run("space.close", { id: s.id, confirmed: true });
+    }
+    // Closing the space queues the kills. Wait for its programs to stop writing.
+    const deadline = Date.now() + 10_000;
+    while (this.closingTerminals?.size && terminals().some((t) => t.state === "live" && this.closingTerminals.has(t.address))) {
+      if (Date.now() >= deadline) return "The space's terminals haven't stopped yet. Press Enter to check again.";
+      await cx.sleep(50);
+    }
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
     if (!r.ok) return r.err || "git worktree remove failed.";
-    if (!windows) closeSpace();
     return "";
   }
 

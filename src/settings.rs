@@ -779,7 +779,7 @@ pub fn set(s: Settings) -> bool {
         if *c.borrow().0 == s && *c.borrow().1 == theme {
             return false;
         }
-        gpui_shell::set_pixel_scale(s.zoom);
+        herdr_shell::set_pixel_scale(s.zoom);
         *c.borrow_mut() = (Rc::new(s), Rc::new(theme));
         true
     })

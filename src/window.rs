@@ -19,8 +19,8 @@ use crate::layout_sync;
 use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_shell::action::ShellAction;
-use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
+use herdr_shell::action::ShellAction;
+use herdr_shell::{ShellRoot, ShellRuntime, Watcher};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1622,6 +1622,7 @@ impl AppWindow {
         let gone: Vec<String> = self.terms.keys().filter(|id| !want_terms.contains(*id)).cloned().collect();
         for id in gone {
             if let Some(t) = self.terms.remove(&id) {
+                mods::untrack_pane_view(&id);
                 t.view.read(cx).detach();
                 self.publish_selection(&t.address, window, cx);
             }
@@ -1976,6 +1977,7 @@ impl AppWindow {
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx), "pane_name": p.title,
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
+                        "since": self.live.get(addr).and_then(crate::hc::agent_since),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
@@ -2209,7 +2211,9 @@ impl AppWindow {
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
                     _ => format!("{name} is {state}"),
                 }));
-                self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                let slot = self.documents.entry(name.to_owned()).or_default();
+                slot.connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&machine["version"]);
             }
             if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
                 let mut view = crate::mirror::View::capture(&self.model);
@@ -2302,7 +2306,7 @@ impl AppWindow {
         for t in list.as_array_mut().into_iter().flatten() {
             let Some(obj) = t.as_object_mut() else { continue };
             let report = obj.remove("status").unwrap_or(Value::Null);
-            let word = report.get("state").cloned().unwrap_or_else(|| if report.is_string() { report.clone() } else { Value::Null });
+            let word = crate::hc::status_word(&report).clone();
             obj.insert("status".into(), word);
             obj.insert("program".into(), program_of(&report, running_argv(obj)));
             obj.insert("report".into(), report);
@@ -2313,6 +2317,7 @@ impl AppWindow {
             if let Some(a) = obj.get("address").and_then(Value::as_str) {
                 live.insert(a.to_owned(), Value::Object(obj.clone()));
             }
+            obj.remove(crate::hc::AGENT_SINCE);
         }
         self.live = live;
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
@@ -2965,25 +2970,16 @@ impl AppWindow {
 
     /// An explicit terminal.kill follows sub-agents until it reaches one placed in the window.
     fn kill_tree(&mut self, address: &str, cx: &mut Context<Self>) {
-        let mut doomed = vec![address.to_owned()];
-        let mut i = 0;
-        while i < doomed.len() {
-            let parent = doomed[i].clone();
-            for (addr, rec) in &self.live {
-                let child = rec.get("parent").and_then(Value::as_str) == Some(parent.as_str());
-                if child && !doomed.contains(addr)
-                    && self.model.pane_of(addr).is_none()
-                    && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
-                {
-                    doomed.push(addr.clone());
-                }
-            }
-            i += 1;
-        }
+        let doomed = kill_targets(vec![address.to_owned()], &self.model, &self.live, |_| true);
         self.kill(doomed, cx);
     }
 
-    /// Kill the selected terminals. Core handles their parent-lifetime rules.
+    fn close_terminals(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
+        let legacy = |address: &str| legacy_terminal_core(address, &self.core.hello, &self.documents);
+        let doomed = kill_targets(addresses, &self.model, &self.live, legacy);
+        self.kill(doomed, cx);
+    }
+
     fn kill(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
         self.closing_terminals.extend(addresses.iter().cloned().map(|a| (a, false)));
         // Off the UI thread: a kill waits for the program to go, and for slow machines.
@@ -3213,7 +3209,7 @@ impl AppWindow {
                     return;
                 }
                 let addrs = self.model.remove_space(&id);
-                self.kill(addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -3266,7 +3262,7 @@ impl AppWindow {
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -3346,7 +3342,7 @@ impl AppWindow {
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
-                self.kill(addr.into_iter().collect(), cx);
+                self.close_terminals(addr.into_iter().collect(), cx);
             }
             "pane.zoom" => {
                 if let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) {
@@ -3504,6 +3500,17 @@ impl AppWindow {
                     }
                     self.focused_pane = None;
                 }
+            }
+            "terminal.send_key" => {
+                let Some(keys) = Self::arg(a, "keys") else { return self.fail("terminal.send_key keys must be a string") };
+                let view = match Self::arg(a, "terminal") {
+                    Some(address) => self.shown_terminal_view(address, window, cx),
+                    None => self.focused_terminal(window, cx).map(|t| t.view.clone()).ok_or_else(|| "no focused terminal to send a key to".into()),
+                };
+                if let Err(error) = view.and_then(|view| view.update(cx, |view, cx| view.send_key(keys, cx))) {
+                    self.fail(error);
+                }
+                return;
             }
             "terminal.search" => {
                 let Some(t) = self.focused_terminal(window, cx) else { return self.fail("no focused terminal to search") };
@@ -5549,6 +5556,33 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
 }
 
 /// What a terminal runs now (core's `foreground`), else what it started with.
+fn legacy_terminal_core(address: &str, hello: &Value, documents: &BTreeMap<String, crate::mirror_sync::Slot>) -> bool {
+    match address.split_once('/') {
+        Some((machine, _)) => documents.get(machine).is_some_and(|slot| slot.legacy_child_lifetime),
+        None => crate::hc::legacy_child_lifetime(&hello["version"]),
+    }
+}
+
+fn kill_targets(mut doomed: Vec<String>, model: &Model, live: &HashMap<String, Value>, walk: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut i = 0;
+    while i < doomed.len() {
+        let parent = doomed[i].clone();
+        i += 1;
+        if !walk(&parent) { continue; }
+        for (addr, rec) in live {
+            if rec["parent"].as_str() == Some(parent.as_str())
+                && walk(addr)
+                && !doomed.contains(addr)
+                && model.pane_of(addr).is_none()
+                && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
+            {
+                doomed.push(addr.clone());
+            }
+        }
+    }
+    doomed
+}
+
 fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
 }
@@ -5754,7 +5788,7 @@ impl Render for AppWindow {
 }
 
 fn invalidate_asset(path: &std::path::Path, window: &mut Window, cx: &mut gpui::App) {
-    let key = gpui_shell::AppAssets::cache_key(&path.to_string_lossy());
+    let key = herdr_shell::AppAssets::cache_key(&path.to_string_lossy());
     invalidate_image(&gpui::Resource::Embedded(key.clone()), window, cx);
     window.invalidate_svg(&key);
 }
@@ -5806,6 +5840,39 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn close_only_walks_hidden_children_on_older_cores() {
+        use super::{Model, Tab, kill_targets, legacy_terminal_core};
+        use serde_json::json;
+
+        let mut model = Model::default();
+        model.add_space("s", "", "", Tab::new("tab", "", "pane", "old/t4"));
+        let live = [
+            ("t2", json!({"parent": "t1", "die_with_parent": false})),
+            ("old/t2", json!({"parent": "old/t1", "die_with_parent": false})),
+            ("old/t3", json!({"parent": "old/t2"})),
+            ("old/t4", json!({"parent": "old/t1"})),
+            ("old/t5", json!({"parent": "old/t4"})),
+            ("old/t6", json!({"parent": "old/t1", "labels": {"herdr.space": "other"}})),
+            ("new/t2", json!({"parent": "new/t1", "die_with_parent": false})),
+            ("new/t3", json!({"parent": "old/t1", "die_with_parent": false})),
+        ].into_iter().map(|(address, record)| (address.to_owned(), record)).collect();
+        let documents = [("old", "0.1.11"), ("new", "0.1.13")].into_iter().map(|(name, version)| {
+            let mut slot = crate::mirror_sync::Slot::default();
+            slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&json!(version));
+            (name.to_owned(), slot)
+        }).collect();
+        let close = |version| {
+            let hello = json!({"version": version});
+            let roots = ["t1", "old/t1", "new/t1"].map(str::to_owned).to_vec();
+            let mut targets = kill_targets(roots, &model, &live, |address| legacy_terminal_core(address, &hello, &documents));
+            targets.sort();
+            targets
+        };
+        assert_eq!(close("hc 0.1.12"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1", "t2"]);
+        assert_eq!(close("hc 0.1.13"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1"]);
+    }
 
     #[test]
     fn core_error_dismissal_survives_failed_retries_but_resets_after_recovery() {
@@ -6112,7 +6179,7 @@ mod tests {
         }
         drop(encoder);
         image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])).save(&png).unwrap();
-        let assets = gpui_shell::AppAssets::new(home.clone());
+        let assets = herdr_shell::AppAssets::new(home.clone());
         assert_eq!(
             assets.image_resource(&Resource::Path(gif.clone().into())),
             Resource::Path(gif.clone().into())
@@ -6190,7 +6257,7 @@ mod tests {
 
     #[test]
     fn asset_cache_keys_match_file_events_without_requiring_the_file() {
-        use gpui_shell::AppAssets;
+        use herdr_shell::AppAssets;
         let expected = AppAssets::cache_key("mods/probe/icon.svg");
         for alias in ["./mods/probe/icon.svg", "/mods/probe/icon.svg", "mods//probe/./icon.svg"] {
             assert_eq!(AppAssets::cache_key(alias), expected);
@@ -7316,12 +7383,12 @@ mod tests {
         let running = |cx: &mut gpui::VisualTestContext| roots.iter().filter(|r| r.read_with(cx, |r, _| r.toast_clock_running())).count();
         assert_eq!(running(cx), 0, "no toasts, no clock");
         let root = roots[0].clone();
-        cx.update(|window, cx| root.update(cx, |r, cx| r.push_toast(gpui_shell::ToastRequest::new("Saved"), window, cx)));
+        cx.update(|window, cx| root.update(cx, |r, cx| r.push_toast(herdr_shell::ToastRequest::new("Saved"), window, cx)));
         assert_eq!(running(cx), 1, "a toast starts its root's clock, and only its");
-        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT / 2);
+        cx.executor().advance_clock(herdr_shell::ToastRequest::DEFAULT_TIMEOUT / 2);
         cx.run_until_parked();
         assert_eq!((running(cx), root.read_with(cx, |r, _| r.toast_count())), (1, 1), "still up, still ticking");
-        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT * 2);
+        cx.executor().advance_clock(herdr_shell::ToastRequest::DEFAULT_TIMEOUT * 2);
         cx.run_until_parked();
         assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
         assert_eq!(running(cx), 0, "and the clock stopped with it");
@@ -7554,6 +7621,137 @@ export default class Probe extends View {
             let focused = crate::mods::shared("probe.focused").unwrap();
             assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
         }
+    }
+
+    #[test]
+    fn terminal_rows_reads_the_current_view_without_reacting_to_output() {
+        in_own_process("terminal_rows_host_bridge");
+    }
+
+    #[gpui::test]
+    fn terminal_rows_host_bridge(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("terminal_rows_host_bridge") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { nextCommand, setShared, terminalRows } from "herdr";
+
+export default class Probe extends View {
+  init(_, cx) {
+    cx.spawn(async () => {
+      for (;;) {
+        const command = await nextCommand();
+        if (command === "read") {
+          setShared("probe.rows", terminalRows("t1", 0, 1));
+        } else if (command === "validate") {
+          const rejected = [[-1, 1], [0.5, 1], [0, -1], [0, 0.5]].map(([from, count]) => {
+            try { terminalRows("t1", from, count); } catch (_) { return true; }
+            return false;
+          });
+          setShared("probe.rejected", rejected);
+        } else if (command === "remember") {
+          this.before = this.renders;
+        } else if (command === "compare") {
+          setShared("probe.stable", this.before > 0 && this.renders === this.before);
+        }
+      }
+    });
+  }
+  render() {
+    this.renders = (this.renders ?? 0) + 1;
+    terminalRows("t1", 0, 1);
+    return div();
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "row-probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                {"id": "main", "type": "block", "content": {"tab": "active"}},
+                {"id": "probe", "type": "block", "content": {"mod": "row-probe"}}
+            ],
+            "floating": [{"id": "float", "content": {"terminal": "t1"}}]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.add_tab("s1", crate::model::Tab::new("b", "b", "pb", "t2"));
+            this.model.select_tab("a");
+            for address in ["t1", "t2"] {
+                this.live.insert(address.into(), json!({"address": address}));
+            }
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        let (pane, float) = view.update(cx, |this, _| {
+            (this.terms["pa"].view.clone(), this.terms["float:float"].view.clone())
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |term, cx| {
+                term.ingest_test_output(format!("界{}", "\r\nhistory".repeat(60)).as_bytes(), cx);
+                term.focus_handle().focus(window, cx);
+            });
+            float.update(cx, |term, cx| term.ingest_test_output(b"float", cx));
+            view.update(cx, |this, cx| this.scroll_terminal(&json!({"terminal": "t1", "to": "top"}), window, cx).unwrap());
+        });
+        cx.run_until_parked();
+
+        let command = |cx: &mut gpui::VisualTestContext, command| {
+            assert!(crate::mods::send_command("row-probe", command));
+            cx.run_until_parked();
+        };
+        let read = |cx: &mut gpui::VisualTestContext| {
+            command(cx, "read");
+            crate::mods::shared("probe.rows").unwrap()
+        };
+        let rows = read(cx);
+        assert_eq!(rows["rows"][0]["cells"][0], json!({"text": "界", "wide": true}));
+        assert_eq!(rows["rows"][0]["wrapped"], false);
+        assert!(rows["total"].as_u64().unwrap() >= 61);
+        command(cx, "validate");
+        assert_eq!(crate::mods::shared("probe.rejected"), Some(json!([true, true, true, true])));
+
+        let from_bottom = pane.update(cx, |term, _| term.scroll_metrics().unwrap().from_bottom);
+        command(cx, "remember");
+        pane.update(cx, |term, cx| term.ingest_test_output(b"\r\nmore", cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(40));
+        cx.run_until_parked();
+        assert!(pane.update(cx, |term, _| term.scroll_metrics().unwrap().from_bottom) > from_bottom);
+        command(cx, "compare");
+        assert_eq!(crate::mods::shared("probe.stable"), Some(json!(true)), "output repainted the terminal without refreshing a row reader");
+
+        cx.update(|window, cx| float.update(cx, |term, cx| term.focus_handle().focus(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(read(cx)["rows"][0]["cells"][0]["text"], "f", "prefer the view with keyboard focus");
+        cx.update(|window, cx| view.update(cx, |this, cx| this.focus.focus(window, cx)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            for term in [&pane, &float] {
+                assert!(term.read(cx).on_screen_this_frame());
+                assert!(!term.read(cx).owns_keyboard_focus(window, cx));
+            }
+        });
+        assert_eq!(read(cx)["rows"][0]["cells"][0]["text"], "界", "prefer the owning pane when both views are equally visible");
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.select_tab("b");
+            this.sync(window, cx);
+            this.terms["pb"].focus.focus(window, cx);
+        }));
+        cx.run_until_parked();
+        assert_eq!(read(cx)["rows"][0]["cells"][0]["text"], "f", "prefer the visible view to the hidden owning pane");
+
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.chrome.floating.clear();
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        assert_eq!(read(cx)["rows"][0]["cells"][0]["text"], "界");
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.remove_tab("a");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        assert_eq!(read(cx), serde_json::Value::Null);
+        drop((pane, float)); // Detached views still exist when the mod receives null.
     }
 
     #[test]

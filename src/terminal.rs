@@ -155,6 +155,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    /// That drag began with Shift+click on a selection: it moves the selection's end.
+    extending: bool,
     published_selection: Option<vt::SelectionPositions>,
     /// A scroll thumb drag is: the px into the thumb it was grabbed at.
     scrollbar_grab: Option<f32>,
@@ -310,6 +312,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            extending: false,
             published_selection: None,
             scrollbar_grab: None,
             selection_pointer: Point::default(),
@@ -557,6 +560,11 @@ impl TerminalView {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn ingest_test_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        assert!(self.ingest([Stream::Data(bytes.to_vec())], cx));
+    }
+
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
@@ -700,7 +708,7 @@ impl TerminalView {
         }
     }
 
-    fn dropped_from_mod(&mut self, paths: &gpui_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
+    fn dropped_from_mod(&mut self, paths: &herdr_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
         match drag_paths::same_machine(paths, &self.address) {
             Ok(same) => {
                 self.focus.focus(window, cx);
@@ -874,7 +882,11 @@ impl TerminalView {
                     None => "cell",
                     Some(value) => value.as_str().ok_or("terminal.select mode is cell, word or line")?,
                 };
-                grid.vt.select_at(at, mode)?;
+                let to = args.get("to").map(|value| {
+                    serde_json::from_value::<vt::CellPosition>(value.clone())
+                        .map_err(|_| "terminal.select to is {row, col} with nonnegative whole numbers")
+                }).transpose()?;
+                grid.vt.select_at(at, to, mode)?;
             }
             "terminal.adjust_selection" => {
                 let direction = args.get("direction").and_then(serde_json::Value::as_str).ok_or("terminal.adjust_selection needs a direction")?;
@@ -1013,6 +1025,15 @@ impl TerminalView {
         }));
     }
 
+    pub fn send_key(&mut self, keys: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let event = synthetic_key(keys)?;
+        if self.grid.borrow().channel.is_none() {
+            return Err(format!("terminal {:?} has no attached input channel", self.address));
+        }
+        self.send_key_event(&event, true, cx);
+        Ok(())
+    }
+
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
             self.close_search(window, cx);
@@ -1024,16 +1045,23 @@ impl TerminalView {
             // leak its keystrokes into the shell running in this terminal.
             return;
         }
+        if self.send_key_event(ev, false, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    fn send_key_event(&mut self, ev: &KeyDownEvent, force_alt: bool, cx: &mut Context<Self>) -> bool {
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
             self.clear_selection(cx);
         }
-        let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
+        let bytes = key_bytes_with_alt_override(&mut self.grid.borrow_mut().vt, ev, force_alt);
         if let Some(bytes) = bytes {
             self.send(&bytes);
-            cx.stop_propagation();
+            return true;
         }
+        false
     }
 
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -1083,6 +1111,10 @@ impl TerminalView {
         drop(g);
         self.publish_scroll_if_changed(cx);
         cx.notify();
+    }
+
+    pub fn text_rows(&self, from: u64, count: u64) -> vt::TextRows {
+        self.grid.borrow().vt.text_rows(from, count)
     }
 
     /// History scroll metrics for mods (`panes().scroll`). None on the alternate screen.
@@ -1155,14 +1187,14 @@ impl TerminalView {
                 return None;
             }
             if let Some(range) = links::find(text, at) {
-                let link = links::resolve(&text[range.clone()], cwd);
+                let link = links::resolve(&text[range.clone()], cwd, remote);
                 let eligible = match scan {
                     LinkScan::Plain => link.native.is_some(),
                     LinkScan::Joined => matches!(link.native, Some(links::Target::File(_))),
                     LinkScan::Unresolved => link.native.is_none(),
                 };
                 if eligible {
-                    target = Some(LinkTarget::External(link.click(remote, &active)?));
+                    target = Some(LinkTarget::External(link.click(&active)?));
                     return Some(range);
                 }
             }
@@ -1175,13 +1207,20 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 bypasses text detection. The URI is already the full destination.
-        let target = target.or_else(|| links::resolve(&hit.target, cwd).click(remote, &active).map(LinkTarget::External))?;
+        let target = target.or_else(|| links::resolve(&hit.target, cwd, remote).click(&active).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
-    fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    /// Starts a mouse selection. With `extend` (a single Shift+click) and a selection on
+    /// screen, the press moves that selection's end instead, as in Terminal.app.
+    fn start_selection(&mut self, pos: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         self.selecting = true;
         self.selection_pointer = pos;
+        self.extending = extend && self.selection().is_some();
+        if self.extending {
+            // This press bypasses the normal gesture, so end its click sequence.
+            self.grid.borrow_mut().vt.reset_selection_gesture();
+        }
         self.select(Select::Press, pos, cx);
         self.selection_scroll = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -1215,7 +1254,9 @@ impl TerminalView {
         if let Some(pos) = pos {
             drop(g);
             self.select(Select::Release, pos, cx);
+            self.extending = false;
         } else {
+            self.extending = false;
             g.vt.clear_selection();
             drop(g);
             self.selection_changed(cx);
@@ -1230,7 +1271,11 @@ impl TerminalView {
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
         let (col, row) = ((x / cw) as u16, (y / ch) as u16);
         let height = ch * g.vt.rows as f32;
-        g.vt.select(step, col, row, x, y, cw, height);
+        if self.extending {
+            g.vt.extend_selection(col, row);
+        } else {
+            g.vt.select(step, col, row, x, y, cw, height);
+        }
         drop(g);
         self.selection_changed(cx);
         if matches!(step, Select::Release) {
@@ -1626,9 +1671,35 @@ fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> 
     key_bytes(vt, &KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
 }
 
+fn synthetic_key(keys: &str) -> Result<KeyDownEvent, String> {
+    let invalid = || format!("unknown terminal key {keys:?}; use one key in keys.json syntax");
+    let mut keystroke = Keystroke::parse(keys).map_err(|_| invalid())?;
+    let (key, shifted, base) = map_key(&keystroke.key).ok_or_else(invalid)?;
+    if key == GHOSTTY_KEY_UNIDENTIFIED || keystroke.key_char.is_some() {
+        return Err(invalid());
+    }
+    let modifiers = keystroke.modifiers;
+    if !(modifiers.control || cfg!(target_os = "macos") && modifiers.platform) {
+        keystroke.key_char = base.map(|base| {
+            let text = if shifted || modifiers.shift {
+                SHIFTED_KEYS.iter().find(|(_, unshifted)| *unshifted == base)
+                    .map_or_else(|| base.to_ascii_uppercase(), |(shifted, _)| *shifted)
+            } else {
+                base
+            };
+            text.to_string()
+        });
+    }
+    Ok(KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
+}
+
 /// What a key press sends to the program: the key described to libghostty,
 /// which encodes it once, in the mode the program asked for (as Ghostty does).
 fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
+    key_bytes_with_alt_override(vt, ev, false)
+}
+
+fn key_bytes_with_alt_override(vt: &mut vt::Vt, ev: &KeyDownEvent, force_alt: bool) -> Option<Vec<u8>> {
     // GPUI sets this preference on replayed shortcut prefixes too; only
     // Windows' native composition previews defer to the text input handler.
     #[cfg(windows)]
@@ -1695,7 +1766,9 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     // That text can be ASCII too (Slovenian Shift-Option-2 -> "@").
     // Other platforms keep Alt shortcuts unless they produced non-ASCII text.
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
-    let option_as_alt = {
+    // A named Alt stroke carries a modifier without native Option text.
+    let force_alt = force_alt && m.alt;
+    let option_as_alt = force_alt || {
         #[cfg(target_os = "macos")]
         { gpui_macos::option_as_alt().uses_alt(k.option_side) }
         #[cfg(not(target_os = "macos"))]
@@ -1704,7 +1777,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_empty() && (cfg!(target_os = "macos") || !t.is_ascii())) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
-    Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
+    Some(vt.encode_key_with_alt_override(key, mods, consumed, text.as_deref(), unshifted, force_alt))
 }
 
 fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bool, legacy: Vec<u8>) -> Vec<u8> {
@@ -1714,6 +1787,12 @@ fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bo
     let encoded = vt.encode_key(key, mods, 0, Some(text), text.chars().next());
     if encoded.starts_with(b"\x1b[27;") { encoded } else { legacy }
 }
+
+const SHIFTED_KEYS: &[(char, char)] = &[
+    ('~', '`'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'),
+    ('*', '8'), ('(', '9'), (')', '0'), ('_', '-'), ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'),
+    (':', ';'), ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'),
+];
 
 fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     let named = match key {
@@ -1745,12 +1824,7 @@ fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     }
     let mut chars = key.chars();
     let (Some(c), None) = (chars.next(), chars.next()) else { return None };
-    const SHIFTED: &[(char, char)] = &[
-        ('~', '`'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'),
-        ('*', '8'), ('(', '9'), (')', '0'), ('_', '-'), ('+', '='), ('{', '['), ('}', ']'), ('|', '\\'),
-        (':', ';'), ('"', '\''), ('<', ','), ('>', '.'), ('?', '/'),
-    ];
-    let (base, shifted) = match SHIFTED.iter().find(|(s, _)| *s == c) {
+    let (base, shifted) = match SHIFTED_KEYS.iter().find(|(s, _)| *s == c) {
         Some((_, b)) => (*b, true),
         None => (c, false),
     };
@@ -1957,7 +2031,7 @@ fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowText
 
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
-    Bg { from: usize, to: usize, color: Hsla },
+    Bg { from: usize, to: usize, color: Hsla, selected: bool },
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
@@ -1979,10 +2053,11 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             continue;
         };
         let start = x;
-        while x < row.len() && row[x].bg == Some(bg) {
+        let selected = row[x].selected;
+        while x < row.len() && row[x].bg == Some(bg) && row[x].selected == selected {
             x += 1;
         }
-        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg) });
+        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg), selected });
     }
     let mut x = 0;
     while x < row.len() {
@@ -2106,6 +2181,13 @@ fn find_input_style() -> InputEditorStyle {
 }
 
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+    #[derive(PartialEq)]
+    enum ImageLayer {
+        BelowBackground,
+        BelowText,
+        AboveText,
+    }
+
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
@@ -2120,7 +2202,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.origin = origin;
     let frame = g.vt.frame();
     let placements = g.vt.placements();
-    let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
+    let mut images = Vec::new();
     let mut keep = std::collections::HashSet::new();
     for p in &placements {
         let key = (p.image, p.generation, p.source);
@@ -2132,16 +2214,17 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             g.images.insert(key, Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])));
         }
         if let Some(img) = g.images.get(&key) {
-            let [x, y, mut width, mut height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height));
-            if p.cell_pixels.is_none() {
-                // Direct placements are in device pixels.
-                width /= scale;
-                height /= scale;
-            }
+            let [x, y, width, height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height), scale);
             let pos = origin + point(px(x), px(y));
-            // Placeholder runs contain no text and must cover explicit cell backgrounds.
-            let below = p.z < 0 && p.cell_pixels.is_none();
-            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
+            // Placeholder runs contain no text and keep their fixed layer.
+            let layer = if p.cell_pixels.is_some() || p.z >= 0 {
+                ImageLayer::AboveText
+            } else if p.z < i32::MIN / 2 {
+                ImageLayer::BelowBackground
+            } else {
+                ImageLayer::BelowText
+            };
+            images.push((layer, Bounds::new(pos, size(px(width), px(height))), img.clone()));
         }
     }
     g.images.retain(|k, _| keep.contains(k));
@@ -2157,14 +2240,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let (y0, y1) = (snap(b.origin.y), snap(b.origin.y + b.size.height));
         Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
     };
-    let paint_images = |below: bool, window: &mut Window| {
-        for (image_below, b, img) in &images {
-            if *image_below == below {
+    let paint_images = |layer: ImageLayer, window: &mut Window| {
+        for (image_layer, b, img) in &images {
+            if *image_layer == layer {
                 let _ = window.paint_image(*b, *b, Corners::default(), img.clone(), 0, false);
             }
         }
     };
-    paint_images(true, window);
+    paint_images(ImageLayer::BelowBackground, window);
 
     // Each row's drawing is built once and painted again while the row is the
     // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
@@ -2192,19 +2275,25 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         }
     }
 
-    // Paint all program backgrounds first, then search overlays, then text.
-    // This lets a match highlight sit below glyphs without contaminating
-    // cached RowOps or the terminal's own selection/copy state.
+    let mut selection = Vec::new();
     for (y, (_, ops, _)) in painted.iter().enumerate() {
         for op in ops {
-            match op {
-                RowOp::Bg { from, to, color } => {
-                    let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
-                    window.paint_quad(fill(snap_box(b), *color));
+            if let RowOp::Bg { from, to, color, selected } = op {
+                let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
+                let quad = fill(snap_box(b), *color);
+                if *selected {
+                    selection.push(quad);
+                } else {
+                    window.paint_quad(quad);
                 }
-                _ => {}
             }
         }
+    }
+    paint_images(ImageLayer::BelowText, window);
+
+    // Keep selection and search highlights visible over negative-z images.
+    for quad in selection {
+        window.paint_quad(quad);
     }
     for selected in [false, true] {
         for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
@@ -2294,7 +2383,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         window.paint_quad(fill(snap_box(line), color));
     }
 
-    paint_images(false, window);
+    paint_images(ImageLayer::AboveText, window);
 
     if let Some(cur) = frame.cursor {
         let (x, y) = (cur.x as usize, cur.y as usize);
@@ -2493,7 +2582,7 @@ impl Render for TerminalView {
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
-            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+            .on_action(cx.listener(|this, a: &herdr_shell::action::ShellAction, window, cx| {
                 if this.find_field_focused(window, cx) {
                     let action: Option<Box<dyn gpui::Action>> = match a.id() {
                         "terminal.copy" => Some(Box::new(gpui_base::input::Copy)),
@@ -2570,7 +2659,7 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
-                    this.start_selection(ev.position, cx);
+                    this.start_selection(ev.position, ev.modifiers.shift && ev.click_count <= 1, cx);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse
@@ -2685,12 +2774,15 @@ impl Render for TerminalView {
                         .debug_selector(|| "find-bar".to_owned())
                         .absolute()
                         .top_2()
-                        .right_2()
-                        .w_full()
+                        .left_0()
+                        .right_0()
+                        .ml_auto()
+                        .mr_2()
                         .max_w(px(460.0))
-                        .h(px(38.0))
-                        .gap_1()
+                        .min_h(px(38.0))
                         .items_center()
+                        .justify_end()
+                        .overflow_hidden()
                         .px_1()
                         .rounded_md()
                         .border_1()
@@ -2698,12 +2790,34 @@ impl Render for TerminalView {
                         .bg(crate::settings::color("popover"))
                         .shadow_md()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(div().flex_1().min_w(px(48.0)).h_full().child(Input::new(&input)))
-                        .child(div().w(px(58.0)).text_xs().text_color(crate::settings::color("muted")).child(search_label))
+                        .child(div().flex_1().min_w(px(48.0)).self_stretch().child(Input::new(&input)))
+                        .when(!search_label.is_empty(), |bar| {
+                            bar.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_initial()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    // Keep the preferred slot and its gap shrinkable together.
+                                    .child(div().ml_1().w(px(58.0)).h_0())
+                                    .child(
+                                        div()
+                                            .pl_1()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(crate::settings::color("muted"))
+                                            .child(search_label),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
                                 .id(SharedString::from(format!("find-next-{address}")))
                                 .debug_selector(|| "find-up".to_owned())
+                                .flex_none()
+                                .ml_1()
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .flex()
@@ -2722,6 +2836,8 @@ impl Render for TerminalView {
                             div()
                                 .id(SharedString::from(format!("find-prev-{address}")))
                                 .debug_selector(|| "find-down".to_owned())
+                                .flex_none()
+                                .ml_1()
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .flex()
@@ -2739,6 +2855,8 @@ impl Render for TerminalView {
                         .child(
                             div()
                                 .id(SharedString::from(format!("find-close-{address}")))
+                                .flex_none()
+                                .ml_1()
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .flex()
@@ -3013,6 +3131,78 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shift_click_extends_a_mouse_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx);
+            terminal.grid.borrow_mut().vt.write(b"alpha beta gamma\r\nsecond row here\r\nthird row");
+            terminal
+        })));
+        cx.run_until_parked();
+        let at = |cx: &mut gpui::VisualTestContext, col: f32, row: f32| root.read_with(cx, |root, cx| {
+            let g = root.0.read(cx).grid.borrow();
+            point(g.origin.x + g.cell.width * (col + 0.25), g.origin.y + g.cell.height * (row + 0.5))
+        });
+        let selected = |cx: &mut gpui::VisualTestContext| root.read_with(cx, |root, cx| {
+            root.0.read(cx).grid.borrow().vt.selection_text()
+        });
+        let shift = Modifiers { shift: true, ..Default::default() };
+
+        // A drag takes a cell once the pointer passes its middle.
+        let (from, to) = (at(cx, 6., 0.), at(cx, 9.5, 0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+
+        let far = at(cx, 5., 1.);
+        cx.simulate_mouse_down(far, MouseButton::Left, shift);
+        cx.simulate_mouse_up(far, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"), "Shift+click keeps the start and moves the end");
+
+        // In a program that tracks the mouse, Shift keeps the click Herdr's and still extends.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        let back = at(cx, 0., 0.);
+        cx.simulate_mouse_down(back, MouseButton::Left, shift);
+        cx.simulate_mouse_up(back, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("alpha b"), "clicking before the start reverses it");
+
+        // A plain click still starts over.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000l\x1b[?1006l")));
+        cx.simulate_mouse_down(far, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx), None);
+
+        let click = |cx: &mut gpui::VisualTestContext, pos, modifiers| {
+            cx.simulate_mouse_down(pos, MouseButton::Left, modifiers);
+            cx.simulate_mouse_up(pos, MouseButton::Left, modifiers);
+        };
+        click(cx, from, Modifiers::default());
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+        click(cx, far, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"));
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx), None, "the Shift+click ended the earlier click sequence");
+
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        for (click_count, expected) in [(1, None), (2, Some("gamma")), (3, Some("alpha beta gamma"))] {
+            let position = at(cx, 13., 0.);
+            cx.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers: shift, click_count, first_mouse: false });
+            cx.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers: shift, click_count });
+            assert_eq!(selected(cx).as_deref(), expected, "Shift+click count {click_count} with mouse tracking");
+        }
+    }
+
+    #[gpui::test]
     fn each_terminal_keeps_its_find_bar_inside_its_own_pane(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
@@ -3167,6 +3357,21 @@ mod tests {
             let selection = terminal.selection().unwrap();
             assert_eq!(selection.start, crate::vt::CellPosition { row: 1, col: 11 });
             assert_eq!(selection.end, selection.start);
+
+            let at = serde_json::json!({"row": 0, "col": 6});
+            let to = serde_json::json!({"row": 1, "col": 5});
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": at, "to": to}), cx).unwrap();
+            let expected = crate::vt::SelectionPositions {
+                start: crate::vt::CellPosition { row: 0, col: 6 },
+                end: crate::vt::CellPosition { row: 1, col: 5 },
+            };
+            assert_eq!(terminal.selection(), Some(expected));
+            for to in [serde_json::json!({"row": -1, "col": 0}), serde_json::json!({"row": 0.5, "col": 0}), serde_json::json!("cursor")] {
+                assert!(terminal.selection_command("terminal.select", &serde_json::json!({"to": to}), cx).is_err());
+                assert_eq!(terminal.selection(), Some(expected));
+            }
+            assert!(terminal.copy(cx));
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("world\nsecond"));
         });
     }
 
@@ -3201,7 +3406,7 @@ mod tests {
     fn macos_edit_menu_follows_keyboard_focus(cx: &mut gpui::TestAppContext) {
         use gpui::*;
         use gpui_base::input::{Input, InputState};
-        use gpui_shell::action::ShellAction;
+        use herdr_shell::action::ShellAction;
 
         struct Root {
             terminal: Entity<super::TerminalView>,
@@ -3341,7 +3546,7 @@ mod tests {
         impl Render for Root {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 div().key_context("Herdr").size_full()
-                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                    .on_action(cx.listener(|this, action: &herdr_shell::action::ShellAction, _, cx| {
                         match action.id() {
                             "terminal.paste" => this.0.update(cx, |terminal, cx| terminal.paste(cx)),
                             "terminal.copy" => { this.0.update(cx, |terminal, cx| terminal.copy(cx)); }
@@ -3611,7 +3816,7 @@ mod tests {
                 div()
                     .key_context("Herdr")
                     .size_full()
-                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, window, cx| {
+                    .on_action(cx.listener(|this, action: &herdr_shell::action::ShellAction, window, cx| {
                         if action.id() == "terminal.search" {
                             this.0.update(cx, |terminal, cx| terminal.open_search(window, cx));
                         } else {
@@ -3844,6 +4049,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kitty_images_stack_with_cell_backgrounds_and_glyphs_by_z() {
+        use super::*;
+        use base64::Engine as _;
+
+        struct KittyGrid(Rc<RefCell<Grid>>);
+        impl Render for KittyGrid {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let grid = self.0.clone();
+                canvas(|_, _, _| {}, move |bounds, _, window, cx| {
+                    paint_grid(bounds, &grid, false, window, cx);
+                }).size_full()
+            }
+        }
+
+        let platform = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT));
+        TextSystem::new(platform.clone()).add_fonts(vec![
+            std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf")),
+        ]).unwrap();
+        let mut cx = HeadlessAppContext::with_platform(platform, Arc::new(()), gpui_platform::current_headless_renderer);
+        let window = cx.open_window(size(px(160.), px(100.)), |window, cx| {
+            let view = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (6, 3), cx));
+            let grid = view.read(cx).grid.clone();
+            {
+                let mut grid = grid.borrow_mut();
+                grid.fit(6, 3, size(px(9.), px(18.)), window.scale_factor());
+                let solid = |rgb: [u8; 3]| base64::engine::general_purpose::STANDARD.encode(rgb.repeat(16));
+                let blue = solid([0, 0, 255]);
+                let green = solid([0, 255, 0]);
+                for (id, col, rows, z, payload) in [
+                    (1, 1, 3, -1073741825, &blue),
+                    (2, 2, 2, i32::MIN / 2, &blue),
+                    (3, 3, 3, -1, &blue),
+                    (4, 3, 2, -2, &green),
+                    (5, 4, 2, 0, &blue),
+                ] {
+                    grid.vt.write(format!("\x1b[1;{col}H\x1b_Ga=T,f=24,i={id},s=4,v=4,c=1,r={rows},C=1,z={z},q=2;{payload}\x1b\\").as_bytes());
+                }
+                grid.vt.write("\x1b[?25l\x1b[H\x1b[48;2;255;0;0m    \x1b[2;1H\x1b[38;2;255;255;255m████\x1b[0m\x1b[3;3H\x1b[38;2;255;255;255m▀".as_bytes());
+                let mut theme = vt::theme();
+                theme.selection_bg = vt::Rgb(255, 255, 0);
+                grid.vt.set_theme(theme);
+                grid.vt.select_at(Some(vt::CellPosition { row: 2, col: 2 }), None, "cell").unwrap();
+            }
+            cx.new(|_| KittyGrid(grid))
+        }).unwrap();
+        cx.update_window(window.into(), |view, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            let view = view.downcast::<KittyGrid>().unwrap();
+            let grid = view.read(cx).0.borrow();
+            let scale = window.scale_factor();
+            let pixel = |col: f32, row: f32| {
+                let x = f32::from(grid.origin.x + grid.cell.width * (col + 0.5)) * scale;
+                let y = f32::from(grid.origin.y + grid.cell.height * (row + 0.5)) * scale;
+                image.get_pixel(x as u32, y as u32).0
+            };
+            let blue = [0, 0, 255, 255];
+            let white = [255, 255, 255, 255];
+            assert_eq!(pixel(0., 0.), [255, 0, 0, 255], "deep negative image stays below the cell background");
+            assert_eq!(pixel(0., 2.), blue, "deep negative image remains visible on the default background");
+            assert_eq!(pixel(2., 2.25), [255, 255, 0, 255], "selection stays visible above the image at z=-1");
+            assert_eq!(pixel(2., 1.75), white, "selected glyph stays above the selection background");
+            assert_eq!(pixel(1., 0.), blue, "the cutoff itself is above the cell background");
+            assert_eq!(pixel(2., 0.), blue, "the higher negative z wins over the overlapping image");
+            assert_eq!(pixel(1., 1.), white, "glyph stays above the image at the cutoff");
+            assert_eq!(pixel(2., 1.), white, "glyph stays above the image at z=-1");
+            assert_eq!(pixel(3., 0.), blue, "image at z=0 covers the cell background");
+            assert_eq!(pixel(3., 1.), blue, "image at z=0 covers the glyph");
+        }).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -4623,6 +4901,55 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[test]
+    fn synthetic_keys_follow_the_terminal_keyboard_mode() {
+        for (setup, ctrl_b, shift_1, left) in [
+            (b"".as_slice(), b"\x02".as_slice(), b"!".as_slice(), b"\x1b[D".as_slice()),
+            (b"\x1b[>1u", b"\x1b[98;5u", b"!", b"\x1b[D"),
+            (b"\x1b[>9u", b"\x1b[98;5u", b"\x1b[49;2u", b"\x1b[D"),
+            (b"\x1b[?1h", b"\x02", b"!", b"\x1bOD"),
+        ] {
+            let mut vt = Vt::new(20, 3);
+            vt.write(setup);
+            for (spec, expected) in [("ctrl-b", ctrl_b), ("shift-1", shift_1), ("left", left)] {
+                let event = super::synthetic_key(spec).unwrap();
+                assert_eq!(super::key_bytes_with_alt_override(&mut vt, &event, true).as_deref(), Some(expected), "{spec}, setup={setup:?}");
+            }
+        }
+        for spec in ["ctrl-frobnicate", "ctrl-b ctrl-b", "b->text", ""] {
+            assert!(super::synthetic_key(spec).unwrap_err().contains("unknown terminal key"));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn synthetic_alt_keys_stay_alt_regardless_of_option_setting() {
+        use gpui_macos::OptionAsAlt;
+        use super::key_bytes_with_alt_override;
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        let event = super::synthetic_key("alt-b").unwrap();
+        for option in [OptionAsAlt::Left, OptionAsAlt::Right, OptionAsAlt::Both, OptionAsAlt::None] {
+            gpui_macos::set_option_as_alt(Some(option));
+            let mut vt = Vt::new(20, 3);
+            assert_eq!(key_bytes_with_alt_override(&mut vt, &event, true).unwrap(), b"\x1bb", "{option:?}");
+            vt.write(b"\x1b[>1u");
+            assert_eq!(key_bytes_with_alt_override(&mut vt, &event, true).unwrap(), b"\x1b[98;3u", "{option:?}");
+            if option == OptionAsAlt::None {
+                assert_eq!(key_bytes(&mut vt, &press("alt-b", Some("∫"))).unwrap(), "∫".as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_keys_follow_win32_input_mode() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?9001h");
+        let enter = super::synthetic_key("shift-enter").unwrap();
+        assert_eq!(super::key_bytes_with_alt_override(&mut vt, &enter, true).unwrap(), b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
+        vt.write(b"\x1b[>1u");
+        assert_eq!(super::key_bytes_with_alt_override(&mut vt, &enter, true).unwrap(), b"\x1b[13;2u");
     }
 
     #[test]
