@@ -730,7 +730,13 @@ impl WindowsWindowInner {
 
     fn handle_ime_composition(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
         let ctx = ImeContext::get(handle)?;
-        self.handle_ime_composition_inner(*ctx, lparam)
+        let result = self.handle_ime_composition_inner(*ctx, lparam);
+        // The caret moves as the composition string grows. Placing the candidate
+        // window only on WM_IME_STARTCOMPOSITION leaves it where typing began.
+        if result.is_some() {
+            self.handle_ime_position(handle);
+        }
+        result
     }
 
     fn handle_ime_composition_inner(&self, ctx: HIMC, lparam: LPARAM) -> Option<isize> {
