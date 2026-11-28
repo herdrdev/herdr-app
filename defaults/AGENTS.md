@@ -1285,7 +1285,7 @@ All of it is in `herdr.d.ts`. In short:
   clears it.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
-  sees it; setting re-renders all), `nextCommand()` (key commands for this
+  sees it; setting re-renders the copies that read that key), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
 
 Mods are trusted code: commands and network access (including `fetch`) are unrestricted.
