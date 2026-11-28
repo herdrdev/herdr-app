@@ -429,8 +429,11 @@ impl Model {
         let ci = p.tabs.iter().position(|c| c.id == ctx).unwrap();
         let removed = p.tabs.remove(ci);
         if p.active.as_deref() == Some(ctx) {
-            // The tab that slides into the slot, or the last one.
-            p.active = p.tabs.get(ci).or(p.tabs.last()).map(|c| c.id.clone());
+            // The tab that slides into the slot, or the last one. A settled tab
+            // is put away: it is shown only when no other tab is left.
+            let (before, after) = p.tabs.split_at(ci);
+            let shown = after.iter().chain(before.iter().rev()).find(|c| c.settled.is_none());
+            p.active = shown.or(p.tabs.get(ci)).or(p.tabs.last()).map(|c| c.id.clone());
         }
         let closed = p.tabs.is_empty();
         if closed {
@@ -861,6 +864,29 @@ mod tests {
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c2"));
         m.select_tab("c1");
         assert_eq!(m.tab("c1").unwrap().settled, None);
+    }
+
+    #[test]
+    fn closing_the_shown_tab_goes_past_settled_tabs() {
+        let mut m = model_with_one();
+        for (c, x, t) in [("c2", "x2", "t2"), ("c3", "x3", "t3"), ("c4", "x4", "t4")] {
+            m.add_tab_unselected("p1", Tab::new(c, "", x, t));
+        }
+        m.settle("c2", 5);
+        // The settled tab slides into the slot: the next one in the lists is shown.
+        m.remove_tab("c1");
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c3"));
+        assert_eq!(m.tab("c2").unwrap().settled, Some(5));
+        // Nothing after the closed tab: back past the settled one before it.
+        m.select_tab("c4");
+        m.settle("c3", 6);
+        m.unsettle("c2");
+        m.remove_tab("c4");
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c2"));
+        // Only a settled tab is left: it is shown, and stays settled.
+        m.remove_tab("c2");
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c3"));
+        assert_eq!(m.tab("c3").unwrap().settled, Some(6));
     }
 
     #[test]
