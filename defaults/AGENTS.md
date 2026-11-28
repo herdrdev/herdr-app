@@ -161,6 +161,11 @@ the highlighted line shows where it will land.
   `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
+  The Agents sidebar prefers each agent's pane name (`agents()[i].pane_name`,
+  from `pane.rename`). Without one, a row keeps the tab name or live title
+  it already used, and agents sharing a tab each keep their own title.
+  Clearing the name restores that label. A numeric, Unicode or repeated
+  pane name is shown as given.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). Parent addresses use
   the app's machine names, or a bare ID for this computer, when they can be

@@ -281,19 +281,24 @@ export default class Agents extends View {
         .when(!open, (el) => el.child(String(subs.length)));
     };
 
-    // A row reads "space \u00b7 detail": the detail is a tab someone named or the
-    // agent's own title, never an automatic tab number unless two rows would
-    // otherwise read the same.
+    // A row reads "space · detail": the agent's pane name (`pane_name`) when one
+    // is set, else a tab someone named or the agent's own title. An automatic
+    // tab number stays hidden unless two rows would otherwise read the same.
+    // A pane name of digits still shows: someone chose it.
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const leads = leadPanes(panes());
     const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
+    // `pane.rename` stores a trimmed name or null. Blank text is the same as none.
+    const paneName = (a) => (typeof a.pane_name === "string" ? a.pane_name.trim() : "");
     const labels = new Map(list.map(a => {
+      const named = paneName(a);
+      if (named) return [a.address, named];
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
       return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
     }));
     const label = (a) => labels.get(a.address);
-    const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
+    const detail = new Map(list.map(a => [a.address, (paneName(a) || !/^\d+$/.test(label(a))) ? label(a) : null]));
     const seen = {};
     for (const a of list) { const k = `${a.space_name}\u0000${detail.get(a.address) ?? ""}`; seen[k] = (seen[k] ?? 0) + 1; }
     for (const a of list) {
